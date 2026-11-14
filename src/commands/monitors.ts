@@ -5,6 +5,7 @@ import {
   notificationIdObject,
   parseId,
   parseNonNegativeInteger,
+  parseNonNegativeNumber,
   parsePort,
   parsePositiveInteger,
   parsePositiveNumber,
@@ -269,7 +270,7 @@ const HATCH_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unknow
   retryInterval: (v, k) => hatchNumber(v, k, parsePositiveNumber),
   resendInterval: (v, k) => hatchNumber(v, k, parseNonNegativeInteger),
   maxretries: (v, k) => hatchNumber(v, k, parseNonNegativeInteger),
-  timeout: (v, k) => hatchNumber(v, k, parsePositiveNumber),
+  timeout: (v, k) => hatchNumber(v, k, parseNonNegativeNumber),
   port: (v, k) => hatchNumber(v, k, parsePort),
   packetSize: (v, k) => hatchNumber(v, k, parsePositiveInteger),
   proxyId: (v, k) => (v === null ? null : hatchNumber(v, k, parseId)),
@@ -301,6 +302,20 @@ function validateHatchValues(fields: Record<string, unknown>): void {
     const check = HATCH_VALUE_CHECKS[key];
     if (check !== undefined) fields[key] = check(value, key);
   }
+}
+
+// retryInterval follows the interval and the timeout stays within 80% of
+// it; both derive from the final interval after the hatch had its say.
+// Explicit values from any source are kept; the cap applies to them exactly
+// like it did to the typed flags. A timeout of 0 is kept: Kuma reads it as
+// "80% of the interval" itself.
+function deriveMonitorTiming(monitor: Record<string, unknown>): void {
+  if (typeof monitor.interval !== "number") return;
+  monitor.retryInterval = monitor.retryInterval ?? monitor.interval;
+  monitor.timeout = Math.min(
+    typeof monitor.timeout === "number" ? monitor.timeout : 48,
+    Math.trunc(monitor.interval * 8) / 10,
+  );
 }
 
 const summarize = (m: Monitor) => ({
@@ -415,13 +430,21 @@ export function registerMonitors(program: Command): void {
       refuseSecretSets(sets);
       validateHatchValues(sets);
       validateHatchValues(fileConfig);
-      const hatchNotifications =
-        sets.notificationIDList !== undefined
-          ? sets.notificationIDList
-          : fileConfig.notificationIDList;
-      if (hatchNotifications !== undefined) checkNotificationIdList(hatchNotifications);
+      if (sets.notificationIDList !== undefined) {
+        checkNotificationIdList(sets.notificationIDList);
+      }
+      if (fileConfig.notificationIDList !== undefined) {
+        checkNotificationIdList(fileConfig.notificationIDList);
+      }
       const parentOpt = opts.parent === undefined ? undefined : parseParent(opts.parent);
-      // Precedence for parent: --set beats --config-file beats --parent.
+      if (
+        parentOpt !== undefined &&
+        (sets.parent !== undefined || fileConfig.parent !== undefined)
+      ) {
+        fail(2, "use either --parent or a parent key in --set/--config-file, not both");
+      }
+      // --parent and a hatch parent key are mutually exclusive (checked
+      // above); between the hatch sources --set beats --config-file.
       let parentInput: unknown;
       if (sets.parent !== undefined) {
         parentInput = sets.parent;
@@ -463,7 +486,7 @@ export function registerMonitors(program: Command): void {
         "--resend-interval",
       );
       const timeout =
-        opts.timeout === undefined ? undefined : parsePositiveNumber(opts.timeout, "--timeout");
+        opts.timeout === undefined ? undefined : parseNonNegativeNumber(opts.timeout, "--timeout");
       const proxyIdOption =
         opts.proxyId === undefined ? undefined : parseId(opts.proxyId, "--proxy-id");
       // dns defaults to resolver port 53 like the UI's type watcher; the other
@@ -479,6 +502,14 @@ export function registerMonitors(program: Command): void {
           ? parsePositiveInteger(opts.packetSize, "--packet-size")
           : undefined;
       const dockerHost = type === "docker" ? parseId(opts.dockerHost, "--docker-host") : undefined;
+      // A hatch can null out the host the flag supplied; docker still needs one.
+      // Precedence matches the merge below: --set beats --config-file beats the flag.
+      let mergedDockerHost: unknown = dockerHost;
+      if (fileConfig.docker_host !== undefined) mergedDockerHost = fileConfig.docker_host;
+      if (sets.docker_host !== undefined) mergedDockerHost = sets.docker_host;
+      if (type === "docker" && typeof mergedDockerHost !== "number") {
+        fail(2, "--type docker requires --docker-host");
+      }
       const notificationIds = ((opts.notificationId ?? []) as string[]).map((v) =>
         parseId(v, "--notification-id"),
       );
@@ -579,16 +610,7 @@ export function registerMonitors(program: Command): void {
       };
       if (normalizedParent !== undefined) monitor.parent = normalizedParent;
       monitor.notificationIDList = notificationIdObject(monitor.notificationIDList);
-      // retryInterval follows the interval and the timeout stays within 80%
-      // of it; both derive from the final interval after the hatch had its
-      // say. Explicit values from any source are kept; the cap applies to
-      // them exactly like it did to the typed flags.
-      const finalInterval = monitor.interval as number;
-      monitor.retryInterval = monitor.retryInterval ?? finalInterval;
-      monitor.timeout = Math.min(
-        typeof monitor.timeout === "number" ? monitor.timeout : 48,
-        Math.trunc(finalInterval * 8) / 10,
-      );
+      deriveMonitorTiming(monitor);
       if (normalizedParent !== undefined) checkParentGroup(s, normalizedParent);
       checkDockerHost(s, monitor.docker_host);
 
@@ -619,6 +641,12 @@ export function registerMonitors(program: Command): void {
         opts.configFile === undefined ? {} : readJsonFile(opts.configFile, "--config-file");
       const parentOpt = opts.parent === undefined ? undefined : parseParent(opts.parent);
       if (
+        parentOpt !== undefined &&
+        (sets.parent !== undefined || fileConfig.parent !== undefined)
+      ) {
+        fail(2, "use either --parent or a parent key in --set/--config-file, not both");
+      }
+      if (
         (opts.set as string[]).length === 0 &&
         Object.keys(fileConfig).length === 0 &&
         parentOpt === undefined
@@ -631,7 +659,8 @@ export function registerMonitors(program: Command): void {
       validateHatchValues(sets);
       validateHatchValues(fileConfig);
       // The parent checks run on the final merged value, whichever source set
-      // it: --parent beats --set beats --config-file.
+      // it: --parent and a hatch parent key are mutually exclusive (checked
+      // above); between the hatch sources --set beats --config-file.
       let parentInput: unknown;
       if (parentOpt !== undefined) {
         parentInput = parentOpt;
@@ -652,6 +681,11 @@ export function registerMonitors(program: Command): void {
       }
       const s = await connect();
       if (normalizedParent !== undefined) checkParentGroup(s, normalizedParent);
+      // Only a hatch-supplied docker_host is re-checked: the stored one already
+      // passed this check when the monitor was created or last edited.
+      const dockerHostInput =
+        sets.docker_host !== undefined ? sets.docker_host : fileConfig.docker_host;
+      if (dockerHostInput !== undefined) checkDockerHost(s, dockerHostInput);
       const fetched = await fetchMonitor(s, id);
       const monitor: Record<string, unknown> = { ...fetched };
       for (const [k, v] of Object.entries(fileConfig)) monitor[k] = v;
@@ -660,6 +694,13 @@ export function registerMonitors(program: Command): void {
       // Kuma iterates notificationIDList with for...in, so an array would be
       // stored under its indexes; always send the object shape.
       monitor.notificationIDList = notificationIdObject(monitor.notificationIDList);
+      deriveMonitorTiming(monitor);
+      if (monitor.type === "push") {
+        const token = monitor.pushToken;
+        if (typeof token !== "string" || token === "") {
+          fail(2, "pushToken must be a non-empty string");
+        }
+      }
       await s.request("editMonitor", [monitor]);
       // editMonitor ignores fields like `active`, so print what Kuma saved.
       const saved = await fetchMonitor(s, id);

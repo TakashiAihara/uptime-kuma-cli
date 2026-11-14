@@ -9,8 +9,8 @@ export interface Monitor extends Record<string, unknown> {
 // Fields the Kuma 1.23.17 `add` event accepts: monitorDefaults of
 // src/pages/EditMonitor.vue plus the fields the form edits, in the wire
 // spelling. `add` runs bean.import + store on a redbean frozen bean, so any
-// other key fails the store. Shared with tests/helpers/fake-kuma.ts, which
-// rejects the same keys.
+// other key fails the store. tests/helpers/fake-kuma.ts keeps its own literal
+// copy of the same columns so it keeps checking this list.
 export const MONITOR_ADD_FIELDS = new Set([
   "type",
   "name",

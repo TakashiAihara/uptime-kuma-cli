@@ -95,6 +95,14 @@ export function parseNonNegativeInteger(value: string, flag: string): number {
   return n;
 }
 
+export function parseNonNegativeNumber(value: string, flag: string): number {
+  const n = Number(value);
+  if (value.trim() === "" || !Number.isFinite(n) || n < 0) {
+    fail(2, `${flag} must be a number of 0 or more, got "${value}"`);
+  }
+  return n;
+}
+
 export function parsePort(value: string, flag: string): number {
   const n = Number(value);
   if (!Number.isInteger(n) || n < 1 || n > 65535) {

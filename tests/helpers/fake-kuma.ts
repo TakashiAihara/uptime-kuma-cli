@@ -72,8 +72,10 @@ export type FakeKuma = { url: string; calls: Call[]; state: FakeState; close: ()
 const now = () => new Date().toISOString().replace("T", " ").slice(0, 19);
 
 // Kuma 1.23 runs redbean frozen, so `add` with a key that is not a monitor column fails.
-// The set is monitorDefaults of src/pages/EditMonitor.vue (1.23.17) plus the fields the form edits.
-// Kept as a literal copy, independent of src/, so the fake keeps checking the implementation.
+// The set is the monitor columns: monitorDefaults of src/pages/EditMonitor.vue (1.23.17)
+// plus the fields the form edits through v-model (e.g. description, body, headers,
+// basic_auth_user). Kept as a literal copy, independent of src/, so the fake keeps
+// checking the implementation.
 const ADD_KEYS = new Set([
   "type",
   "name",
@@ -111,12 +113,43 @@ const ADD_KEYS = new Set([
   "gamedigGivenPortOnly",
   "active",
   "keyword",
+  "invertKeyword",
   "jsonPath",
   "expectedValue",
   "hostname",
   "port",
   "pushToken",
+  "description",
   "game",
+  "grpcUrl",
+  "grpcProtobuf",
+  "grpcMethod",
+  "grpcServiceName",
+  "grpcEnableTls",
+  "grpcBody",
+  "grpcMetadata",
+  "radiusUsername",
+  "radiusPassword",
+  "radiusCalledStationId",
+  "radiusCallingStationId",
+  "radiusSecret",
+  "databaseConnectionString",
+  "databaseQuery",
+  "kafkaProducerTopic",
+  "kafkaProducerMessage",
+  "body",
+  "headers",
+  "tlsCa",
+  "tlsCert",
+  "tlsKey",
+  "oauth_token_url",
+  "oauth_client_id",
+  "oauth_client_secret",
+  "oauth_scopes",
+  "basic_auth_user",
+  "basic_auth_pass",
+  "authDomain",
+  "authWorkstation",
 ]);
 
 export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<FakeKuma> {
