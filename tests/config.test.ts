@@ -42,6 +42,20 @@ describe("credentials and url", () => {
     expect(leaked).toBe("");
   });
 
+  test.each([
+    ["username_command", "UPTIME_KUMA_PASSWORD", "UPTIME_KUMA_USERNAME", "admin"],
+    ["password_command", "UPTIME_KUMA_USERNAME", "UPTIME_KUMA_PASSWORD", "pw-from-test"],
+  ])("%s does not see %s given in env", async (key, other, own, value) => {
+    const log = join(sb.dir, "seen");
+    writeConfig(
+      sb,
+      `${key} = "if [ -n \\"$${other}\\" ]; then echo saw >> ${log}; fi; echo ${value}"`,
+    );
+    const r = await run(sb, list, { ...creds(kuma.url), [own]: undefined });
+    expect(r.code).toBe(0);
+    expect(await Bun.file(log).exists()).toBe(false);
+  });
+
   test("env wins over config and the command does not run", async () => {
     const marker = join(sb.dir, "ran");
     writeConfig(

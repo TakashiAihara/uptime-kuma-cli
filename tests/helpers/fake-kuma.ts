@@ -58,6 +58,52 @@ export type FakeKuma = { url: string; calls: Call[]; state: FakeState; close: ()
 
 const now = () => new Date().toISOString().replace("T", " ").slice(0, 19);
 
+// Kuma 1.23 runs redbean frozen, so `add` with a key that is not a monitor column fails.
+// The set is monitorDefaults of src/pages/EditMonitor.vue (1.23.17) plus the fields the form edits.
+const ADD_KEYS = new Set([
+  "type",
+  "name",
+  "parent",
+  "url",
+  "method",
+  "interval",
+  "retryInterval",
+  "resendInterval",
+  "maxretries",
+  "timeout",
+  "notificationIDList",
+  "ignoreTls",
+  "upsideDown",
+  "packetSize",
+  "expiryNotification",
+  "maxredirects",
+  "accepted_statuscodes",
+  "dns_resolve_type",
+  "dns_resolve_server",
+  "docker_container",
+  "docker_host",
+  "proxyId",
+  "mqttUsername",
+  "mqttPassword",
+  "mqttTopic",
+  "mqttSuccessMessage",
+  "authMethod",
+  "oauth_auth_method",
+  "httpBodyEncoding",
+  "kafkaProducerBrokers",
+  "kafkaProducerSaslOptions",
+  "kafkaProducerSsl",
+  "kafkaProducerAllowAutoTopicCreation",
+  "gamedigGivenPortOnly",
+  "active",
+  "keyword",
+  "jsonPath",
+  "expectedValue",
+  "hostname",
+  "port",
+  "pushToken",
+]);
+
 export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<FakeKuma> {
   const state: FakeState = {
     username: "admin",
@@ -142,6 +188,9 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     });
 
     handle("add", (monitor: Monitor) => {
+      const unknown = Object.keys(monitor).filter((k) => !ADD_KEYS.has(k));
+      if (unknown.length)
+        throw new Error(`SQLITE_ERROR: table monitor has no column named ${unknown[0]}`);
       if (!(monitor.accepted_statuscodes as unknown[]).every((c) => typeof c === "string"))
         throw new Error("Accepted status codes are not all strings");
       const id = Math.max(0, ...state.monitors.map((m) => m.id)) + 1;
