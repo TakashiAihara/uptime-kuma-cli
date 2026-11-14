@@ -52,6 +52,12 @@ export type FakeState = {
   // monitor ids whose heartbeatList is never pushed
   silentHeartbeat: number[];
   testNotificationResult: { ok: boolean; msg: string };
+  // getSettings data; primaryBaseURL is what the UI uses for push URLs
+  settings: Record<string, unknown>;
+  // login answers { tokenRequired: true } like an account with 2FA enabled
+  twoFA: boolean;
+  // event name whose request makes the server drop the connection without answering
+  disconnectOn: string | null;
 };
 
 export type FakeKuma = { url: string; calls: Call[]; state: FakeState; close: () => Promise<void> };
@@ -115,6 +121,9 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     fail: {},
     silentHeartbeat: [],
     testNotificationResult: { ok: true, msg: "Sent Successfully." },
+    settings: {},
+    twoFA: false,
+    disconnectOn: null,
     ...init,
   };
   const calls: Call[] = [];
@@ -137,6 +146,10 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     const handle = (event: string, fn: (...a: any[]) => unknown) => {
       socket.on(event, async (...args: any[]) => {
         const cb = args[args.length - 1];
+        if (state.disconnectOn === event) {
+          socket.disconnect(true);
+          return;
+        }
         if (state.fail[event]) {
           const msg = state.fail[event];
           delete state.fail[event];
@@ -158,6 +171,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     handle("login", (data: { username: string; password: string }) => {
       if (data.username !== state.username || data.password !== state.password)
         return { ok: false, msg: "Incorrect username or password." };
+      if (state.twoFA) return { tokenRequired: true };
       loggedIn = true;
       setTimeout(() => {
         socket.emit("monitorList", monitorList());
@@ -210,11 +224,17 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     handle("editMonitor", (monitor: Monitor) => {
       const i = state.monitors.findIndex((m) => m.id === monitor.id);
       if (i < 0) throw new Error("Cannot read properties of null (reading 'user_id')");
+      // Like updateMonitorNotification: `for...in` over an array stores its indexes as ids
       const list = monitor.notificationIDList as Record<string, boolean>;
-      if (Array.isArray(list)) throw new Error("fake: notificationIDList must be an object");
       const ids: Record<string, boolean> = {};
       for (const k in list) if (list[k]) ids[k] = true;
-      state.monitors[i] = { ...structuredClone(monitor), notificationIDList: ids };
+      // editMonitor copies a fixed field list onto the bean; `active` is not among them
+      const before = state.monitors[i]!;
+      state.monitors[i] = {
+        ...structuredClone(monitor),
+        active: before.active,
+        notificationIDList: ids,
+      };
       socket.emit("monitorList", monitorList());
       return { ok: true, msg: "Saved.", monitorID: monitor.id };
     });
@@ -261,6 +281,8 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     });
 
     handle("testNotification", () => structuredClone(state.testNotificationResult));
+
+    handle("getSettings", () => ({ ok: true, data: structuredClone(state.settings) }));
 
     handle("addProxy", (p: Record<string, unknown>, id: number | null) => {
       let row: ProxyRow | undefined;

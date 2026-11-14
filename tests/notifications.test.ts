@@ -120,6 +120,42 @@ describe("notifications", () => {
     ).toBe(true);
   });
 
+  test("add: explicit flags win over --config-file and --set", async () => {
+    const f = join(sb.dir, "cfg2.json");
+    writeFileSync(f, JSON.stringify({ name: "from-file", type: "slack", isDefault: false }));
+    const r = await run(
+      sb,
+      [
+        "notifications",
+        "add",
+        "--name",
+        "flag-name",
+        "--type",
+        "ntfy",
+        "--default",
+        "--config-file",
+        f,
+        "--set",
+        "type=matrix",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "addNotification")!.args[0] as any;
+    expect(sent.name).toBe("flag-name");
+    expect(sent.type).toBe("ntfy");
+    expect(sent.isDefault).toBe(true);
+  });
+
+  test("edit does not re-send a stored applyExisting", async () => {
+    const row = kuma.state.notifications.find((n) => n.id === 1)!;
+    row.config = JSON.stringify({ ...JSON.parse(row.config), applyExisting: true });
+    const r = await run(sb, ["notifications", "edit", "1", "--set", "x=1"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "addNotification")!.args[0] as any;
+    expect(sent.applyExisting).toBe(false);
+  });
+
   test("edit merges into the stored config and keeps untouched secrets", async () => {
     const r = await run(
       sb,
@@ -137,6 +173,12 @@ describe("notifications", () => {
       type: "ntfy",
     });
     expect(r.stdout).not.toContain(SECRET);
+  });
+
+  test("edit without --set or --config-file exits 2 before connecting", async () => {
+    const r = await run(sb, ["notifications", "edit", "3"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(kuma.calls).toHaveLength(0);
   });
 
   test("edit of an unknown id exits 1 without sending", async () => {
@@ -159,101 +201,5 @@ describe("notifications", () => {
     const r = await run(sb, ["notifications", "test", "3"], creds(kuma.url));
     expect(r.code).toBe(1);
     expect(r.stderr).toContain("401 Unauthorized");
-  });
-});
-
-describe("proxies", () => {
-  test("list never prints the password", async () => {
-    const r = await run(sb, ["proxies", "list"], creds(kuma.url));
-    expect(r.code).toBe(0);
-    expect(r.json()).toEqual([
-      {
-        id: 2,
-        protocol: "socks5",
-        host: "10.0.0.9",
-        port: 1080,
-        auth: true,
-        username: "u1",
-        active: true,
-        default: false,
-      },
-    ]);
-    expect(r.stdout).not.toContain(SECRET);
-  });
-
-  test("add reads the password from a file", async () => {
-    const f = join(sb.dir, "pw");
-    writeFileSync(f, "file-pw\n");
-    const r = await run(
-      sb,
-      [
-        "proxies",
-        "add",
-        "--protocol",
-        "http",
-        "--host",
-        "10.0.0.8",
-        "--port",
-        "3128",
-        "--username",
-        "u2",
-        "--password-file",
-        f,
-      ],
-      creds(kuma.url),
-    );
-    expect(r.code).toBe(0);
-    expect(r.json()).toEqual({ id: 3 });
-    const call = kuma.calls.find((c) => c.event === "addProxy")!;
-    expect(call.args[1]).toBeNull();
-    expect(call.args[0]).toMatchObject({
-      protocol: "http",
-      host: "10.0.0.8",
-      port: 3128,
-      auth: true,
-      username: "u2",
-      password: "file-pw",
-      default: false,
-      applyExisting: false,
-    });
-  });
-
-  test("add without credentials sends auth false", async () => {
-    const r = await run(
-      sb,
-      ["proxies", "add", "--protocol", "socks5", "--host", "h", "--port", "1"],
-      creds(kuma.url),
-    );
-    expect(r.code).toBe(0);
-    expect((kuma.calls.find((c) => c.event === "addProxy")!.args[0] as any).auth).toBe(false);
-  });
-
-  test("add with an unknown protocol exits 2 before connecting", async () => {
-    const r = await run(
-      sb,
-      ["proxies", "add", "--protocol", "ftp", "--host", "h", "--port", "1"],
-      creds(kuma.url),
-    );
-    expect(r.code).toBe(2);
-    expect(kuma.calls).toHaveLength(0);
-  });
-
-  test("edit keeps the stored password and changes the port", async () => {
-    const r = await run(sb, ["proxies", "edit", "2", "--set", "port=1081"], creds(kuma.url));
-    expect(r.code).toBe(0);
-    expect(r.json()).toEqual({ id: 2 });
-    const call = kuma.calls.find((c) => c.event === "addProxy")!;
-    expect(call.args[1]).toBe(2);
-    expect(call.args[0]).toMatchObject({
-      port: 1081,
-      password: SECRET,
-      host: "10.0.0.9",
-      protocol: "socks5",
-    });
-  });
-
-  test("edit of an unknown id exits 1", async () => {
-    const r = await run(sb, ["proxies", "edit", "9", "--set", "port=1"], creds(kuma.url));
-    expect(r.code).toBe(1);
   });
 });

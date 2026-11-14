@@ -72,6 +72,21 @@ describe("beats <id>", () => {
   });
 });
 
+describe("beats / events option checks", () => {
+  test.each([
+    [["beats", "1", "--hours", "-1"], "--hours"],
+    [["beats", "1", "--hours", "0"], "--hours"],
+    [["beats", "1", "--limit", "0"], "--limit"],
+    [["beats", "1", "--limit", "1.5"], "--limit"],
+    [["events", "1", "--hours", "-5"], "--hours"],
+  ])("%p exits 2 before connecting", async (args, word) => {
+    const r = await run(sb, args, creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(word);
+    expect(kuma.calls).toHaveLength(0);
+  });
+});
+
 describe("beats latest", () => {
   test("lists each monitor's newest beat sorted by id, null when there is none", async () => {
     const r = await run(sb, ["beats", "latest"], creds(kuma.url));
@@ -94,7 +109,8 @@ describe("beats latest", () => {
     kuma.state.silentHeartbeat = [3];
     const r = await run(sb, ["beats", "latest"], { ...creds(kuma.url), UPTIME_KUMA_TIMEOUT: "1" });
     expect(r.code).toBe(2);
-    expect(r.stderr).toContain("3");
+    expect(r.stderr).toContain("3 (web)");
+    expect(r.stderr).not.toContain("1 (db)");
   });
 });
 

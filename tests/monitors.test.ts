@@ -38,6 +38,20 @@ afterEach(async () => {
 
 const addCalls = () => kuma.calls.filter((c) => c.event === "add");
 
+const defaultProxy = () => ({
+  id: 3,
+  user_id: 1,
+  protocol: "http",
+  host: "p",
+  port: 1,
+  auth: false,
+  username: null,
+  password: null,
+  active: true,
+  default: true,
+  created_date: "",
+});
+
 describe("monitors list", () => {
   test("prints every monitor sorted by id with normalized notification ids", async () => {
     const r = await run(sb, ["monitors", "list"], creds(kuma.url));
@@ -74,6 +88,46 @@ describe("monitors get", () => {
     expect(m.maxretries).toBe(0);
     expect(m.accepted_statuscodes).toEqual(["200-299"]);
     expect(m.notificationIDList).toEqual([3, 5]);
+  });
+
+  test("redacts secret fields but keeps empty ones and the push token", async () => {
+    Object.assign(
+      kuma.state.monitors.find((m) => m.id === 9)!,
+      {
+        pushToken: "visible-push-tok",
+        basic_auth_pass: "fixture-hidden-1",
+        oauth_client_secret: "fixture-hidden-2",
+        tlsKey: "fixture-hidden-3",
+        headers: '{"X-Auth":"fixture-hidden-4"}',
+        body: '{"k":"fixture-hidden-5"}',
+        mqttPassword: "fixture-hidden-6",
+        radiusPassword: "fixture-hidden-7",
+        radiusSecret: "fixture-hidden-8",
+        databaseConnectionString: "postgres://u:fixture-hidden-9@db/x",
+        basic_auth_user: "visible-user",
+        tlsCert: "",
+      },
+    );
+    const r = await run(sb, ["monitors", "get", "9"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    for (let i = 1; i <= 9; i++) expect(r.stdout).not.toContain(`fixture-hidden-${i}`);
+    const m = r.json();
+    expect(m.basic_auth_pass).toBe("***");
+    expect(m.databaseConnectionString).toBe("***");
+    expect(m.pushToken).toBe("visible-push-tok");
+    expect(m.basic_auth_user).toBe("visible-user");
+    expect(m.tlsCert).toBe("");
+  });
+
+  test("an empty secret field stays empty so the reader can tell it is unset", async () => {
+    Object.assign(
+      kuma.state.monitors.find((m) => m.id === 9)!,
+      { basic_auth_pass: "", tlsKey: null },
+    );
+    const r = await run(sb, ["monitors", "get", "9"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json().basic_auth_pass).toBe("");
+    expect(r.json().tlsKey).toBeNull();
   });
 
   test("an unknown id exits 1", async () => {
@@ -327,6 +381,102 @@ describe("monitors add", () => {
     expect(kuma.calls).toHaveLength(0);
   });
 
+  test("adds default notifications and, for http, the default proxy like the UI", async () => {
+    kuma.state.notifications = [
+      { id: 6, name: "def", active: true, isDefault: true, userId: 1, config: "{}" },
+      { id: 8, name: "other", active: true, isDefault: false, userId: 1, config: "{}" },
+    ];
+    kuma.state.proxies = [defaultProxy()];
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "http", "--name", "d1", "--url", "https://d1.example.com"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.notificationIDList).toEqual({ "6": true });
+    expect(sent.proxyId).toBe(3);
+  });
+
+  test("push monitors get default notifications but no proxy", async () => {
+    kuma.state.notifications = [
+      { id: 6, name: "def", active: true, isDefault: true, userId: 1, config: "{}" },
+    ];
+    kuma.state.proxies = [defaultProxy()];
+    const r = await run(sb, ["monitors", "add", "--type", "push", "--name", "d2"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.notificationIDList).toEqual({ "6": true });
+    expect(sent.proxyId).toBeNull();
+  });
+
+  test("retryInterval follows --interval and timeout is capped at 80% of it", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "fast",
+        "--url",
+        "https://f.example.com",
+        "--interval",
+        "30",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.retryInterval).toBe(30);
+    expect(sent.timeout).toBe(24);
+  });
+
+  test("timeout stays 48 when 80% of --interval is larger", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "slow",
+        "--url",
+        "https://s.example.com",
+        "--interval",
+        "300",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.retryInterval).toBe(300);
+    expect(sent.timeout).toBe(48);
+  });
+
+  test("pushUrl uses the Primary Base URL setting when it is set", async () => {
+    kuma.state.settings = { primaryBaseURL: "https://status.example.org/" };
+    const r = await run(sb, ["monitors", "add", "--type", "push", "--name", "pb"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const out = r.json();
+    expect(out.pushUrl).toBe(
+      `https://status.example.org/api/push/${out.pushToken}?status=up&msg=OK&ping=`,
+    );
+  });
+
+  test.each([
+    [["--type", "push", "--name", "x", "--push-token", ""], "--push-token"],
+    [["--type", "push", "--name", "x", "--interval", ""], "--interval"],
+    [["--type", "push", "--name", "x", "--max-retries", " "], "--max-retries"],
+  ])("empty values exit 2 before connecting: %p", async (args, word) => {
+    const r = await run(sb, ["monitors", "add", ...args], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(word);
+    expect(kuma.calls).toHaveLength(0);
+  });
+
   test("Kuma's refusal exits 1 with its message", async () => {
     kuma.state.fail.add = "Invalid monitor";
     const r = await run(
@@ -380,6 +530,19 @@ describe("monitors edit", () => {
     expect(sent.notificationIDList).toEqual({ "4": true });
   });
 
+  test.each([
+    ["notificationIDList=[null]"],
+    ['notificationIDList=["x"]'],
+    ["notificationIDList=[-1]"],
+    ["notificationIDList=[1.5]"],
+    ['notificationIDList={"a":true}'],
+  ])("a notificationIDList with a non-id entry exits 2 before connecting: %s", async (set) => {
+    const r = await run(sb, ["monitors", "edit", "7", "--set", set], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("notificationIDList");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
   test("--set without = exits 2", async () => {
     const r = await run(sb, ["monitors", "edit", "7", "--set", "name"], creds(kuma.url));
     expect(r.code).toBe(2);
@@ -389,6 +552,27 @@ describe("monitors edit", () => {
   test("an unknown id exits 1", async () => {
     const r = await run(sb, ["monitors", "edit", "404", "--set", "name=x"], creds(kuma.url));
     expect(r.code).toBe(1);
+  });
+
+  test("prints what Kuma saved, not the local merge", async () => {
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "active=false"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json().active).toBe(true);
+  });
+
+  test("--set id is refused before connecting", async () => {
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "id=2"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("id");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("redacts secrets in the printed monitor", async () => {
+    kuma.state.monitors.find((m) => m.id === 7)!.basic_auth_pass = "fixture-hidden-e1";
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "maxretries=1"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.stdout).not.toContain("fixture-hidden-e1");
+    expect(r.json().basic_auth_pass).toBe("***");
   });
 });
 
@@ -404,6 +588,9 @@ describe("monitors pause / resume", () => {
     const r = await run(sb, ["monitors", "resume", "9"], creds(kuma.url));
     expect(r.code).toBe(0);
     expect(r.json()).toEqual({ id: 9, active: true });
+    expect(kuma.state.monitors.find((m) => m.id === 9)!.active).toBe(true);
+    expect(kuma.calls.map((c) => c.event)).toContain("resumeMonitor");
+    expect(kuma.calls.map((c) => c.event)).not.toContain("pauseMonitor");
   });
 
   test("an unknown id exits 1", async () => {

@@ -6,17 +6,18 @@ on:
   pull_request:
 
 jobs:
-  # release.yml と install.sh の誤りは CI では見つからず、tag を切るとき・curl | sh を
-  # 叩かれたときに初めて出る。それを前倒しで捕まえる。
+  # Mistakes in release.yml and install.sh otherwise surface only when a tag is cut or
+  # someone runs curl | sh; catch them here first.
   static:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # install.sh は sh に流し込まれるファイルなので、間違えたときの代償が最も大きい
+      # install.sh is piped into sh, so a mistake there costs the most
       - name: shellcheck (install.sh, publish-release.sh, check-binaries.sh, run-binary.sh)
         run: shellcheck install.sh scripts/publish-release.sh scripts/check-binaries.sh scripts/run-binary.sh
       - uses: docker://rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 # v1.7.12
@@ -25,6 +26,7 @@ jobs:
 
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:

@@ -38,7 +38,7 @@ password_command = "infisical run --silent -- printenv UPTIME_KUMA_PASSWORD"
 
 | Env | Meaning |
 | --- | --- |
-| `UPTIME_KUMA_URL` | Base URL, starting with `http://` or `https://` |
+| `UPTIME_KUMA_URL` | Base URL, starting with `http://` or `https://` (with `http://` the login travels in clear text) |
 | `UPTIME_KUMA_USERNAME` / `UPTIME_KUMA_PASSWORD` | Login |
 | `UPTIME_KUMA_TIMEOUT` | Seconds for connect, login, each request and pushed lists (default 30) |
 | `UPTIME_KUMA_COMMAND_TIMEOUT` | Seconds for each `*_command` (default 60) |
@@ -71,14 +71,16 @@ uptime-kuma-cli notifications test 3
 
 uptime-kuma-cli proxies list
 uptime-kuma-cli proxies add --protocol socks5 --host 10.0.0.9 --port 1080
-uptime-kuma-cli proxies edit 2 --set port=1081
+uptime-kuma-cli proxies edit 2 --set port=1081 --password-file proxy-pw
 ```
 
 - `monitors add` exits 3 and sends nothing when a monitor with the same name exists
 - Push monitors get their token in the same `add` call; the output carries `pushToken` and `pushUrl`
 - `--paused` creates the monitor without starting it (push to a paused monitor returns HTTP 404, so resume before the pusher starts)
 - Kuma only notifies on status changes; with `resendInterval` 0 a monitor that stays down does not notify again
-- Notification configs and proxy passwords are never printed; pass secrets with `--config-file` / `--password-file`
+- Notification configs, proxy passwords and secret monitor fields (basic auth, OAuth secret, TLS key, headers, body, ...) are never printed; pass secrets with `--config-file` / `--password-file`
+- New monitors get the notifications marked default, and http / keyword / json-query monitors get the default proxy, as in the UI
+- Each command logs in once; Kuma allows 20 logins per minute per instance, so pace long loops. Accounts with 2FA are not supported
 
 ## Exit codes
 

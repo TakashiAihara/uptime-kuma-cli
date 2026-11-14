@@ -1,3 +1,4 @@
+#!/usr/bin/env bun
 import { Command, CommanderError } from "commander";
 import { registerBeats, registerEvents } from "./commands/beats.ts";
 import { registerMonitors } from "./commands/monitors.ts";
@@ -28,12 +29,9 @@ try {
     if (err.message) console.error(err.message);
     exitCode = err.exitCode;
   } else if (err instanceof CommanderError) {
-    exitCode =
-      err.code === "commander.version" ||
-      err.code === "commander.help" ||
-      err.code === "commander.helpDisplayed"
-        ? 0
-        : 2;
+    // commander.help is the missing-subcommand path: help already went to
+    // stderr via help({error:true}), so it maps to a usage error (2).
+    exitCode = err.code === "commander.version" || err.code === "commander.helpDisplayed" ? 0 : 2;
   } else {
     console.error(`unexpected error: ${err instanceof Error ? err.message : String(err)}`);
     exitCode = 70;

@@ -9,7 +9,7 @@ import {
   parseSets,
   printJson,
 } from "../lib.ts";
-import { connect, type Monitor } from "../kuma.ts";
+import { connect, type KumaSession, type Monitor } from "../kuma.ts";
 
 const MONITOR_TYPES = ["http", "keyword", "json-query", "port", "push"] as const;
 
@@ -58,6 +58,50 @@ function generatePushToken(): string {
   return token;
 }
 
+// Fields Kuma's monitor JSON carries that must never reach stdout.
+const SECRET_KEYS = new Set([
+  "basic_auth_pass",
+  "oauth_client_secret",
+  "tlsKey",
+  "headers",
+  "body",
+  "mqttPassword",
+  "radiusPassword",
+  "radiusSecret",
+  "databaseConnectionString",
+]);
+
+function redactSecrets(monitor: Record<string, unknown>): Record<string, unknown> {
+  const out = { ...monitor };
+  for (const key of SECRET_KEYS) {
+    const value = out[key];
+    if (typeof value === "string" && value !== "") out[key] = "***";
+  }
+  return out;
+}
+
+async function fetchMonitor(s: KumaSession, id: number): Promise<Record<string, unknown>> {
+  const res = await s.request("getMonitor", [id]);
+  const monitor = res?.monitor;
+  if (monitor === null || typeof monitor !== "object") fail(1, `monitor ${id} not found`);
+  return monitor;
+}
+
+// Every stored id must be a positive integer: each array element, or each
+// object key whose value is truthy (the shape Kuma keeps on the wire).
+function validateNotificationIdEntries(value: unknown): void {
+  const msg = "notificationIDList entries must be positive integer ids";
+  if (Array.isArray(value)) {
+    for (const v of value) {
+      if (typeof v !== "number" || !Number.isInteger(v) || v <= 0) fail(2, msg);
+    }
+    return;
+  }
+  for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
+    if (v && (!/^\d+$/.test(key) || Number(key) <= 0)) fail(2, msg);
+  }
+}
+
 const summarize = (m: Monitor) => ({
   id: m.id,
   name: m.name,
@@ -93,7 +137,10 @@ export function registerMonitors(program: Command): void {
       const s = await connect();
       const m = s.monitorById(id);
       if (!m) fail(1, `monitor ${id} not found`);
-      printJson({ ...m, notificationIDList: notificationIdArray(m.notificationIDList) });
+      printJson({
+        ...redactSecrets(m),
+        notificationIDList: notificationIdArray(m.notificationIDList),
+      });
     });
 
   monitors
@@ -135,12 +182,20 @@ export function registerMonitors(program: Command): void {
         if (!opts.hostname) fail(2, "--type port requires --hostname");
         if (opts.port === undefined) fail(2, "--type port requires --port");
       }
+      if (opts.pushToken === "") fail(2, "--push-token must not be empty");
       const interval = parseNumber(opts.interval ?? "60", "--interval");
-      const retryInterval = parseNumber(opts.retryInterval ?? "60", "--retry-interval");
+      const retryInterval =
+        opts.retryInterval === undefined
+          ? interval
+          : parseNumber(opts.retryInterval, "--retry-interval");
       const maxRetries = parseNumber(opts.maxRetries ?? "0", "--max-retries");
       const resendInterval = parseNumber(opts.resendInterval ?? "0", "--resend-interval");
-      const timeout = parseNumber(opts.timeout ?? "48", "--timeout");
-      const proxyId = opts.proxyId === undefined ? null : parseId(opts.proxyId, "--proxy-id");
+      const timeout =
+        opts.timeout === undefined
+          ? Math.min(48, Math.trunc(interval * 8) / 10)
+          : parseNumber(opts.timeout, "--timeout");
+      const proxyIdOption =
+        opts.proxyId === undefined ? undefined : parseId(opts.proxyId, "--proxy-id");
       const port = type === "port" ? parsePort(opts.port, "--port") : undefined;
       const notificationIds = ((opts.notificationId ?? []) as string[]).map((v) =>
         parseId(v, "--notification-id"),
@@ -158,13 +213,25 @@ export function registerMonitors(program: Command): void {
         fail(3, "");
       }
 
-      let ids: number[] = [];
+      const ids: number[] = s
+        .notifications()
+        .filter((n) => n.isDefault === true)
+        .map((n) => n.id);
       if (notificationsFrom !== undefined) {
         const src = s.monitorById(notificationsFrom);
         if (!src) fail(1, `monitor ${notificationsFrom} not found`);
-        ids = notificationIdArray(src.notificationIDList);
+        ids.push(...notificationIdArray(src.notificationIDList));
       }
       ids.push(...notificationIds);
+
+      let proxyId: number | null;
+      if (proxyIdOption !== undefined) {
+        proxyId = proxyIdOption;
+      } else if (type === "http" || type === "keyword" || type === "json-query") {
+        proxyId = s.proxies().find((p) => p.default)?.id ?? null;
+      } else {
+        proxyId = null;
+      }
 
       const active = !opts.paused;
       const monitor: Record<string, unknown> = {
@@ -199,6 +266,16 @@ export function registerMonitors(program: Command): void {
         monitor.pushToken = pushToken;
       }
 
+      let pushBase = s.url;
+      if (pushToken !== undefined) {
+        const settings = await s.request("getSettings");
+        const data = settings?.data as Record<string, unknown> | undefined;
+        const primary = data?.primaryBaseURL;
+        if (typeof primary === "string" && primary !== "") {
+          pushBase = primary.replace(/\/+$/, "");
+        }
+      }
+
       const res = await s.request("add", [monitor]);
       const out: Record<string, unknown> = {
         id: res?.monitorID ?? null,
@@ -208,7 +285,7 @@ export function registerMonitors(program: Command): void {
       };
       if (pushToken !== undefined) {
         out.pushToken = pushToken;
-        out.pushUrl = `${s.url}/api/push/${pushToken}?status=up&msg=OK&ping=`;
+        out.pushUrl = `${pushBase}/api/push/${pushToken}?status=up&msg=OK&ping=`;
       }
       printJson(out);
     });
@@ -223,26 +300,29 @@ export function registerMonitors(program: Command): void {
       if (!opts.set || (opts.set as string[]).length === 0) {
         fail(2, "monitors edit requires at least one --set key=value");
       }
+      if ("id" in sets) {
+        fail(2, "--set id=... would retarget the edit to another monitor");
+      }
       const notifValue = sets.notificationIDList;
-      if (
-        notifValue !== undefined &&
-        !Array.isArray(notifValue) &&
-        (notifValue === null || typeof notifValue !== "object")
-      ) {
-        fail(2, "notificationIDList must be an array or an object");
+      if (notifValue !== undefined) {
+        if (!Array.isArray(notifValue) && (notifValue === null || typeof notifValue !== "object")) {
+          fail(2, "notificationIDList must be an array or an object");
+        }
+        validateNotificationIdEntries(notifValue);
       }
       const s = await connect();
-      const res = await s.request("getMonitor", [id]);
-      const fetched = res?.monitor;
-      if (fetched === null || typeof fetched !== "object") fail(1, `monitor ${id} not found`);
+      const fetched = await fetchMonitor(s, id);
       const monitor: Record<string, unknown> = { ...fetched };
       for (const [k, v] of Object.entries(sets)) monitor[k] = v;
-      // Kuma rejects an array-shaped notificationIDList on editMonitor
+      // Kuma iterates notificationIDList with for...in, so an array would be
+      // stored under its indexes; always send the object shape.
       monitor.notificationIDList = notificationIdObject(monitor.notificationIDList);
       await s.request("editMonitor", [monitor]);
+      // editMonitor ignores fields like `active`, so print what Kuma saved.
+      const saved = await fetchMonitor(s, id);
       printJson({
-        ...monitor,
-        notificationIDList: notificationIdArray(monitor.notificationIDList),
+        ...redactSecrets(saved),
+        notificationIDList: notificationIdArray(saved.notificationIDList),
       });
     });
 

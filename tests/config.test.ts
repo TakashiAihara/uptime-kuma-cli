@@ -94,7 +94,9 @@ describe("credentials and url", () => {
   });
 
   test("a hanging password_command is cut by UPTIME_KUMA_COMMAND_TIMEOUT", async () => {
-    writeConfig(sb, `password_command = "sleep 30"`);
+    // A compound command so sh forks sleep as a grandchild instead of exec-ing it; only a
+    // process-group kill closes the pipe then
+    writeConfig(sb, `password_command = "sleep 30; echo late"`);
     const t = Date.now();
     const r = await run(sb, list, {
       ...creds(kuma.url),
@@ -102,6 +104,7 @@ describe("credentials and url", () => {
       UPTIME_KUMA_COMMAND_TIMEOUT: "1",
     });
     expect(r.code).toBe(2);
+    expect(r.stderr).toContain("timed out");
     expect(Date.now() - t).toBeLessThan(10_000);
   });
 
@@ -117,6 +120,29 @@ describe("credentials and url", () => {
     expect(r.code).toBe(2);
     expect(r.stderr).toContain("Incorrect username or password.");
     expect(r.stderr + r.stdout).not.toContain("wrong-pw-abc");
+  });
+
+  test("an account with 2FA exits 2 saying 2FA is not supported", async () => {
+    kuma.state.twoFA = true;
+    const r = await run(sb, list, creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("2FA");
+  });
+
+  test("a dropped connection during a request exits 2 without waiting for the timeout", async () => {
+    kuma.state.disconnectOn = "getMonitorBeats";
+    const t = Date.now();
+    const r = await run(sb, ["beats", "1"], { ...creds(kuma.url), UPTIME_KUMA_TIMEOUT: "20" });
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("disconnect");
+    expect(Date.now() - t).toBeLessThan(10_000);
+  });
+
+  test("a password_command line keeps surrounding spaces and drops only the line ending", async () => {
+    kuma.state.password = " spaced pw ";
+    writeConfig(sb, `password_command = "printf ' spaced pw \\\\r\\\\n'"`);
+    const r = await run(sb, list, { ...creds(kuma.url), UPTIME_KUMA_PASSWORD: undefined });
+    expect(r.code).toBe(0);
   });
 
   test("a refused connection exits 2", async () => {
@@ -156,4 +182,14 @@ describe("meta", () => {
     const r = await run(sb, ["nope"], creds(kuma.url));
     expect(r.code).toBe(2);
   });
+
+  test.each([[[]], [["monitors"]], [["notifications"]], [["proxies"]]])(
+    "no subcommand %p exits 2 with help on stderr",
+    async (args) => {
+      const r = await run(sb, args, creds(kuma.url));
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("Usage");
+      expect(kuma.calls).toHaveLength(0);
+    },
+  );
 });

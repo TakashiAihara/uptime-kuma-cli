@@ -28,11 +28,21 @@ export function disconnect(): void {
   currentSocket = undefined;
 }
 
-function emitAck(socket: Socket, event: string, args: any[], timeoutMs: number): Promise<any> {
+function emitAck(
+  socket: Socket,
+  event: string,
+  args: any[],
+  timeoutMs: number,
+  disconnected: Promise<never>,
+): Promise<any> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       reject(new CliError(2, `timed out during ${event}`));
     }, timeoutMs);
+    void disconnected.catch((err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
     socket.emit(event, ...args, (res: any) => {
       clearTimeout(timer);
       resolve(res);
@@ -49,11 +59,12 @@ export class KumaSession {
     readonly notificationList: NotificationRow[],
     readonly proxyList: ProxyRow[],
     readonly heartbeats: Map<number, BeatRow[]>,
+    private readonly disconnected: Promise<never>,
   ) {}
 
   // ok:false is Kuma answering no (exit 1); a missing callback is a timeout (exit 2).
   async request(event: string, args: any[] = []): Promise<any> {
-    const res = await emitAck(this.socket, event, args, this.timeoutMs);
+    const res = await emitAck(this.socket, event, args, this.timeoutMs, this.disconnected);
     if (res !== null && typeof res === "object" && (res as { ok?: unknown }).ok === false) {
       fail(1, String((res as { msg?: unknown }).msg ?? `${event} failed`));
     }
@@ -97,7 +108,7 @@ export class KumaSession {
         const what = missing.map((id) => `${id} (${names.get(id) ?? "unknown"})`).join(", ");
         fail(2, `timed out waiting for heartbeatList of monitor(s) ${what}`);
       }
-      await sleep(10);
+      await Promise.race([sleep(10), this.disconnected]);
     }
   }
 }
@@ -111,6 +122,18 @@ export async function connect(): Promise<KumaSession> {
     timeout: timeoutMs,
   });
   currentSocket = socket;
+
+  // Every wait below races this promise so a dropped socket fails fast instead
+  // of sitting out the whole timeout. The extra catch keeps the rejection
+  // handled during the phases where nothing is racing it yet.
+  let rejectDisconnected: (err: CliError) => void = () => {};
+  const disconnected = new Promise<never>((_, reject) => {
+    rejectDisconnected = reject;
+  });
+  void disconnected.catch(() => {});
+  socket.on("disconnect", () => {
+    rejectDisconnected(new CliError(2, `socket disconnected from ${url}`));
+  });
 
   const pushed: {
     monitorList?: Record<string, Monitor>;
@@ -145,9 +168,22 @@ export async function connect(): Promise<KumaSession> {
       clearTimeout(timer);
       reject(new CliError(2, `failed to connect to ${url}: ${err.message}`));
     });
+    socket.once("disconnect", () => {
+      clearTimeout(timer);
+      reject(new CliError(2, `socket disconnected from ${url}`));
+    });
   });
 
-  const login = await emitAck(socket, "login", [{ username, password, token: "" }], timeoutMs);
+  const login = await emitAck(
+    socket,
+    "login",
+    [{ username, password, token: "" }],
+    timeoutMs,
+    disconnected,
+  );
+  if (login?.tokenRequired === true) {
+    fail(2, "login requires 2FA; this CLI does not support 2FA logins");
+  }
   if (login?.ok !== true) {
     const msg = typeof login?.msg === "string" ? login.msg : "login failed";
     fail(2, msg);
@@ -158,20 +194,18 @@ export async function connect(): Promise<KumaSession> {
     if (Date.now() >= listsDeadline) {
       fail(2, "timed out waiting for pushed monitor/notification/proxy lists");
     }
-    await sleep(10);
+    await Promise.race([sleep(10), disconnected]);
   }
-  const { monitorList, notificationList, proxyList } = pushed;
-  if (!monitorList || !notificationList || !proxyList) {
-    fail(2, "timed out waiting for pushed monitor/notification/proxy lists");
-  }
+  const lists = pushed as Required<typeof pushed>;
 
   return new KumaSession(
     socket,
     url,
     timeoutMs,
-    monitorList,
-    notificationList,
-    proxyList,
+    lists.monitorList,
+    lists.notificationList,
+    lists.proxyList,
     heartbeats,
+    disconnected,
   );
 }

@@ -41,7 +41,8 @@ export function parseSets(values: string[] | undefined): Record<string, unknown>
   return out;
 }
 
-// Kuma stores notificationIDList either as { "3": true } or as [3]; both
+// Kuma sends notificationIDList as an object of truthy ids; an array only
+// appears in user input such as `--set notificationIDList=[3]`. Both shapes
 // normalize to the sorted list of truthy ids.
 export function notificationIdArray(value: unknown): number[] {
   const ids = new Set<number>();
@@ -71,7 +72,26 @@ export function parseId(value: string, flag: string): number {
 
 export function parseNumber(value: string, flag: string): number {
   const n = Number(value);
-  if (!Number.isFinite(n)) fail(2, `${flag} must be a number, got "${value}"`);
+  // Number("") and Number("   ") are 0, so emptiness needs its own check
+  if (value.trim() === "" || !Number.isFinite(n)) {
+    fail(2, `${flag} must be a number, got "${value}"`);
+  }
+  return n;
+}
+
+export function parsePositiveNumber(value: string, flag: string): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) {
+    fail(2, `${flag} must be a positive number, got "${value}"`);
+  }
+  return n;
+}
+
+export function parsePositiveInteger(value: string, flag: string): number {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n <= 0) {
+    fail(2, `${flag} must be a positive integer, got "${value}"`);
+  }
   return n;
 }
 
@@ -158,6 +178,12 @@ export function commandTimeoutMs(): number {
   return positiveTimeoutMs("UPTIME_KUMA_COMMAND_TIMEOUT", 60);
 }
 
+// A secret keeps its surrounding spaces; only the CR of a CRLF ending is dropped.
+export function firstSecretLine(text: string): string {
+  const line = text.split("\n", 1)[0] ?? "";
+  return line.endsWith("\r") ? line.slice(0, -1) : line;
+}
+
 // Both secret env vars are stripped from the child's env so a username_command
 // can never see the password and vice versa.
 async function runSecretCommand(command: string, timeoutMs: number, name: string): Promise<string> {
@@ -190,9 +216,9 @@ async function runSecretCommand(command: string, timeoutMs: number, name: string
   // stdout may hold the secret: report only that the command failed, never its output
   if (timedOut) fail(2, `${name} timed out`);
   if (exitCode !== 0) fail(2, `${name} failed`);
-  const firstLine = (stdout.split("\n", 1)[0] ?? "").trim();
-  if (!firstLine) fail(2, `${name} produced no output`);
-  return firstLine;
+  const secret = firstSecretLine(stdout);
+  if (!secret) fail(2, `${name} produced no output`);
+  return secret;
 }
 
 async function resolveSecret(

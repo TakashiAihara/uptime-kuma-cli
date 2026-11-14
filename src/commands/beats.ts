@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import { fail, parseId, parseNumber, printJson } from "../lib.ts";
+import { fail, parseId, parsePositiveInteger, parsePositiveNumber, printJson } from "../lib.ts";
 import { connect } from "../kuma.ts";
 
 type Beat = Record<string, unknown>;
@@ -28,8 +28,9 @@ export function registerBeats(program: Command): void {
     .option("--important", "keep only status changes")
     .action(async (rawId, opts) => {
       const id = parseId(rawId, "monitor id");
-      const hours = opts.hours === undefined ? 24 : parseNumber(opts.hours, "--hours");
-      const limit = opts.limit === undefined ? undefined : parseNumber(opts.limit, "--limit");
+      const hours = opts.hours === undefined ? 24 : parsePositiveNumber(opts.hours, "--hours");
+      const limit =
+        opts.limit === undefined ? undefined : parsePositiveInteger(opts.limit, "--limit");
       const s = await connect();
       const res = await s.request("getMonitorBeats", [id, hours]);
       // Kuma returns beats oldest first
@@ -78,7 +79,7 @@ export function registerEvents(program: Command): void {
     .option("--by-day", "count downs and ups per UTC day")
     .action(async (rawId, opts) => {
       const id = parseId(rawId, "monitor id");
-      const hours = opts.hours === undefined ? 168 : parseNumber(opts.hours, "--hours");
+      const hours = opts.hours === undefined ? 168 : parsePositiveNumber(opts.hours, "--hours");
       const s = await connect();
       const res = await s.request("getMonitorBeats", [id, hours]);
       const rows = beatRows(res)

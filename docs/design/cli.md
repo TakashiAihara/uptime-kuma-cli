@@ -30,7 +30,10 @@
 
 - `$XDG_CONFIG_HOME/uptime-kuma-cli/config.toml` (or `~/.config/uptime-kuma-cli/config.toml`)
     - `url`, `username_command`, `password_command`
-- `*_command` runs with `sh -c`; the first stdout line is the secret. An env value takes precedence and the command does not run
+- `*_command` runs with `sh -c`; the first stdout line, minus a trailing `\r`, is the secret (spaces are kept). An env value takes precedence and the command does not run
+- Accounts with 2FA are not supported: Kuma answers `tokenRequired` and the CLI exits 2
+- Each command logs in once. Kuma limits logins to 20 per minute for the whole instance, so a loop of many commands can lock out the UI login for a while
+- With an `http://` URL the login travels in clear text; use `https://` when the path leaves a trusted network
 - Env: `UPTIME_KUMA_URL`, `UPTIME_KUMA_USERNAME`, `UPTIME_KUMA_PASSWORD`, `UPTIME_KUMA_TIMEOUT` (seconds, default 30, for connect + login + each request), `UPTIME_KUMA_COMMAND_TIMEOUT` (seconds, default 60)
 - The username command does not see the password and vice versa
 
@@ -39,6 +42,7 @@
 - stdout is JSON (pretty, 2-space indent), stderr is for messages
 - `notificationIDList` is always printed as a sorted array of numbers, whether Kuma sent `{ "3": true }` or `[3]`
 - Notification configs and proxy passwords are never printed
+- Monitor fields that hold secrets (`basic_auth_pass`, `oauth_client_secret`, `tlsKey`, `headers`, `body`, `mqttPassword`, `radiusPassword`, `radiusSecret`, `databaseConnectionString`) print as `"***"` when non-empty; `pushToken` stays visible because pushers need it
 
 ## Exit codes
 
@@ -46,7 +50,7 @@
 |---|---|
 | 0 | done |
 | 1 | Kuma answered no (`ok: false`, unknown id) |
-| 2 | configuration, usage, connection, login, or timeout failure |
+| 2 | configuration, usage (including a missing subcommand), connection, login, disconnect, or timeout failure |
 | 3 | `monitors add` skipped because a monitor with the same name exists |
 | 70 | unexpected error |
 
@@ -59,18 +63,20 @@
     - `--name` filters case-insensitively
 - `monitors get <id>`: the monitor object from `monitorList`; unknown id exits 1
 - `monitors add --type <http|keyword|json-query|port|push> --name <name> [options]`
-    - options: `--url`, `--hostname`, `--port`, `--keyword`, `--json-path`, `--expected-value`, `--interval <s>` (60), `--retry-interval <s>` (60), `--max-retries <n>` (0), `--resend-interval <n>` (0), `--timeout <s>` (48), `--proxy-id <id>`, `--notification-id <id>` (repeatable), `--notifications-from <monitorId>`, `--paused`, `--push-token <token>`
+    - options: `--url`, `--hostname`, `--port`, `--keyword`, `--json-path`, `--expected-value`, `--interval <s>` (60), `--retry-interval <s>` (the interval), `--max-retries <n>` (0), `--resend-interval <n>` (0), `--timeout <s>` (48, capped at 80% of the interval like the UI), `--proxy-id <id>`, `--notification-id <id>` (repeatable), `--notifications-from <monitorId>`, `--paused`, `--push-token <token>`
+    - like the UI, notifications marked default are always attached, and http / keyword / json-query monitors get the default proxy unless `--proxy-id` is given
     - required per type: http / keyword / json-query need `--url`; keyword needs `--keyword`; json-query needs `--json-path` and `--expected-value`; port needs `--hostname` and `--port`. Missing ones exit 2 before connecting
     - same name (exact match) already present: print `{ id, name, skipped: true }` and exit 3 without sending `add`
     - the payload starts from the Kuma 1.23 UI defaults (`accepted_statuscodes: ["200-299"]`, `method: "GET"`, `maxredirects: 10`, `kafkaProducerBrokers: []`, `kafkaProducerSaslOptions: { mechanism: "None" }`, ...) and sends `notificationIDList` as `{ "<id>": true }`
-    - `--notifications-from` copies that monitor's notifications; `--notification-id` adds to them
+    - `--notifications-from` copies that monitor's notifications; `--notification-id` adds to them (both on top of the defaults)
     - push: `pushToken` is `--push-token` or 32 random alphanumerics, sent in `add` itself
     - `--paused` sends `active: false`, so Kuma does not start the monitor
-    - prints `{ id, name, type, active }`, plus `pushToken` and `pushUrl` (`<url>/api/push/<token>?status=up&msg=OK&ping=`) for push
+    - prints `{ id, name, type, active }`, plus `pushToken` and `pushUrl` (`<base>/api/push/<token>?status=up&msg=OK&ping=`, where base is the Primary Base URL setting when set, else the CLI url) for push
 - `monitors edit <id> --set <key>=<value>...`
     - fetches the monitor with `getMonitor`, applies each set (value parsed as JSON when it parses, else kept as a string), and sends `editMonitor`
-    - `notificationIDList` accepts an array or an object and is sent as an object
-    - prints the edited monitor as `monitors get` does
+    - `notificationIDList` accepts an array or an object of positive integer ids and is sent as an object (Kuma 1.23 iterates it with `for...in`, so an array would be stored as its indexes)
+    - `--set id=...` exits 2: it would make Kuma save into another monitor
+    - prints the monitor as Kuma saved it (fetched again with `getMonitor`), redacted as in `monitors get`; Kuma ignores some fields here (`active`), and this shows it
 - `monitors pause <id>` / `monitors resume <id>`: prints `{ id, active }`
 
 ### beats
@@ -94,14 +100,15 @@
 - `notifications add --name <name> --type <type> [--set k=v]... [--config-file <json>] [--default] [--apply-existing]`
     - the notification object is `{ name, type, isDefault, applyExisting, ...config-file, ...sets }`; secrets go through `--config-file` so they stay out of argv
     - prints `{ id, name, type }`
-- `notifications edit <id> [--set k=v]... [--config-file <json>]`: merges into the stored config and sends `addNotification (merged, id)`; prints `{ id, name, type }`
+- `notifications edit <id> [--set k=v]... [--config-file <json>]`: merges into the stored config and sends `addNotification (merged, id)` with `applyExisting: false` (a stored `true` would re-attach the notification to every monitor on each edit); at least one of `--set` / `--config-file`; prints `{ id, name, type }`
+- In `notifications add`, explicit `--name`, `--type`, `--default`, `--apply-existing` win over `--config-file` and `--set`
 - `notifications test <id>`: sends the stored config to `testNotification`; prints `{ id, ok: true, msg }`, Kuma's failure exits 1
 
 ### proxies
 
 - `proxies list`: `[{ id, protocol, host, port, auth, username, active, default }]`
 - `proxies add --protocol <http|https|socks|socks5|socks5h|socks4> --host <h> --port <p> [--username <u> --password-file <f>] [--default] [--apply-existing]`: prints `{ id }`
-- `proxies edit <id> --set k=v...`: merges into the listed proxy (password kept as stored) and sends `addProxy (merged, id)`; prints `{ id }`
+- `proxies edit <id> [--set k=v]... [--password-file <f>]`: merges into the listed proxy (password kept as stored unless `--password-file` is given) and sends `addProxy (merged, id)`; prints `{ id }`
 
 ## Not in scope
 

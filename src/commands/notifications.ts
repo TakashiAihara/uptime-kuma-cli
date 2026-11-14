@@ -62,12 +62,12 @@ export function registerNotifications(program: Command): void {
       const fileConfig =
         opts.configFile === undefined ? {} : readJsonFile(opts.configFile, "--config-file");
       const notification = {
+        ...fileConfig,
+        ...sets,
         name: opts.name,
         type: opts.type,
         isDefault: opts.default === true,
         applyExisting: opts.applyExisting === true,
-        ...fileConfig,
-        ...sets,
       };
       const s = await connect();
       const res = await s.request("addNotification", [notification, null]);
@@ -82,12 +82,21 @@ export function registerNotifications(program: Command): void {
     .action(async (rawId, opts) => {
       const id = parseId(rawId, "notification id");
       const sets = parseSets(opts.set as string[] | undefined);
+      if (Object.keys(sets).length === 0 && opts.configFile === undefined) {
+        fail(2, "notifications edit requires --set key=value or --config-file");
+      }
       const fileConfig =
         opts.configFile === undefined ? {} : readJsonFile(opts.configFile, "--config-file");
       const s = await connect();
       const row = s.notificationById(id);
       if (!row) fail(1, `notification ${id} not found`);
-      const merged = { ...storedConfig(row), ...fileConfig, ...sets };
+      // applyExisting would re-attach the notification to every monitor.
+      const merged: Record<string, unknown> = {
+        ...storedConfig(row),
+        ...fileConfig,
+        ...sets,
+        applyExisting: false,
+      };
       const res = await s.request("addNotification", [merged, id]);
       printJson({
         id: res?.id ?? id,

@@ -1,10 +1,25 @@
 import { Option, type Command } from "commander";
-import { fail, parseId, parsePort, parseSets, printJson, readTextFile } from "../lib.ts";
+import {
+  fail,
+  firstSecretLine,
+  parseId,
+  parsePort,
+  parseSets,
+  printJson,
+  readTextFile,
+} from "../lib.ts";
 import { connect } from "../kuma.ts";
 
 const PROTOCOLS = ["http", "https", "socks", "socks5", "socks5h", "socks4"] as const;
 
 const collect = (value: string, previous: string[]): string[] => [...previous, value];
+
+function readPasswordFile(path: string | undefined): string | undefined {
+  if (path === undefined) return undefined;
+  const password = firstSecretLine(readTextFile(path, "--password-file"));
+  if (password === "") fail(2, "--password-file is empty");
+  return password;
+}
 
 export function registerProxies(program: Command): void {
   const proxies = program.command("proxies").description("Manage proxies");
@@ -44,11 +59,7 @@ export function registerProxies(program: Command): void {
     .option("--apply-existing", "apply to existing monitors")
     .action(async (opts) => {
       const port = parsePort(opts.port, "--port");
-      const password =
-        opts.passwordFile === undefined
-          ? undefined
-          : (readTextFile(opts.passwordFile, "--password-file").split("\n", 1)[0] ?? "").trim();
-      if (password === "") fail(2, "--password-file is empty");
+      const password = readPasswordFile(opts.passwordFile);
       const proxy = {
         protocol: opts.protocol,
         host: opts.host,
@@ -69,16 +80,20 @@ export function registerProxies(program: Command): void {
     .command("edit <id>")
     .description("Edit a proxy")
     .option("--set <key=value>", "set a field (repeatable)", collect, [])
+    .option("--password-file <path>", "file containing the new proxy password")
     .action(async (rawId, opts) => {
       const id = parseId(rawId, "proxy id");
       const sets = parseSets(opts.set as string[] | undefined);
-      if (!opts.set || (opts.set as string[]).length === 0) {
-        fail(2, "proxies edit requires at least one --set key=value");
+      const password = readPasswordFile(opts.passwordFile);
+      const setValues = (opts.set ?? []) as string[];
+      if (setValues.length === 0 && password === undefined) {
+        fail(2, "proxies edit requires --set key=value or --password-file");
       }
       const s = await connect();
       const row = s.proxyById(id);
       if (!row) fail(1, `proxy ${id} not found`);
       const merged = { ...row, ...sets };
+      if (password !== undefined) merged.password = password;
       const res = await s.request("addProxy", [merged, id]);
       printJson({ id: res?.id ?? id });
     });
