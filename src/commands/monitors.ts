@@ -372,8 +372,10 @@ function validateHatchValues(fields: Record<string, unknown>): void {
 // retryInterval follows the interval and the timeout stays within 80% of
 // it, derived from the final interval after the hatch had its say. Explicit
 // values are kept; the cap applies to them the same way. On edit the caller
-// runs this only when the edit touches interval or timeout — stored values,
-// including a UI-saved timeout of 0, are otherwise sent back unchanged.
+// runs this only when the edit touches interval or timeout — a stored
+// timeout of 0 is otherwise sent back untouched, and Kuma 1.23.17 runs it
+// as interval × 800 seconds on HTTP checks (the reason parseTimeoutSeconds
+// refuses a user-supplied 0).
 function deriveMonitorTiming(monitor: Record<string, unknown>): void {
   if (typeof monitor.interval !== "number") return;
   monitor.retryInterval = monitor.retryInterval ?? monitor.interval;
@@ -436,13 +438,9 @@ function validateFinalMonitor(
       fail(2, "pushToken must be a non-empty string");
     }
   }
-  // dns_resolve_server ships on every add (the UI default) and is judged on
-  // edit only when the edit sets it or switches the monitor to dns.
-  if (
-    edit === undefined ||
-    edit.touched.has("dns_resolve_server") ||
-    (edit.typeChanged && type === "dns")
-  ) {
+  // dns_resolve_server is required only of a dns monitor; on edit it is
+  // judged only when the edit sets it or switches the type to dns.
+  if (type === "dns" && inScope("dns_resolve_server")) {
     const server = monitor.dns_resolve_server;
     if (typeof server !== "string" || server === "") {
       fail(2, "dns_resolve_server must be a non-empty string");
