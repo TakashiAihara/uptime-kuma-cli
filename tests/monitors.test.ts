@@ -785,7 +785,7 @@ describe("monitors delete", () => {
   test("an unknown id exits 1 without sending deleteMonitor", async () => {
     const r = await run(sb, ["monitors", "delete", "404", "--yes"], creds(kuma.url));
     expect(r.code).toBe(1);
-    expect(r.stderr).toContain("404");
+    expect(r.stderr).toContain("monitor 404 not found");
     expect(kuma.calls.find((c) => c.event === "deleteMonitor")).toBeUndefined();
     expect(kuma.state.monitors.map((m) => m.id).sort((a, b) => a - b)).toEqual([2, 7, 9]);
   });

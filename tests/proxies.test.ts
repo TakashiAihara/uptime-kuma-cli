@@ -180,7 +180,7 @@ describe("proxies", () => {
     expect(kuma.calls.find((c) => c.event === "deleteProxy")!.args).toEqual([2]);
   });
 
-  test("delete clears the proxy from monitors that use it", async () => {
+  test("fake: deleteProxy nulls proxyId on monitors like Kuma 1.23", async () => {
     kuma.state.monitors.push({ id: 5, name: "via-proxy", proxyId: 2 });
     const r = await run(sb, ["proxies", "delete", "2", "--yes"], creds(kuma.url));
     expect(r.code).toBe(0);
@@ -202,7 +202,7 @@ describe("proxies", () => {
     expect(kuma.calls).toHaveLength(0);
   });
 
-  test("delete of an unknown id exits 1", async () => {
+  test("an unknown id exits 1 with Kuma's 'proxy not found'", async () => {
     const r = await run(sb, ["proxies", "delete", "9", "--yes"], creds(kuma.url));
     expect(r.code).toBe(1);
     expect(r.stderr).toContain("proxy not found");

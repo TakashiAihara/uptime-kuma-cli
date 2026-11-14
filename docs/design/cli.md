@@ -82,7 +82,7 @@
     - `--set parent=<the same id>` exits 2: Kuma 1.23 rejects only descendants, and a self-parent makes its parent walk loop forever
     - prints the monitor as Kuma saved it (fetched again with `getMonitor`), redacted as in `monitors get`; Kuma ignores some fields here (`active`), and this shows it
 - `monitors pause <id>` / `monitors resume <id>`: prints `{ id, active }`
-- `monitors delete <id> --yes`: sends `deleteMonitor` and prints `{ id, deleted: true }`; without `--yes` exits 2 before connecting. The id is checked against the pushed `monitorList` first because Kuma 1.23 answers ok even for an unknown id
+- `monitors delete <id> --yes`: sends `deleteMonitor` and prints `{ id, deleted: true }`; without `--yes` exits 2 before connecting. The id is checked against the pushed `monitorList` first because Kuma 1.23 answers ok even for an unknown id. Deleting a group monitor does not delete its children: Kuma sets their `parent` to null and they keep running as top-level monitors, and the monitor's heartbeats are deleted with it
 
 ### beats
 

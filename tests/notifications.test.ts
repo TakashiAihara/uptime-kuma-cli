@@ -272,7 +272,7 @@ describe("notifications", () => {
     expect(kuma.calls).toHaveLength(0);
   });
 
-  test("delete of an unknown id exits 1", async () => {
+  test("an unknown id exits 1 with Kuma's 'notification not found'", async () => {
     const r = await run(sb, ["notifications", "delete", "99", "--yes"], creds(kuma.url));
     expect(r.code).toBe(1);
     expect(r.stderr).toContain("notification not found");

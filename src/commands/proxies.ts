@@ -107,6 +107,7 @@ export function registerProxies(program: Command): void {
       const id = parseId(rawId, "proxy id");
       if (!opts.yes) fail(2, `would delete proxy ${id}; pass --yes to delete`);
       const s = await connect();
+      // Kuma 1.23 rejects an unknown id with ok:false, so no pre-check (unlike deleteMonitor)
       await s.request("deleteProxy", [id]);
       printJson({ id, deleted: true });
     });
