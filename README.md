@@ -59,6 +59,7 @@ uptime-kuma-cli monitors add --type push --name "nightly job" --paused --notific
 uptime-kuma-cli monitors edit 14 --set maxretries=2 --set 'notificationIDList=[3,5]'
 uptime-kuma-cli monitors pause 14
 uptime-kuma-cli monitors resume 14
+uptime-kuma-cli monitors delete 14 --yes
 
 uptime-kuma-cli beats 14 --hours 6 --limit 20
 uptime-kuma-cli beats latest
@@ -68,10 +69,12 @@ uptime-kuma-cli notifications list
 uptime-kuma-cli notifications add --name "ntfy" --type ntfy --config-file ntfy.json
 uptime-kuma-cli notifications edit 3 --set ntfytopic=alerts
 uptime-kuma-cli notifications test 3
+uptime-kuma-cli notifications delete 3 --yes
 
 uptime-kuma-cli proxies list
 uptime-kuma-cli proxies add --protocol socks5 --host 10.0.0.9 --port 1080
 uptime-kuma-cli proxies edit 2 --set port=1081 --password-file proxy-pw
+uptime-kuma-cli proxies delete 2 --yes
 ```
 
 - `monitors add` exits 3 and sends nothing when a monitor with the same name exists

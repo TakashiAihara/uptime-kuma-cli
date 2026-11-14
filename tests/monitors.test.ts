@@ -757,3 +757,44 @@ describe("monitors pause / resume", () => {
     expect(r.code).toBe(1);
   });
 });
+
+describe("monitors delete", () => {
+  test("deletes the monitor and prints { id, deleted: true }", async () => {
+    const r = await run(sb, ["monitors", "delete", "7", "--yes"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json()).toEqual({ id: 7, deleted: true });
+    expect(kuma.state.monitors.map((m) => m.id)).toEqual([2, 9]);
+    expect(kuma.calls.find((c) => c.event === "deleteMonitor")!.args).toEqual([7]);
+  });
+
+  test("without --yes exits 2 before connecting", async () => {
+    const r = await run(sb, ["monitors", "delete", "7"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("would delete monitor 7");
+    expect(r.stderr).toContain("--yes");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("an invalid id exits 2 before connecting", async () => {
+    const r = await run(sb, ["monitors", "delete", "abc", "--yes"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("positive integer");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("an unknown id exits 1 without sending deleteMonitor", async () => {
+    const r = await run(sb, ["monitors", "delete", "404", "--yes"], creds(kuma.url));
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("monitor 404 not found");
+    expect(kuma.calls.find((c) => c.event === "deleteMonitor")).toBeUndefined();
+    expect(kuma.state.monitors.map((m) => m.id).sort((a, b) => a - b)).toEqual([2, 7, 9]);
+  });
+
+  test("Kuma's ok:false exits 1 with its message", async () => {
+    kuma.state.fail.deleteMonitor = "cannot delete";
+    const r = await run(sb, ["monitors", "delete", "7", "--yes"], creds(kuma.url));
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("cannot delete");
+    expect(kuma.state.monitors.map((m) => m.id).sort((a, b) => a - b)).toEqual([2, 7, 9]);
+  });
+});

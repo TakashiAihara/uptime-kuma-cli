@@ -171,4 +171,49 @@ describe("proxies", () => {
     const r = await run(sb, ["proxies", "edit", "9", "--set", "port=1"], creds(kuma.url));
     expect(r.code).toBe(1);
   });
+
+  test("delete removes the proxy and prints { id, deleted: true }", async () => {
+    const r = await run(sb, ["proxies", "delete", "2", "--yes"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json()).toEqual({ id: 2, deleted: true });
+    expect(kuma.state.proxies).toHaveLength(0);
+    expect(kuma.calls.find((c) => c.event === "deleteProxy")!.args).toEqual([2]);
+  });
+
+  test("fake: deleteProxy nulls proxyId on monitors like Kuma 1.23", async () => {
+    kuma.state.monitors.push({ id: 5, name: "via-proxy", proxyId: 2 });
+    const r = await run(sb, ["proxies", "delete", "2", "--yes"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(kuma.state.monitors[0]!.proxyId).toBeNull();
+  });
+
+  test("delete without --yes exits 2 before connecting", async () => {
+    const r = await run(sb, ["proxies", "delete", "2"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("would delete proxy 2");
+    expect(r.stderr).toContain("--yes");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("delete with an invalid id exits 2 before connecting", async () => {
+    const r = await run(sb, ["proxies", "delete", "abc", "--yes"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("positive integer");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("an unknown id exits 1 with Kuma's 'proxy not found'", async () => {
+    const r = await run(sb, ["proxies", "delete", "9", "--yes"], creds(kuma.url));
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("proxy not found");
+    expect(kuma.state.proxies).toHaveLength(1);
+  });
+
+  test("delete: Kuma's ok:false exits 1 with its message", async () => {
+    kuma.state.fail.deleteProxy = "cannot delete";
+    const r = await run(sb, ["proxies", "delete", "2", "--yes"], creds(kuma.url));
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("cannot delete");
+    expect(kuma.state.proxies).toHaveLength(1);
+  });
 });
