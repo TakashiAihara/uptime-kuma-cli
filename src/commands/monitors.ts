@@ -5,7 +5,6 @@ import {
   notificationIdObject,
   parseId,
   parseNonNegativeInteger,
-  parseNonNegativeNumber,
   parsePort,
   parsePositiveInteger,
   parsePositiveNumber,
@@ -265,12 +264,26 @@ function hatchNumber(
   return parse(String(value), key);
 }
 
+// Kuma 1.23.17 monitor.js patches a timeout of 0 (or less) to
+// interval * 1000 * 0.8 at check time and then multiplies by 1000 for axios,
+// so the effective timeout silently becomes interval × 800 seconds.
+function parseTimeoutSeconds(value: string, flag: string): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) {
+    fail(
+      2,
+      `${flag} must be a positive number of seconds, got "${value}"; Kuma 1.23 turns 0 into interval × 800 seconds`,
+    );
+  }
+  return n;
+}
+
 const HATCH_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unknown> = {
   interval: (v, k) => hatchNumber(v, k, parsePositiveNumber),
   retryInterval: (v, k) => hatchNumber(v, k, parsePositiveNumber),
   resendInterval: (v, k) => hatchNumber(v, k, parseNonNegativeInteger),
   maxretries: (v, k) => hatchNumber(v, k, parseNonNegativeInteger),
-  timeout: (v, k) => hatchNumber(v, k, parseNonNegativeNumber),
+  timeout: (v, k) => hatchNumber(v, k, parseTimeoutSeconds),
   port: (v, k) => hatchNumber(v, k, parsePort),
   packetSize: (v, k) => hatchNumber(v, k, parsePositiveInteger),
   proxyId: (v, k) => (v === null ? null : hatchNumber(v, k, parseId)),
@@ -486,7 +499,7 @@ export function registerMonitors(program: Command): void {
         "--resend-interval",
       );
       const timeout =
-        opts.timeout === undefined ? undefined : parseNonNegativeNumber(opts.timeout, "--timeout");
+        opts.timeout === undefined ? undefined : parseTimeoutSeconds(opts.timeout, "--timeout");
       const proxyIdOption =
         opts.proxyId === undefined ? undefined : parseId(opts.proxyId, "--proxy-id");
       // dns defaults to resolver port 53 like the UI's type watcher; the other
@@ -505,10 +518,17 @@ export function registerMonitors(program: Command): void {
       // A hatch can null out the host the flag supplied; docker still needs one.
       // Precedence matches the merge below: --set beats --config-file beats the flag.
       let mergedDockerHost: unknown = dockerHost;
-      if (fileConfig.docker_host !== undefined) mergedDockerHost = fileConfig.docker_host;
-      if (sets.docker_host !== undefined) mergedDockerHost = sets.docker_host;
+      let dockerHostSource = "--docker-host";
+      if (fileConfig.docker_host !== undefined) {
+        mergedDockerHost = fileConfig.docker_host;
+        dockerHostSource = "--config-file";
+      }
+      if (sets.docker_host !== undefined) {
+        mergedDockerHost = sets.docker_host;
+        dockerHostSource = "--set";
+      }
       if (type === "docker" && typeof mergedDockerHost !== "number") {
-        fail(2, "--type docker requires --docker-host");
+        fail(2, `${dockerHostSource} docker_host must be a docker host id`);
       }
       const notificationIds = ((opts.notificationId ?? []) as string[]).map((v) =>
         parseId(v, "--notification-id"),

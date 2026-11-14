@@ -1374,6 +1374,7 @@ describe("monitors add", () => {
     ["retryInterval=abc"],
     ["resendInterval=1.5"],
     ["maxretries=-1"],
+    ["timeout=0"],
     ["timeout=-1"],
     ["port=70000"],
     ["port=abc"],
@@ -1657,7 +1658,7 @@ describe("monitors add", () => {
     expect(sent.basic_auth_pass).toBe("cfg-bp");
   });
 
-  test("docker: a hatch docker_host=null still requires a host", async () => {
+  test("docker: --set docker_host=null names the hatch source", async () => {
     const r = await run(
       sb,
       [
@@ -1677,7 +1678,33 @@ describe("monitors add", () => {
       creds(kuma.url),
     );
     expect(r.code).toBe(2);
-    expect(r.stderr).toContain("--type docker requires --docker-host");
+    expect(r.stderr).toContain("--set docker_host must be a docker host id");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("docker: --config-file docker_host=null names the hatch source", async () => {
+    const f = join(sb.dir, "dnull.json");
+    writeFileSync(f, JSON.stringify({ docker_host: null }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "docker",
+        "--name",
+        "dnull2",
+        "--docker-container",
+        "c",
+        "--docker-host",
+        "2",
+        "--config-file",
+        f,
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--config-file docker_host must be a docker host id");
     expect(kuma.calls).toHaveLength(0);
   });
 
@@ -1724,7 +1751,7 @@ describe("monitors add", () => {
     expect((addCalls()[0]!.args[0] as any).docker_host).toBeNull();
   });
 
-  test("--set timeout=0 is sent as 0; Kuma reads it as 80% of the interval", async () => {
+  test("--set timeout=0 exits 2: Kuma 1.23 turns it into interval × 800 seconds", async () => {
     const r = await run(
       sb,
       [
@@ -1741,11 +1768,12 @@ describe("monitors add", () => {
       ],
       creds(kuma.url),
     );
-    expect(r.code).toBe(0);
-    expect((addCalls()[0]!.args[0] as any).timeout).toBe(0);
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("Kuma 1.23 turns 0 into interval × 800 seconds");
+    expect(kuma.calls).toHaveLength(0);
   });
 
-  test("--timeout 0 is accepted and sent", async () => {
+  test("--timeout 0 exits 2 with the same Kuma 1.23 reason", async () => {
     const r = await run(
       sb,
       [
@@ -1762,9 +1790,35 @@ describe("monitors add", () => {
       ],
       creds(kuma.url),
     );
-    expect(r.code).toBe(0);
-    expect((addCalls()[0]!.args[0] as any).timeout).toBe(0);
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("Kuma 1.23 turns 0 into interval × 800 seconds");
+    expect(kuma.calls).toHaveLength(0);
   });
+
+  test.each([[["--timeout", ""]], [["--timeout", "abc"]], [["--set", 'timeout="abc"']]])(
+    "a non-numeric timeout exits 2 before connecting: %p",
+    async (extra) => {
+      const r = await run(
+        sb,
+        [
+          "monitors",
+          "add",
+          "--type",
+          "http",
+          "--name",
+          "x",
+          "--url",
+          "https://x.example.com",
+          ...extra,
+        ],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("timeout must");
+      expect(r.stderr).toContain("Kuma 1.23 turns 0 into interval × 800 seconds");
+      expect(kuma.calls).toHaveLength(0);
+    },
+  );
 });
 
 describe("monitors edit", () => {
@@ -2185,6 +2239,22 @@ describe("monitors edit", () => {
     expect(kuma.calls).toHaveLength(0);
   });
 
+  test("edit --set timeout=0 exits 2: Kuma 1.23 turns it into interval × 800 seconds", async () => {
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "timeout=0"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("Kuma 1.23 turns 0 into interval × 800 seconds");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("edit --config-file timeout=0 exits 2 with the same reason", async () => {
+    const f = join(sb.dir, "edit-t0.json");
+    writeFileSync(f, JSON.stringify({ timeout: 0 }));
+    const r = await run(sb, ["monitors", "edit", "7", "--config-file", f], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("Kuma 1.23 turns 0 into interval × 800 seconds");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
   test("edit --set docker_host is checked against dockerHostList", async () => {
     kuma.state.dockerHosts = [{ id: 2 }];
     const r = await run(sb, ["monitors", "edit", "7", "--set", "docker_host=9"], creds(kuma.url));
@@ -2201,13 +2271,16 @@ describe("monitors edit", () => {
     expect(sent.docker_host).toBe(2);
   });
 
-  test("edit on a push monitor with an empty pushToken exits 2", async () => {
-    kuma.state.monitors.find((m) => m.id === 9)!.pushToken = "tok-9";
-    const r = await run(sb, ["monitors", "edit", "9", "--set", 'pushToken=""'], creds(kuma.url));
-    expect(r.code).toBe(2);
-    expect(r.stderr).toContain("pushToken");
-    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
-  });
+  test.each([['pushToken=""'], ["pushToken=null"]])(
+    "edit on a push monitor with %s exits 2",
+    async (set) => {
+      kuma.state.monitors.find((m) => m.id === 9)!.pushToken = "tok-9";
+      const r = await run(sb, ["monitors", "edit", "9", "--set", set], creds(kuma.url));
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("pushToken");
+      expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+    },
+  );
 
   test("edit derives timeout from the final interval like add", async () => {
     const m7 = kuma.state.monitors.find((m) => m.id === 7)!;
