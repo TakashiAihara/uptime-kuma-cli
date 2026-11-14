@@ -89,7 +89,7 @@ uptime-kuma-cli proxies delete 2 --yes
 - Kuma only notifies on status changes; with `resendInterval` 0 a monitor that stays down does not notify again
 - Notification configs, proxy passwords and secret monitor fields (basic auth, OAuth secret, TLS key, headers, body, ...) are never printed; pass secrets with `--config-file` / `--password-file`
 - `monitors add` / `monitors edit` take `--set key=value` and `--config-file` for monitor fields without a dedicated flag; secret fields only go through `--config-file` so they stay out of argv
-- New monitors get the notifications marked default; every type except port / push also gets the default proxy, as the UI assigns it on add
+- New monitors get the notifications marked default; every type except port / push gets the proxy flagged `default` (proxyId), and `--proxy-id` overrides it
 - Each command logs in once; Kuma allows 20 logins per minute per instance, so pace long loops. Accounts with 2FA are not supported
 
 ## Exit codes

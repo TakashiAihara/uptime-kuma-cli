@@ -215,23 +215,92 @@ function parseParent(value: string): number | null {
   return parseId(value, "--parent");
 }
 
+// parent reaches Kuma as a number or null. A numeric string would slip past
+// editMonitor's descendant check, which compares ids with includes().
+function normalizeParent(value: unknown): number | null {
+  if (value === null) return null;
+  if (value === "") fail(2, "parent must not be an empty string");
+  let n = NaN;
+  if (typeof value === "number") {
+    n = value;
+  } else if (typeof value === "string" && /^[1-9]\d*$/.test(value)) {
+    n = Number(value);
+  }
+  if (!Number.isInteger(n) || n <= 0) {
+    fail(2, `parent must be a monitor id, got ${JSON.stringify(value)}`);
+  }
+  return n;
+}
+
 // The pushed monitorList is the only source for the parent check: it must be
-// an existing monitor of type group. null/undefined mean "no parent"; hatch
-// values arrive as numbers or numeric strings.
-function checkParentGroup(s: KumaSession, parent: unknown): void {
-  if (parent === undefined || parent === null || parent === "") return;
-  let id = NaN;
-  if (typeof parent === "number") {
-    id = parent;
-  } else if (typeof parent === "string" && /^\d+$/.test(parent)) {
-    id = Number(parent);
+// an existing monitor of type group. null means "no parent".
+function checkParentGroup(s: KumaSession, parent: number | null): void {
+  if (parent === null) return;
+  const m = s.monitorById(parent);
+  if (!m) fail(1, `monitor ${parent} not found`);
+  if (m.type !== "group") fail(1, `monitor ${parent} is not a group`);
+}
+
+// docker_host must name a host Kuma pushed in dockerHostList, like the ids
+// the UI's docker host picker offers. Already normalized to number|null.
+function checkDockerHost(s: KumaSession, dockerHost: unknown): void {
+  if (typeof dockerHost !== "number") return;
+  if (!s.dockerHosts().some((h) => h.id === dockerHost)) {
+    fail(1, `docker host ${dockerHost} not found`);
   }
-  if (!Number.isInteger(id) || id <= 0) {
-    fail(2, `parent must be a monitor id, got ${JSON.stringify(parent)}`);
+}
+
+// A hatch value for a key that has a typed flag goes through the flag's
+// parser; flags take strings, so a string here parses the same way while a
+// number is stringified first. The key names the error.
+function hatchNumber(
+  value: unknown,
+  key: string,
+  parse: (value: string, flag: string) => number,
+): number {
+  if (typeof value !== "number" && typeof value !== "string") {
+    fail(2, `${key} must be a number`);
   }
-  const m = s.monitorById(id);
-  if (!m) fail(1, `monitor ${id} not found`);
-  if (m.type !== "group") fail(1, `monitor ${id} is not a group`);
+  return parse(String(value), key);
+}
+
+const HATCH_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unknown> = {
+  interval: (v, k) => hatchNumber(v, k, parsePositiveNumber),
+  retryInterval: (v, k) => hatchNumber(v, k, parsePositiveNumber),
+  resendInterval: (v, k) => hatchNumber(v, k, parseNonNegativeInteger),
+  maxretries: (v, k) => hatchNumber(v, k, parseNonNegativeInteger),
+  timeout: (v, k) => hatchNumber(v, k, parsePositiveNumber),
+  port: (v, k) => hatchNumber(v, k, parsePort),
+  packetSize: (v, k) => hatchNumber(v, k, parsePositiveInteger),
+  proxyId: (v, k) => (v === null ? null : hatchNumber(v, k, parseId)),
+  parent: (v) => normalizeParent(v),
+  docker_host: (v, k) => (v === null ? null : hatchNumber(v, k, parseId)),
+  dns_resolve_type: (v, k) => {
+    if (typeof v !== "string" || !(DNS_RESOLVE_TYPES as readonly string[]).includes(v)) {
+      fail(2, `${k} must be one of ${DNS_RESOLVE_TYPES.join(", ")}`);
+    }
+    return v;
+  },
+  accepted_statuscodes: (v, k) => {
+    if (!Array.isArray(v) || v.some((c) => typeof c !== "string")) {
+      fail(2, `${k} must be an array of strings`);
+    }
+    return v;
+  },
+  kafkaProducerBrokers: (v, k) => {
+    if (!Array.isArray(v)) fail(2, `${k} must be an array`);
+    return v;
+  },
+};
+
+// Runs before connecting so a bad hatch value exits 2 with nothing sent.
+// The coerced result is written back: the payload then carries the same type
+// the typed flag would have produced.
+function validateHatchValues(fields: Record<string, unknown>): void {
+  for (const [key, value] of Object.entries(fields)) {
+    const check = HATCH_VALUE_CHECKS[key];
+    if (check !== undefined) fields[key] = check(value, key);
+  }
 }
 
 const summarize = (m: Monitor) => ({
@@ -344,29 +413,57 @@ export function registerMonitors(program: Command): void {
       checkAddFields(sets, "--set");
       checkAddFields(fileConfig, "--config-file");
       refuseSecretSets(sets);
+      validateHatchValues(sets);
+      validateHatchValues(fileConfig);
       const hatchNotifications =
         sets.notificationIDList !== undefined
           ? sets.notificationIDList
           : fileConfig.notificationIDList;
       if (hatchNotifications !== undefined) checkNotificationIdList(hatchNotifications);
       const parentOpt = opts.parent === undefined ? undefined : parseParent(opts.parent);
+      // Precedence for parent: --set beats --config-file beats --parent.
+      let parentInput: unknown;
+      if (sets.parent !== undefined) {
+        parentInput = sets.parent;
+      } else if (fileConfig.parent !== undefined) {
+        parentInput = fileConfig.parent;
+      } else {
+        parentInput = parentOpt;
+      }
+      const normalizedParent = parentInput === undefined ? undefined : normalizeParent(parentInput);
+
+      // The merged pushToken must be a non-empty string; the token printed and
+      // built into pushUrl is always the one sent to Kuma.
+      let pushToken: string | undefined;
+      if (type === "push") {
+        let source = "--push-token";
+        let merged: unknown = (opts.pushToken as string | undefined) ?? generatePushToken();
+        if (fileConfig.pushToken !== undefined) {
+          source = "--config-file";
+          merged = fileConfig.pushToken;
+        }
+        if (sets.pushToken !== undefined) {
+          source = "--set";
+          merged = sets.pushToken;
+        }
+        if (typeof merged !== "string" || merged === "") {
+          fail(2, `${source} pushToken must be a non-empty string`);
+        }
+        pushToken = merged;
+      }
 
       const interval = parsePositiveNumber(opts.interval ?? "60", "--interval");
       const retryInterval =
         opts.retryInterval === undefined
-          ? interval
+          ? undefined
           : parsePositiveNumber(opts.retryInterval, "--retry-interval");
       const maxRetries = parseNonNegativeInteger(opts.maxRetries ?? "0", "--max-retries");
       const resendInterval = parseNonNegativeInteger(
         opts.resendInterval ?? "0",
         "--resend-interval",
       );
-      // The UI's clampTimeout keeps every timeout within 80% of the interval
-      const maxTimeout = Math.trunc(interval * 8) / 10;
-      const timeout = Math.min(
-        opts.timeout === undefined ? 48 : parsePositiveNumber(opts.timeout, "--timeout"),
-        maxTimeout,
-      );
+      const timeout =
+        opts.timeout === undefined ? undefined : parsePositiveNumber(opts.timeout, "--timeout");
       const proxyIdOption =
         opts.proxyId === undefined ? undefined : parseId(opts.proxyId, "--proxy-id");
       // dns defaults to resolver port 53 like the UI's type watcher; the other
@@ -428,15 +525,17 @@ export function registerMonitors(program: Command): void {
         name,
         url: null,
         interval,
-        retryInterval,
         resendInterval,
         maxretries: maxRetries,
-        timeout,
         notificationIDList: notificationIdObject(ids),
         proxyId,
         active,
       };
-      if (parentOpt !== undefined) typed.parent = parentOpt;
+      // retryInterval and timeout are only sent when explicit; their defaults
+      // derive from the final interval after the merge below.
+      if (retryInterval !== undefined) typed.retryInterval = retryInterval;
+      if (timeout !== undefined) typed.timeout = timeout;
+      if (normalizedParent !== undefined) typed.parent = normalizedParent;
       if (urlTypes) typed.url = opts.url;
       if (type === "keyword") typed.keyword = opts.keyword;
       if (type === "json-query") {
@@ -460,11 +559,7 @@ export function registerMonitors(program: Command): void {
         typed.docker_host = dockerHost;
       }
       if (type === "gamedig") typed.game = opts.game;
-      let pushToken: string | undefined;
-      if (type === "push") {
-        pushToken = (opts.pushToken as string | undefined) ?? generatePushToken();
-        typed.pushToken = pushToken;
-      }
+      if (type === "push") typed.pushToken = pushToken;
 
       let pushBase = s.url;
       if (pushToken !== undefined) {
@@ -482,12 +577,20 @@ export function registerMonitors(program: Command): void {
         ...fileConfig,
         ...sets,
       };
+      if (normalizedParent !== undefined) monitor.parent = normalizedParent;
       monitor.notificationIDList = notificationIdObject(monitor.notificationIDList);
-      checkParentGroup(s, monitor.parent);
-      if (type === "push") {
-        const effective = monitor.pushToken;
-        if (typeof effective === "string" && effective !== "") pushToken = effective;
-      }
+      // retryInterval follows the interval and the timeout stays within 80%
+      // of it; both derive from the final interval after the hatch had its
+      // say. Explicit values from any source are kept; the cap applies to
+      // them exactly like it did to the typed flags.
+      const finalInterval = monitor.interval as number;
+      monitor.retryInterval = monitor.retryInterval ?? finalInterval;
+      monitor.timeout = Math.min(
+        typeof monitor.timeout === "number" ? monitor.timeout : 48,
+        Math.trunc(finalInterval * 8) / 10,
+      );
+      if (normalizedParent !== undefined) checkParentGroup(s, normalizedParent);
+      checkDockerHost(s, monitor.docker_host);
 
       const res = await s.request("add", [monitor]);
       const out: Record<string, unknown> = {
@@ -525,21 +628,22 @@ export function registerMonitors(program: Command): void {
       checkEditFields(sets, "--set");
       checkEditFields(fileConfig, "--config-file");
       refuseSecretSets(sets);
+      validateHatchValues(sets);
+      validateHatchValues(fileConfig);
+      // The parent checks run on the final merged value, whichever source set
+      // it: --parent beats --set beats --config-file.
+      let parentInput: unknown;
+      if (parentOpt !== undefined) {
+        parentInput = parentOpt;
+      } else if (sets.parent !== undefined) {
+        parentInput = sets.parent;
+      } else {
+        parentInput = fileConfig.parent;
+      }
+      const normalizedParent = parentInput === undefined ? undefined : normalizeParent(parentInput);
       // Kuma 1.23 only rejects descendants as parent, not the monitor itself, and a self-parent
       // makes its parent walk loop forever
-      if (sets.parent !== undefined && Number(sets.parent) === id) {
-        fail(2, "--set parent cannot be the monitor itself");
-      }
-      if (
-        fileConfig.parent !== undefined &&
-        fileConfig.parent !== null &&
-        Number(fileConfig.parent) === id
-      ) {
-        fail(2, "--config-file parent cannot be the monitor itself");
-      }
-      if (parentOpt === id) {
-        fail(2, "--parent cannot be the monitor itself");
-      }
+      if (normalizedParent === id) fail(2, "parent cannot be the monitor itself");
       if (sets.notificationIDList !== undefined) {
         checkNotificationIdList(sets.notificationIDList);
       }
@@ -547,20 +651,12 @@ export function registerMonitors(program: Command): void {
         checkNotificationIdList(fileConfig.notificationIDList);
       }
       const s = await connect();
-      // --parent wins the merge, then --set, then --config-file. A --set
-      // parent keeps its historical pass-through and is not group-checked.
-      let parentToCheck: unknown;
-      if (parentOpt !== undefined) {
-        parentToCheck = parentOpt;
-      } else if (sets.parent === undefined) {
-        parentToCheck = fileConfig.parent;
-      }
-      checkParentGroup(s, parentToCheck);
+      if (normalizedParent !== undefined) checkParentGroup(s, normalizedParent);
       const fetched = await fetchMonitor(s, id);
       const monitor: Record<string, unknown> = { ...fetched };
       for (const [k, v] of Object.entries(fileConfig)) monitor[k] = v;
       for (const [k, v] of Object.entries(sets)) monitor[k] = v;
-      if (parentOpt !== undefined) monitor.parent = parentOpt;
+      if (normalizedParent !== undefined) monitor.parent = normalizedParent;
       // Kuma iterates notificationIDList with for...in, so an array would be
       // stored under its indexes; always send the object shape.
       monitor.notificationIDList = notificationIdObject(monitor.notificationIDList);

@@ -99,6 +99,10 @@ export interface ProxyRow extends Record<string, unknown> {
   id: number;
 }
 
+export interface DockerHostRow extends Record<string, unknown> {
+  id: number;
+}
+
 type BeatRow = Record<string, unknown>;
 
 let currentSocket: Socket | undefined;
@@ -139,6 +143,7 @@ export class KumaSession {
     readonly monitorList: Record<string, Monitor>,
     readonly notificationList: NotificationRow[],
     readonly proxyList: ProxyRow[],
+    readonly dockerHostList: DockerHostRow[],
     readonly heartbeats: Map<number, BeatRow[]>,
     private readonly disconnected: Promise<never>,
   ) {}
@@ -174,6 +179,10 @@ export class KumaSession {
 
   proxyById(id: number): ProxyRow | undefined {
     return this.proxies().find((p) => p.id === id);
+  }
+
+  dockerHosts(): DockerHostRow[] {
+    return [...this.dockerHostList].sort((a, b) => a.id - b.id);
   }
 
   heartbeat(id: number): BeatRow[] | undefined {
@@ -220,6 +229,7 @@ export async function connect(): Promise<KumaSession> {
     monitorList?: Record<string, Monitor>;
     notificationList?: NotificationRow[];
     proxyList?: ProxyRow[];
+    dockerHostList?: DockerHostRow[];
   } = {};
   const heartbeats = new Map<number, BeatRow[]>();
   // The server pushes these right after the login callback, so the listeners
@@ -232,6 +242,9 @@ export async function connect(): Promise<KumaSession> {
   });
   socket.on("proxyList", (data: ProxyRow[]) => {
     pushed.proxyList = data;
+  });
+  socket.on("dockerHostList", (data: DockerHostRow[]) => {
+    pushed.dockerHostList = data;
   });
   socket.on("heartbeatList", (id: unknown, beats: unknown) => {
     heartbeats.set(Number(id), Array.isArray(beats) ? (beats as BeatRow[]) : []);
@@ -267,9 +280,14 @@ export async function connect(): Promise<KumaSession> {
   }
 
   const listsDeadline = Date.now() + timeoutMs;
-  while (!pushed.monitorList || !pushed.notificationList || !pushed.proxyList) {
+  while (
+    !pushed.monitorList ||
+    !pushed.notificationList ||
+    !pushed.proxyList ||
+    !pushed.dockerHostList
+  ) {
     if (Date.now() >= listsDeadline) {
-      fail(2, "timed out waiting for pushed monitor/notification/proxy lists");
+      fail(2, "timed out waiting for pushed monitor/notification/proxy/docker host lists");
     }
     await Promise.race([sleep(10), disconnected]);
   }
@@ -282,6 +300,7 @@ export async function connect(): Promise<KumaSession> {
     lists.monitorList,
     lists.notificationList,
     lists.proxyList,
+    lists.dockerHostList,
     heartbeats,
     disconnected,
   );
