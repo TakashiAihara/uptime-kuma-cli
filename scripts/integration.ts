@@ -6,29 +6,26 @@
  * Starts louislam/uptime-kuma:1.23.17 from tests/integration/compose.yaml on
  * 127.0.0.1:${UPTIME_KUMA_IT_PORT:-3901}, creates the first-run admin over
  * Socket.IO, then runs `bun test tests/integration` with UPTIME_KUMA_IT_*
- * pointing at it. The compose project is always torn down afterwards
- * (`down -v`, which also removes the anonymous data volume, so the next run
- * starts empty) unless UPTIME_KUMA_IT_KEEP=1.
+ * pointing at it. The compose project is torn down before `up` and after the
+ * run (`down -v`, which also removes the anonymous data volume, so the next
+ * run starts empty) unless UPTIME_KUMA_IT_KEEP=1.
  */
 import { join } from "node:path";
 import { io, type Socket } from "socket.io-client";
 
 const REPO_ROOT = join(import.meta.dir, "..");
 const COMPOSE_FILE = join(REPO_ROOT, "tests", "integration", "compose.yaml");
-const PROJECT = "uptime-kuma-cli-it";
-const PORT = process.env.UPTIME_KUMA_IT_PORT ?? "3901";
+const PORT = process.env.UPTIME_KUMA_IT_PORT || "3901";
+const PROJECT = `uptime-kuma-cli-it-${PORT}`;
 const BASE_URL = `http://127.0.0.1:${PORT}`;
 // Throwaway admin in a disposable container, not a secret
 const USERNAME = "it-admin";
 const PASSWORD = "it-Passw0rd-1234";
 
-const POLL_MS = 1_000;
-const FETCH_TIMEOUT_MS = 5_000;
-const WAIT_LIMIT_MS = 120_000;
 const CALL_TIMEOUT_MS = 30_000;
 const COMPOSE_UP_TIMEOUT_MS = 300_000;
 const COMPOSE_DOWN_TIMEOUT_MS = 60_000;
-const TEST_LIMIT_MS = 15 * 60_000;
+const TEST_LIMIT_MS = 8 * 60_000;
 const KEEP = process.env.UPTIME_KUMA_IT_KEEP === "1";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -45,24 +42,6 @@ async function compose(args: string[], timeoutMs: number): Promise<number> {
       return -1;
     }),
   ]);
-}
-
-async function waitForKuma(): Promise<void> {
-  const deadline = Date.now() + WAIT_LIMIT_MS;
-  let lastError = "no response yet";
-  while (Date.now() < deadline) {
-    try {
-      // Any HTTP answer means the server is up; setup state does not matter here
-      await fetch(`${BASE_URL}/`, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
-      return;
-    } catch (e) {
-      lastError = e instanceof Error ? e.message : String(e);
-    }
-    await sleep(POLL_MS);
-  }
-  throw new Error(
-    `Kuma did not answer at ${BASE_URL}/ within ${WAIT_LIMIT_MS / 1000}s (${lastError})`,
-  );
 }
 
 function emitAck<T>(socket: Socket, event: string, args: unknown[], timeoutMs: number): Promise<T> {
@@ -82,9 +61,8 @@ async function setupKuma(): Promise<void> {
     timeout: CALL_TIMEOUT_MS,
   });
   try {
-    // Kuma registers its socket handlers only after awaiting sendInfo(), and
-    // info is the last thing sendInfo emits, so waiting for it means the
-    // handlers exist (louislam/uptime-kuma#7710).
+    // The connection handler registers needSetup/setup synchronously and emits
+    // info, so a received info means those handlers are already listening
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(
         () => reject(new Error(`timed out connecting to ${BASE_URL}`)),
@@ -118,6 +96,8 @@ async function setupKuma(): Promise<void> {
   }
 }
 
+let testProc: ReturnType<typeof Bun.spawn> | undefined;
+
 async function runTests(): Promise<number> {
   console.log("running bun test tests/integration");
   const proc = Bun.spawn(["bun", "test", "tests/integration"], {
@@ -132,6 +112,7 @@ async function runTests(): Promise<number> {
     stdout: "inherit",
     stderr: "inherit",
   });
+  testProc = proc;
   const code = await Promise.race([
     proc.exited,
     sleep(TEST_LIMIT_MS).then(() => {
@@ -139,39 +120,56 @@ async function runTests(): Promise<number> {
       return -1;
     }),
   ]);
+  testProc = undefined;
   if (code === -1) console.error(`test run exceeded ${TEST_LIMIT_MS / 60_000} minutes`);
   return code === -1 ? 1 : code;
 }
 
-let tornDown = false;
-async function teardown(): Promise<void> {
-  if (tornDown) return;
-  tornDown = true;
-  if (KEEP) {
-    console.log("UPTIME_KUMA_IT_KEEP=1: leaving the compose project up");
-    return;
-  }
-  try {
-    const code = await compose(["down", "-v"], COMPOSE_DOWN_TIMEOUT_MS);
-    if (code !== 0) console.error(`docker compose down -v exited ${code}`);
-  } catch (e) {
-    console.error(`docker compose down -v failed: ${e instanceof Error ? e.message : e}`);
-  }
+// Shared so the finally and a signal handler await the same down -v.
+let teardownPromise: Promise<boolean> | undefined;
+
+// Resolves false when the compose project could not be removed.
+function teardown(): Promise<boolean> {
+  teardownPromise ??= (async () => {
+    if (KEEP) {
+      console.log("UPTIME_KUMA_IT_KEEP=1: leaving the compose project up");
+      return true;
+    }
+    try {
+      const code = await compose(["down", "-v"], COMPOSE_DOWN_TIMEOUT_MS);
+      if (code !== 0) {
+        console.error(`docker compose down -v exited ${code}`);
+        return false;
+      }
+      return true;
+    } catch (e) {
+      console.error(`docker compose down -v failed: ${e instanceof Error ? e.message : e}`);
+      return false;
+    }
+  })();
+  return teardownPromise;
 }
 
+let signalExit: number | null = null;
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
+    const code = signal === "SIGINT" ? 130 : 143;
+    signalExit ??= code;
     console.error(`\nreceived ${signal}, tearing down`);
-    void teardown().finally(() => process.exit(signal === "SIGINT" ? 130 : 143));
+    testProc?.kill();
+    void teardown().finally(() => process.exit(code));
   });
 }
 
 let exitCode = 1;
 try {
-  if ((await compose(["up", "-d"], COMPOSE_UP_TIMEOUT_MS)) !== 0) {
-    console.error("docker compose up -d failed");
+  // Remove what a KEEP=1 or killed run left behind; the result does not matter
+  await compose(["down", "-v"], COMPOSE_DOWN_TIMEOUT_MS);
+  if (
+    (await compose(["up", "-d", "--wait", "--wait-timeout", "120"], COMPOSE_UP_TIMEOUT_MS)) !== 0
+  ) {
+    console.error("docker compose up failed");
   } else {
-    await waitForKuma();
     await setupKuma();
     exitCode = await runTests();
   }
@@ -179,6 +177,6 @@ try {
   console.error(`integration setup failed: ${e instanceof Error ? e.message : e}`);
   exitCode = 1;
 } finally {
-  await teardown();
+  if (!(await teardown()) && exitCode === 0) exitCode = 1;
 }
-process.exit(exitCode);
+process.exit(signalExit ?? exitCode);

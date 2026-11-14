@@ -17,7 +17,11 @@ function itEnv(): Record<string, string> {
   };
 }
 
-export async function cliRun(sb: Sandbox, args: string[]): Promise<Result> {
+export async function cliRun(
+  sb: Sandbox,
+  args: string[],
+  env: Record<string, string> = {},
+): Promise<Result> {
   for (;;) {
     const now = Date.now();
     while (starts.length > 0 && now - starts[0]! >= WINDOW_MS) starts.shift();
@@ -27,7 +31,5 @@ export async function cliRun(sb: Sandbox, args: string[]): Promise<Result> {
     }
     await sleep(starts[0]! + WINDOW_MS - now + 20);
   }
-  return run(sb, args, itEnv());
+  return run(sb, args, { ...itEnv(), ...env });
 }
-
-export { sleep };

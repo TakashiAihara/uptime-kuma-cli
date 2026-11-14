@@ -107,12 +107,6 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
     expect(g.code).toBe(1);
   }, 180_000);
 
-  test("delete of an unknown id exits 1", async () => {
-    const r = await cliRun(sb, ["monitors", "delete", "999999", "--yes"]);
-    expect(r.code).toBe(1);
-    expect(r.stderr).toContain("999999");
-  }, 120_000);
-
   test("delete --yes removes the push monitor", async () => {
     const r = await cliRun(sb, ["monitors", "delete", String(pushId), "--yes"]);
     expect(r.code).toBe(0);

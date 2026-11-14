@@ -342,7 +342,8 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
         auth: p.auth ? 1 : 0,
         username: (p.username as string) ?? null,
         password: (p.password as string) ?? null,
-        active: p.active === false || p.active === 0 ? 0 : 1,
+        // Kuma 1.23's proxy save stores every proxy active (proxy.active || true)
+        active: 1,
         default: p.default ? 1 : 0,
       });
       return { ok: true, msg: "Saved", id: row.id };

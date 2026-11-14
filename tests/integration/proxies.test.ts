@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { sandbox, type Sandbox } from "../helpers/run";
 import { cliRun } from "./helpers";
 
@@ -32,23 +34,65 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("proxies (real Kuma)", () => {
     proxyId = out.id;
   }, 120_000);
 
-  test("list shows the new proxy", async () => {
+  test("list shows the whole row", async () => {
     const r = await cliRun(sb, ["proxies", "list"]);
     expect(r.code).toBe(0);
     const row = r.json().find((p: any) => p.id === proxyId);
-    expect(row).toMatchObject({
+    expect(row).toEqual({
+      id: proxyId,
       protocol: "http",
       host: "127.0.0.1",
       port: 3128,
       auth: false,
+      username: null,
+      active: true,
+      default: false,
     });
   }, 120_000);
 
-  test("edit --set port=3129", async () => {
+  test("edit --set port=3129 is stored", async () => {
     const r = await cliRun(sb, ["proxies", "edit", String(proxyId), "--set", "port=3129"]);
     expect(r.code).toBe(0);
     expect(r.json()).toEqual({ id: proxyId });
-  }, 120_000);
+    const list = await cliRun(sb, ["proxies", "list"]);
+    expect(list.code).toBe(0);
+    expect(list.json().find((p: any) => p.id === proxyId)).toMatchObject({ port: 3129 });
+  }, 180_000);
+
+  test("a proxy added with credentials and --default lists auth/default true", async () => {
+    const f = join(sb.dir, "proxy-pw");
+    writeFileSync(f, "it-proxy-pw\n");
+    const r = await cliRun(sb, [
+      "proxies",
+      "add",
+      "--protocol",
+      "http",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "3128",
+      "--username",
+      "u",
+      "--password-file",
+      f,
+      "--default",
+    ]);
+    expect(r.code).toBe(0);
+    const authedId = r.json().id;
+    expect(authedId).toBeGreaterThan(0);
+
+    const list = await cliRun(sb, ["proxies", "list"]);
+    expect(list.code).toBe(0);
+    expect(list.json().find((p: any) => p.id === authedId)).toMatchObject({
+      auth: true,
+      default: true,
+      username: "u",
+    });
+
+    const del = await cliRun(sb, ["proxies", "delete", String(authedId), "--yes"]);
+    expect(del.code).toBe(0);
+    expect(del.json()).toEqual({ id: authedId, deleted: true });
+  }, 240_000);
 
   test("delete --yes removes it", async () => {
     const r = await cliRun(sb, ["proxies", "delete", String(proxyId), "--yes"]);
