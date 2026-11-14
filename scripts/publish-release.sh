@@ -301,7 +301,7 @@ scratch="$(mktemp -d)"
 gh_err="${scratch}/gh-err"
 trap cleanup EXIT
 
-# install.sh は Latest を配るので、main の先頭でない commit の release を Latest にしない
+# install.sh ships Latest, so a release for a commit that is not main's head must not be Latest
 if [ "$head" = "$MAIN_SHA" ]; then latest=true; else latest=false; fi
 
 # On main's head the three paths do the same thing, so this is the only place they can differ.

@@ -24,8 +24,8 @@ beforeEach(() => {
   git("init", "-q");
   git("commit", "-q", "--allow-empty", "-m", "x");
 
-  // 呼ばれた引数を残す gh の偽。CREATE / VIEW / PUBLISHED_SUMS / PUBLISHED_BINARIES /
-  // IS_DRAFT で結果を決める
+  // A fake gh that records the arguments it was called with. CREATE / VIEW /
+  // PUBLISHED_SUMS / PUBLISHED_BINARIES / IS_DRAFT decide the outcome
   const gh = join(sb.dir, "bin", "gh");
   writeFileSync(
     gh,
@@ -95,7 +95,7 @@ function publish(env: Record<string, string | undefined> = {}) {
   });
 }
 
-/** 既に公開されている release の SHA256SUMS */
+/** The SHA256SUMS of an already-published release */
 function published(sums: string): void {
   writeFileSync(join(sb.dir, "published"), sums);
 }
@@ -103,7 +103,7 @@ function published(sums: string): void {
 const ghCalls = () => readFileSync(calls, "utf8");
 
 describe("publish-release.sh", () => {
-  test("まだ無い release は作る", () => {
+  test("creates a release that does not exist yet", () => {
     const r = publish();
 
     expect(r.exitCode).toBe(0);
@@ -112,22 +112,23 @@ describe("publish-release.sh", () => {
     expect(ghCalls()).not.toContain("--method DELETE");
   });
 
-  test("main の先頭でない commit の release は Latest にしない", () => {
+  test("does not make a release for a commit that is not main's head Latest", () => {
     const r = publish({ MAIN_SHA: "0123456789abcdef0123456789abcdef01234567" });
 
     expect(r.exitCode).toBe(0);
     expect(ghCalls()).toContain(`--target ${head()} --latest=false `);
   });
 
-  // 比べる相手が 1 つも無い状態でも、比較が対象を見つけられずに落ちてはいけない (#15)
-  test("tag が 1 つも無い checkout でも、版番号の比較で止めない", () => {
+  // Even with nothing to compare against, the comparison must not fail looking for a
+  // target (#15)
+  test("does not stop on the version comparison even in a checkout with no tags", () => {
     const r = publish({ MAIN_SHA: "0123456789abcdef0123456789abcdef01234567", VIEW: "1" });
 
     expect(r.exitCode).toBe(0);
     expect(ghCalls()).toContain(`release create ${TAG} --target ${head()} --latest=false `);
   });
 
-  test("MAIN_SHA が無ければ release を作らずに止まる", () => {
+  test("stops without creating a release when MAIN_SHA is missing", () => {
     const r = publish({ MAIN_SHA: "" });
 
     expect(r.exitCode).not.toBe(0);
@@ -135,19 +136,19 @@ describe("publish-release.sh", () => {
     expect(existsSync(calls)).toBe(false);
   });
 
-  test("公開済みで SHA256SUMS が同じなら、何もせず成功する", () => {
+  test("succeeds doing nothing when already published with the same SHA256SUMS", () => {
     published(BUILT);
 
     const r = publish({ CREATE: "1" });
 
     expect(r.exitCode).toBe(0);
     expect(r.stdout.toString()).toContain("already published");
-    // sums だけでなく、release の資産一覧も見てから成功を言う
+    // It reports success only after checking the release's asset list, not just the sums
     expect(ghCalls()).toContain(`release view ${TAG} --json assets`);
   });
 
-  // draft は /releases/latest を指さないので、公開済みとは言えない (#10)
-  test("公開済みでも draft のままなら成功にしない", () => {
+  // A draft does not point /releases/latest at itself, so it cannot count as published (#10)
+  test("does not succeed while still a draft even if already published", () => {
     published(BUILT);
 
     const r = publish({ CREATE: "1", IS_DRAFT: "true" });
@@ -157,8 +158,8 @@ describe("publish-release.sh", () => {
     expect(r.stdout.toString()).not.toContain("already published");
   });
 
-  // SHA256SUMS が同じでも、release が持つバイナリが足りないと壊れた配布になる (#10)
-  test("SHA256SUMS が同じでもバイナリが欠けていれば成功にしない", () => {
+  // Even with matching SHA256SUMS, a release missing binaries is a broken distribution (#10)
+  test("does not succeed when binaries are missing even if SHA256SUMS match", () => {
     published(BUILT);
 
     const r = publish({ CREATE: "1", PUBLISHED_BINARIES: "SHA256SUMS" });
@@ -167,7 +168,7 @@ describe("publish-release.sh", () => {
     expect(r.stderr.toString()).toContain(`release ${TAG} has no asset uptime-kuma-cli-linux-x64`);
   });
 
-  test("SHA256SUMS が空なら、同じと見なさず落ちる", () => {
+  test("fails rather than treating an empty SHA256SUMS as the same", () => {
     published("");
     writeFileSync(join(sb.dir, "dist", "SHA256SUMS"), "");
 
@@ -177,7 +178,7 @@ describe("publish-release.sh", () => {
     expect(r.stderr.toString()).toContain("empty SHA256SUMS");
   });
 
-  test("公開済みで SHA256SUMS が違えば、上書きせず落ちる", () => {
+  test("fails without overwriting when already published with different SHA256SUMS", () => {
     published(OTHER);
 
     const r = publish({ CREATE: "1" });
@@ -186,21 +187,21 @@ describe("publish-release.sh", () => {
     expect(r.stderr.toString()).toContain("not overwriting");
   });
 
-  test("release が読めなければ、create の失敗を本当の失敗として落ちる", () => {
+  test("fails with the create failure as the real one when the release cannot be read", () => {
     const r = publish({ CREATE: "1", VIEW: "1" });
 
     expect(r.exitCode).toBe(1);
     expect(r.stderr.toString()).toContain("the failure above is the real one");
   });
 
-  test("公開済みなのに SHA256SUMS が無ければ、同じと見なさず落ちる", () => {
+  test("fails rather than treating it as the same when published but SHA256SUMS is missing", () => {
     const r = publish({ CREATE: "1", PUBLISHED_SUMS: "" });
 
     expect(r.exitCode).toBe(1);
     expect(r.stderr.toString()).toContain("without SHA256SUMS");
   });
 
-  test("SHA256SUMS が違う公開済み release に、upload も --clobber もしない", () => {
+  test("does not upload or --clobber to an already-published release with different SHA256SUMS", () => {
     published(OTHER);
     publish({ CREATE: "1" });
 
@@ -208,10 +209,11 @@ describe("publish-release.sh", () => {
     expect(ghCalls()).not.toContain("--clobber");
   });
 
-  // gh release create は tag を自分で作る時だけ --target を使う。既に tag があると別 commit の
-  // ままなので、落的とした tag の下で別 commit のバイナリが配られることになる (#9)
-  describe("tag が既に別の commit を指すとき", () => {
-    test("release を作らずに止まる", () => {
+  // gh release create uses --target only when it creates the tag itself. If the tag
+  // already exists it stays on another commit, so binaries built from a different commit
+  // would be distributed under that tag's name (#9)
+  describe("when the tag already points at another commit", () => {
+    test("stops without creating a release", () => {
       git("tag", TAG);
       const tagged = head();
       writeFileSync(join(sb.dir, "file"), "x");
@@ -226,8 +228,9 @@ describe("publish-release.sh", () => {
       expect(existsSync(calls)).toBe(false);
     });
 
-    // 同じ commit の再実行 (落ちた run の再走、既存 tag の dispatch) は通らなくてはいけない
-    test("同じ commit の tag なら、そのまま release を作る", () => {
+    // A re-run on the same commit (re-running a failed run, dispatching an existing tag)
+    // must pass through
+    test("creates the release as is when the tag is on the same commit", () => {
       git("tag", TAG);
 
       const r = publish();
@@ -238,8 +241,8 @@ describe("publish-release.sh", () => {
   });
 });
 
-describe("publish-release.sh: 古い commit の新しい版番号 (#15)", () => {
-  // old (HEAD) に v0.1.0、その先の main に v0.2.0-rc.3。HEAD は old に戻す
+describe("publish-release.sh: a newer version number on an old commit (#15)", () => {
+  // v0.1.0 on old (HEAD), v0.2.0-rc.3 on the main ahead of it. HEAD goes back to old
   let oldSha: string;
   let mainSha: string;
   beforeEach(() => {
@@ -251,7 +254,7 @@ describe("publish-release.sh: 古い commit の新しい版番号 (#15)", () => 
     git("checkout", "-q", oldSha);
   });
 
-  test("main より高い版番号の新しいタグは、古い commit からは公開しない", () => {
+  test("does not publish a new tag with a version higher than main's from an old commit", () => {
     const r = publish({ TAG: "v0.2.0", MAIN_SHA: mainSha, VIEW: "1" });
 
     expect(r.exitCode).toBe(1);
@@ -260,7 +263,7 @@ describe("publish-release.sh: 古い commit の新しい版番号 (#15)", () => 
     expect(existsSync(calls) ? ghCalls() : "").not.toContain("release create");
   });
 
-  test("手で push されて checkout に入っている新しいタグでも、自分自身とは比べずに止める", () => {
+  test("also stops on a new hand-pushed tag already in the checkout, without comparing it to itself", () => {
     git("tag", "v0.2.0");
 
     const r = publish({ TAG: "v0.2.0", MAIN_SHA: mainSha, VIEW: "1" });
@@ -270,14 +273,14 @@ describe("publish-release.sh: 古い commit の新しい版番号 (#15)", () => 
     expect(existsSync(calls) ? ghCalls() : "").not.toContain("release create");
   });
 
-  test("既存の最大より低い版番号は古い commit からも公開し、Latest にしない", () => {
+  test("publishes a version below the existing maximum even from an old commit, without making it Latest", () => {
     const r = publish({ TAG: "v0.0.9", MAIN_SHA: mainSha, VIEW: "1" });
 
     expect(r.exitCode).toBe(0);
     expect(ghCalls()).toContain(`release create v0.0.9 --target ${oldSha} --latest=false `);
   });
 
-  test("公開済みのタグの再実行は、古い commit でも止めない", () => {
+  test("does not stop a re-run of an already-published tag even on an old commit", () => {
     git("tag", "v0.3.0");
     published(BUILT);
 
@@ -287,8 +290,9 @@ describe("publish-release.sh: 古い commit の新しい版番号 (#15)", () => 
     expect(r.stdout.toString()).toContain("already published");
   });
 
-  // rc の n は文字列ではない。rc.10 と rc.9 を比べるので、並べ替えを文字列にすると大小が逆
-  test("rc の番号は数値として比べる", () => {
+  // The rc number is not a string. rc.10 and rc.9 are compared, so sorting as strings
+  // would invert the order
+  test("compares rc numbers as numbers", () => {
     git("tag", "v0.2.0-rc.9");
 
     const r = publish({ TAG: "v0.2.0-rc.10", MAIN_SHA: mainSha, VIEW: "1" });
@@ -298,7 +302,7 @@ describe("publish-release.sh: 古い commit の新しい版番号 (#15)", () => 
     expect(existsSync(calls) ? ghCalls() : "").not.toContain("release create");
   });
 
-  test("main の先頭への通常の正式版は Latest にする", () => {
+  test("makes a normal final version on main's head Latest", () => {
     git("checkout", "-q", mainSha);
 
     const r = publish({ TAG: "v0.2.0", MAIN_SHA: mainSha, VIEW: "1" });
@@ -308,8 +312,9 @@ describe("publish-release.sh: 古い commit の新しい版番号 (#15)", () => 
   });
 });
 
-describe("publish-release.sh: 版番号の並びと経路 (#15 の 2 周目)", () => {
-  // 辞書順では v0.1.0 < v0.10.0-rc.1 < v0.2.0 < v0.9.0。semver の最大 v0.10.0-rc.1 は先頭にも末尾にも来ない
+describe("publish-release.sh: version ordering and paths (second round of #15)", () => {
+  // In lexicographic order v0.1.0 < v0.10.0-rc.1 < v0.2.0 < v0.9.0. The semver maximum
+  // v0.10.0-rc.1 comes neither first nor last
   let oldSha: string;
   let mainSha: string;
   beforeEach(() => {
@@ -325,14 +330,14 @@ describe("publish-release.sh: 版番号の並びと経路 (#15 の 2 周目)", (
   const old = (env: Record<string, string | undefined>) =>
     publish({ MAIN_SHA: mainSha, VIEW: "1", ...env });
 
-  test("minor は数値で比べる: v0.9.5 は v0.10.0-rc.1 より低いので公開する", () => {
+  test("compares minor as a number: publishes v0.9.5 because it is below v0.10.0-rc.1", () => {
     const r = old({ TAG: "v0.9.5" });
 
     expect(r.exitCode).toBe(0);
     expect(ghCalls()).toContain(`release create v0.9.5 --target ${oldSha} --latest=false `);
   });
 
-  test("正式版はその rc より上: v0.10.0 は止める", () => {
+  test("a final version sits above its rc: stops v0.10.0", () => {
     const r = old({ TAG: "v0.10.0" });
 
     expect(r.exitCode).toBe(1);
@@ -340,14 +345,14 @@ describe("publish-release.sh: 版番号の並びと経路 (#15 の 2 周目)", (
     expect(existsSync(calls) ? ghCalls() : "").not.toContain("release create");
   });
 
-  test("major で決まる: v1.0.0 は止める", () => {
+  test("decided by major: stops v1.0.0", () => {
     const r = old({ TAG: "v1.0.0" });
 
     expect(r.exitCode).toBe(1);
     expect(existsSync(calls) ? ghCalls() : "").not.toContain("release create");
   });
 
-  test("patch で決まる: main に v0.10.2 があるとき v0.10.3 は止め、v0.10.1 は通す", () => {
+  test("decided by patch: with v0.10.2 on main, stops v0.10.3 and lets v0.10.1 through", () => {
     git("tag", "v0.10.2", mainSha);
 
     const high = old({ TAG: "v0.10.3" });
@@ -359,7 +364,7 @@ describe("publish-release.sh: 版番号の並びと経路 (#15 の 2 周目)", (
     expect(ghCalls()).toContain(`release create v0.10.1 --target ${oldSha} --latest=false `);
   });
 
-  test("自動の rc で main が進んでいたら、公開せず緑で抜けて notice を残す", () => {
+  test("for an automatic rc, if main moved on, exits green without publishing and leaves a notice", () => {
     const r = old({ TAG: "v0.10.0-rc.2", RELEASE_TRIGGER: "workflow_run" });
 
     expect(r.exitCode).toBe(0);
@@ -368,7 +373,7 @@ describe("publish-release.sh: 版番号の並びと経路 (#15 の 2 周目)", (
     expect(existsSync(calls) ? ghCalls() : "").not.toContain("git/refs");
   });
 
-  test("workflow_dispatch でも、release の無い高い版番号は止める (push で拒否されたタグの抜け道を塞ぐ)", () => {
+  test("workflow_dispatch also stops a higher version number with no release (closes the way around a tag refused on push)", () => {
     const r = old({ TAG: "v0.10.0", RELEASE_TRIGGER: "workflow_dispatch" });
 
     expect(r.exitCode).toBe(1);
@@ -376,7 +381,7 @@ describe("publish-release.sh: 版番号の並びと経路 (#15 の 2 周目)", (
     expect(ghCalls()).not.toContain("release create");
   });
 
-  test("workflow_dispatch の再リリースは、release があるなら版番号で止めない", () => {
+  test("a workflow_dispatch re-release is not stopped by the version number when a release exists", () => {
     published(BUILT);
 
     const r = old({ TAG: "v0.10.0", RELEASE_TRIGGER: "workflow_dispatch", VIEW: "0", CREATE: "1" });
@@ -385,7 +390,7 @@ describe("publish-release.sh: 版番号の並びと経路 (#15 の 2 周目)", (
     expect(r.stdout.toString()).toContain("already published");
   });
 
-  test("自動の rc が main の先頭なら、そのまま公開して Latest にする", () => {
+  test("an automatic rc on main's head is published as is and made Latest", () => {
     git("checkout", "-q", mainSha);
 
     const r = old({ TAG: "v0.10.0-rc.2", RELEASE_TRIGGER: "workflow_run" });
@@ -395,7 +400,7 @@ describe("publish-release.sh: 版番号の並びと経路 (#15 の 2 周目)", (
     expect(ghCalls()).toContain(`release create v0.10.0-rc.2 --target ${mainSha} --latest=true `);
   });
 
-  test("比べる相手は公開済みの release だけ: release の無い高いタグが残っていても上限にしない", () => {
+  test("only published releases are compared: a leftover higher tag with no release does not set the ceiling", () => {
     git("tag", "v1.0.0", oldSha);
 
     const r = old({
@@ -410,7 +415,7 @@ describe("publish-release.sh: 版番号の並びと経路 (#15 の 2 周目)", (
     expect(ghCalls()).not.toContain("release create");
   });
 
-  test("release の一覧を読めなければ止めて理由を出す", () => {
+  test("stops with the reason when the release list cannot be read", () => {
     const r = old({ TAG: "v0.9.5", LIST_ERROR: "HTTP 503: Service Unavailable" });
 
     expect(r.exitCode).toBe(1);
@@ -418,14 +423,14 @@ describe("publish-release.sh: 版番号の並びと経路 (#15 の 2 周目)", (
     expect(ghCalls()).not.toContain("release create");
   });
 
-  test("拒否のメッセージは、正当なタグを後から dispatch で出す道も示す", () => {
+  test("the refusal message also shows the way to release a legitimate tag later via dispatch", () => {
     const r = old({ TAG: "v0.10.0" });
 
     expect(r.exitCode).toBe(1);
     expect(r.stderr.toString()).toContain("workflow_dispatch");
   });
 
-  test("RELEASE_TRIGGER が無ければ release を作らずに止まる", () => {
+  test("stops without creating a release when RELEASE_TRIGGER is missing", () => {
     const r = old({ TAG: "v0.9.5", RELEASE_TRIGGER: undefined });
 
     expect(r.exitCode).not.toBe(0);
@@ -433,7 +438,7 @@ describe("publish-release.sh: 版番号の並びと経路 (#15 の 2 周目)", (
     expect(existsSync(calls) ? ghCalls() : "").not.toContain("release create");
   });
 
-  test("release の有無を読めない (not found 以外の失敗) なら止めて理由を出す", () => {
+  test("stops with the reason when it cannot tell whether a release exists (a failure other than not found)", () => {
     const r = old({ TAG: "v0.9.5", VIEW_ERROR: "HTTP 502: Bad Gateway" });
 
     expect(r.exitCode).toBe(1);
@@ -441,14 +446,14 @@ describe("publish-release.sh: 版番号の並びと経路 (#15 の 2 周目)", (
     expect(ghCalls()).not.toContain("release create");
   });
 
-  test("桁あふれの版番号は release の形と認めず止める", () => {
+  test("stops on a version number wider than the release shape allows", () => {
     const r = old({ TAG: "v99999999999999999999.0.0" });
 
     expect(r.exitCode).toBe(1);
     expect(existsSync(calls) ? ghCalls() : "").not.toContain("release create");
   });
 
-  test("先頭 0 の付いたタグは比較の相手に数えない", () => {
+  test("does not count a tag with a leading zero among the comparison partners", () => {
     git("tag", "v0.011.0", mainSha);
 
     const r = old({ TAG: "v0.10.0-rc.2" });
@@ -459,10 +464,10 @@ describe("publish-release.sh: 版番号の並びと経路 (#15 の 2 周目)", (
   });
 });
 
-describe("publish-release.sh: tag を先に作って競合を塞ぐ (#14)", () => {
+describe("publish-release.sh: create the tag first to close the race (#14)", () => {
   const other = "0123456789abcdef0123456789abcdef01234567";
 
-  test("tag は API で build した commit に先に作り、release は既存の tag にだけ付ける", () => {
+  test("creates the tag via the API on the built commit first, and attaches the release only to an existing tag", () => {
     const r = publish({ VIEW: "1" });
 
     expect(r.exitCode).toBe(0);
@@ -474,7 +479,7 @@ describe("publish-release.sh: tag を先に作って競合を塞ぐ (#14)", () =
     expect(calls.indexOf("git/refs")).toBeLessThan(calls.indexOf("release create"));
   });
 
-  test("確認の後で同名の tag が別の commit に現れたら、release を作らずに止める", () => {
+  test("stops without creating a release if a same-named tag appears on another commit after the check", () => {
     const r = publish({ VIEW: "1", REF_EXISTING: other });
 
     expect(r.exitCode).toBe(1);
@@ -483,14 +488,14 @@ describe("publish-release.sh: tag を先に作って競合を塞ぐ (#14)", () =
     expect(ghCalls()).not.toContain("release create");
   });
 
-  test("同じ commit を指す既存の tag (再実行) なら、そのまま release を付ける", () => {
+  test("attaches the release as is when an existing tag points at the same commit (a re-run)", () => {
     const r = publish({ VIEW: "1", REF_EXISTING: head() });
 
     expect(r.exitCode).toBe(0);
     expect(ghCalls()).toMatch(new RegExp(`release create ${TAG} .*--verify-tag`));
   });
 
-  test("注釈付き tag は指している commit で比べる", () => {
+  test("compares an annotated tag by the commit it points at", () => {
     const tagObject = "fedcba9876543210fedcba9876543210fedcba98";
 
     const same = publish({
@@ -512,7 +517,7 @@ describe("publish-release.sh: tag を先に作って競合を塞ぐ (#14)", () =
     expect(diff.stderr.toString()).toContain(other);
   });
 
-  test("tag を作れない理由が「既にある」以外なら、止めて理由を出す", () => {
+  test("stops with the reason when the failure to create the tag is something other than 'already exists'", () => {
     const r = publish({
       VIEW: "1",
       REF_CREATE_ERROR: "HTTP 403: Resource not accessible by integration",
@@ -523,7 +528,7 @@ describe("publish-release.sh: tag を先に作って競合を塞ぐ (#14)", () =
     expect(ghCalls()).not.toContain("release create");
   });
 
-  test("既存の tag は名前どおりの ref を読み、注釈付きはその tag object を読む", () => {
+  test("reads an existing tag at the ref its name says, and an annotated one at its tag object", () => {
     const tagObject = "fedcba9876543210fedcba9876543210fedcba98";
 
     publish({ VIEW: "1", REF_EXISTING: tagObject, REF_TYPE: "tag", TAG_TARGET: head() });
@@ -533,7 +538,7 @@ describe("publish-release.sh: tag を先に作って競合を塞ぐ (#14)", () =
     expect(calls).toContain(`api repos/{owner}/{repo}/git/tags/${tagObject} `);
   });
 
-  test("既存の tag を読めなければ止めて理由を出す", () => {
+  test("stops with the reason when the existing tag cannot be read", () => {
     const r = publish({ VIEW: "1", REF_EXISTING: head(), REF_READ_ERROR: "HTTP 502: Bad Gateway" });
 
     expect(r.exitCode).toBe(1);
@@ -541,7 +546,7 @@ describe("publish-release.sh: tag を先に作って競合を塞ぐ (#14)", () =
     expect(ghCalls()).not.toContain("release create");
   });
 
-  test("「既にある」以外の 422 は既存の tag と読まずに止める", () => {
+  test("stops without reading an existing tag on a 422 other than 'already exists'", () => {
     const r = publish({ VIEW: "1", REF_422_OTHER: "Repository rule violations found" });
 
     expect(r.exitCode).toBe(1);
@@ -550,14 +555,14 @@ describe("publish-release.sh: tag を先に作って競合を塞ぐ (#14)", () =
     expect(ghCalls()).not.toContain("release create");
   });
 
-  test("自分で作った tag は、release を作れず release も無いなら消す", () => {
+  test("deletes a tag it made itself when the release cannot be created and no release exists", () => {
     const r = publish({ VIEW: "1", CREATE: "1", REF_NOW: head() });
 
     expect(r.exitCode).toBe(1);
     expect(ghCalls()).toContain(`api --method DELETE repos/{owner}/{repo}/git/refs/tags/${TAG}`);
   });
 
-  test("release を作れなくても、release が残っているなら tag は消さない (release を切り離さない)", () => {
+  test("keeps the tag when a release remains even if this run could not create one (the release is not detached)", () => {
     const r = publish({ CREATE: "1", REF_NOW: head() });
 
     expect(r.exitCode).toBe(1);
@@ -566,7 +571,7 @@ describe("publish-release.sh: tag を先に作って競合を塞ぐ (#14)", () =
     expect(r.stderr.toString()).toContain("is kept: a release exists for it");
   });
 
-  test("release を作れた run は、直後の view が not found と返っても tag を消さない", () => {
+  test("a run that created the release does not delete the tag even if the view right after returns not found", () => {
     const r = publish({ VIEW: "1", REF_NOW: head() });
 
     expect(r.exitCode).toBe(0);
@@ -574,7 +579,7 @@ describe("publish-release.sh: tag を先に作って競合を塞ぐ (#14)", () =
     expect(ghCalls()).not.toContain("--method DELETE");
   });
 
-  test("release の有無が分からないなら tag は消さない", () => {
+  test("does not delete the tag when it cannot tell whether a release exists", () => {
     const r = publish({ CREATE: "1", REF_NOW: head(), VIEW_ERROR: "HTTP 502: Bad Gateway" });
 
     expect(r.exitCode).toBe(1);
@@ -582,7 +587,7 @@ describe("publish-release.sh: tag を先に作って競合を塞ぐ (#14)", () =
     expect(ghCalls()).not.toContain("--method DELETE");
   });
 
-  test("消す直前に tag が別の commit へ動いていたら消さない", () => {
+  test("does not delete the tag if it moved to another commit just before deletion", () => {
     const r = publish({
       VIEW: "1",
       CREATE: "1",
@@ -593,7 +598,7 @@ describe("publish-release.sh: tag を先に作って競合を塞ぐ (#14)", () =
     expect(ghCalls()).not.toContain("--method DELETE");
   });
 
-  test("注釈付き tag の object を読めなければ止めて理由を出す", () => {
+  test("stops with the reason when an annotated tag's object cannot be read", () => {
     const r = publish({
       VIEW: "1",
       REF_EXISTING: "fedcba9876543210fedcba9876543210fedcba98",
@@ -606,16 +611,16 @@ describe("publish-release.sh: tag を先に作って競合を塞ぐ (#14)", () =
     expect(ghCalls()).not.toContain("release create");
   });
 
-  test("前からあった tag は、release を作れなくても消さない", () => {
+  test("does not delete a tag that existed before even when the release cannot be created", () => {
     const r = publish({ VIEW: "1", CREATE: "1", REF_EXISTING: head() });
 
     expect(r.exitCode).toBe(1);
     expect(ghCalls()).not.toContain("--method DELETE");
   });
 
-  // 残った tag は次の run にも同名の tag として見え、次の tag をその上へ押し上げるので、
-  // 止める判断の後で tag を作ってはならない
-  test("版番号で止めた run は tag も作らない", () => {
+  // A leftover tag looks like a same-named tag to the next run and pushes the next tag's
+  // number above it, so a run that decided to stop must not create a tag afterwards
+  test("a run stopped by the version number creates no tag either", () => {
     git("tag", "v0.1.0");
 
     const r = publish({

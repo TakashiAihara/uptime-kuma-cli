@@ -10,7 +10,8 @@ import { nextTag } from "../scripts/next-tag.ts";
  * hands out whatever is latest. A wrong answer either fails the release on a tag that
  * exists or publishes a version that sorts below the one before it.
  */
-// どの tag とも違う値にして、tag があるときに package.json の版へ落ちていないことも見る
+// A value different from every tag, so it is also checked that the answer does not fall
+// back to package.json's version when tags exist
 const FIRST = "7.7.7";
 
 describe("nextTag", () => {
@@ -64,10 +65,11 @@ describe("nextTag", () => {
   });
 });
 
-// workflow は標準出力を tag として使うので、tag が 1 つも無い repo で終了コード 0 と tag を返すこと
-// (失敗の握り潰しは workflow 側で塞ぐが、ここが落ちたら main が緑のまま release されない)
-describe("next-tag.ts を tag の無い repo で実行したとき", () => {
-  test("package.json の版から数えた tag を出して、終了コード 0 で終わる", async () => {
+// The workflow uses stdout as the tag, so in a repo with no tags this must return exit code
+// 0 and a tag (failure-swallowing is blocked on the workflow side, but if this fails main
+// stays green and nothing is released)
+describe("when next-tag.ts runs in a repo with no tags", () => {
+  test("prints the tag counted from package.json's version and exits 0", async () => {
     const dir = mkdtempSync(join(tmpdir(), "next-tag-"));
     try {
       const git = Bun.spawnSync(["git", "init", "-q", dir]);

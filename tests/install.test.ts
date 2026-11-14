@@ -19,11 +19,13 @@ const ARCH = process.arch === "arm64" ? "arm64" : "x64";
 const ASSET = `uptime-kuma-cli-${OS}-${ARCH}`;
 
 const WORKING = "#!/bin/sh\necho working\n";
-// shebang の先が無いので exec できない。shebang 無しだと sh が script として流してしまう
+// The shebang target does not exist, so it cannot be exec'd. Without a shebang sh would
+// run it as a script
 const BROKEN = "#!/nonexistent/interp\n";
 const OLD = "#!/bin/sh\necho old-install\n";
 
-// install.sh が使う道具だけを入れた PATH。本物の gh が紛れ込むと「gh が無い」を作れない
+// A PATH holding only the tools install.sh uses. A real gh sneaking in would make
+// "no gh" impossible to set up
 const TOOLS = [
   "uname",
   "mktemp",
@@ -54,7 +56,7 @@ function startServer(releases: Record<string, Release>): void {
       const path = new URL(req.url).pathname;
       requests.push(path);
       if (path === `${REPO_PATH}/latest`) {
-        // 2 回目以降は別の release を指す。1 回しか引かないことをこれで見る
+        // From the second call on it points at a different release; this shows it is fetched only once
         latestCalls += 1;
         const tags = Object.keys(releases);
         const tag = tags[Math.min(latestCalls - 1, tags.length - 1)];
@@ -102,7 +104,7 @@ afterEach(() => {
   sb.cleanup();
 });
 
-// github.com への curl を手元の server に向ける。install.sh の URL は書き換えない
+// Points curl at github.com to the local server. install.sh's URL is not rewritten
 function shimCurl(): void {
   const real = Bun.which("curl");
   if (!real) throw new Error("curl is needed to run install.sh");
@@ -141,7 +143,7 @@ function placeOldInstall(): void {
 }
 
 describe("install.sh", () => {
-  test("latest は 1 回だけ引き、バイナリも SHA256SUMS もその tag から取る", async () => {
+  test("latest is fetched once, and both the binary and SHA256SUMS come from that tag", async () => {
     startServer({ "v1.0.0-rc.3": release(WORKING), "v1.0.0-rc.4": release(WORKING) });
 
     const r = await install();
@@ -157,7 +159,7 @@ describe("install.sh", () => {
     expect(leftovers()).toEqual([]);
   });
 
-  test("tag を指定したら latest を引かない", async () => {
+  test("does not fetch latest when a tag is given", async () => {
     startServer({ "v0.5.0": release(WORKING) });
 
     const r = await install({ UPTIME_KUMA_CLI_VERSION: "v0.5.0" });
@@ -166,7 +168,7 @@ describe("install.sh", () => {
     expect(latestCalls).toBe(0);
   });
 
-  test("checksum が合わなければ入れない", async () => {
+  test("does not install when the checksum does not match", async () => {
     startServer({ "v1.0.0": { binary: WORKING, sums: `${sha("other")}  ${ASSET}\n` } });
     placeOldInstall();
 
@@ -177,7 +179,7 @@ describe("install.sh", () => {
     expect(readFileSync(installed(), "utf8")).toBe(OLD);
   });
 
-  test("dash で途中に TERM を受けても、install 先に作業 dir を残さない", async () => {
+  test("under dash, a TERM mid-run leaves no work dir in the install dir", async () => {
     const dash = Bun.which("dash");
     if (!dash) throw new Error("dash is needed for this test");
     startServer({ "v1.0.0": release("#!/bin/sh\nsleep 2\n") });
@@ -198,7 +200,7 @@ describe("install.sh", () => {
     expect(leftovers()).toEqual([]);
   }, 15_000);
 
-  test("動かないバイナリは、入っている版を置き換えずに止まる", async () => {
+  test("a binary that does not run stops without replacing the installed version", async () => {
     startServer({ "v1.0.0": release(BROKEN) });
     placeOldInstall();
 
@@ -213,7 +215,7 @@ describe("install.sh", () => {
   describe("UPTIME_KUMA_CLI_VERIFY_ATTESTATION=1", () => {
     const verify = { UPTIME_KUMA_CLI_VERIFY_ATTESTATION: "1" };
 
-    test("gh が無ければ、検証できないまま入れずに止まる", async () => {
+    test("stops without installing when gh is missing and verification cannot happen", async () => {
       startServer({ "v1.0.0": release(WORKING) });
       placeOldInstall();
 
@@ -224,7 +226,7 @@ describe("install.sh", () => {
       expect(readFileSync(installed(), "utf8")).toBe(OLD);
     });
 
-    test("検証が落ちたら、gh の出した理由を添えて止まる", async () => {
+    test("stops with gh's reason attached when verification fails", async () => {
       startServer({ "v1.0.0": release(WORKING) });
       writeTool("gh", `echo "HTTP 401: bad credentials" >&2\nexit 1`);
       placeOldInstall();
@@ -236,7 +238,7 @@ describe("install.sh", () => {
       expect(readFileSync(installed(), "utf8")).toBe(OLD);
     });
 
-    test("検証が通れば入れる", async () => {
+    test("installs when verification passes", async () => {
       startServer({ "v1.0.0": release(WORKING) });
       writeTool("gh", `exit 0`);
 

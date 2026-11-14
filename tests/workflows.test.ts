@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 const WORKFLOWS = ["ci.yml", "release.yml"];
 const dir = resolve(import.meta.dir, "../.github/workflows");
 const read = (file: string) => readFileSync(join(dir, file), "utf8");
-// YAML の解釈は Bun に任せるので、必要な所だけ型を付ける
+// Bun handles the YAML parsing, so types are only attached where needed
 const release = () =>
   Bun.YAML.parse(read("release.yml")) as {
     concurrency: { group: string; "cancel-in-progress": boolean };
@@ -26,9 +26,10 @@ const releaseStep = () =>
 
 const REPO = "TakashiAihara/uptime-kuma-cli";
 
-// GitHub の式を評価するものは手元に無いので、concurrency 式が使う形だけ (文字列の ==, &&,
-// ||, 括弧) を素朴に評価する。GHA と同じ規則を使う: && は左が falsy なら左を返し、|| は左が
-// truthy なら左を返す、空文字は falsy。見つからない path は空文字。
+// Nothing at hand evaluates GitHub expressions, so only the shape the concurrency
+// expression uses (string ==, &&, ||, parentheses) is evaluated naively. The same rules
+// as GHA: && returns the left side when it is falsy, || returns the left side when it is
+// truthy, and an empty string is falsy. A path that is not found is an empty string.
 const evaluate = (tokens: string[], context: Record<string, unknown>): string => {
   let i = 0;
   const peek = () => tokens[i];
@@ -62,7 +63,7 @@ const evaluate = (tokens: string[], context: Record<string, unknown>): string =>
     }
     return left;
   };
-  // function 宣言 (hoist) で、atom から先に参照できるようにする
+  // A function declaration (hoisted) so it can be referenced from atom first
   function or(): string {
     let left = and();
     while (peek() === "||") {
@@ -75,8 +76,8 @@ const evaluate = (tokens: string[], context: Record<string, unknown>): string =>
   return or();
 };
 
-// release.yml の concurrency 式を、その run のイベント情報で評価した group 名を返す。
-// run_id は 1 固定なので「run_id の group」は全部 "release-1" になる。
+// Returns the group name from evaluating release.yml's concurrency expression with that
+// run's event info. run_id is fixed at 1, so every "run_id group" becomes "release-1".
 const groupFor = (eventName: string, event?: string, headRepository?: string) => {
   const source = release()
     .concurrency.group.replace(/^release-\$\{\{/, "")
@@ -102,43 +103,43 @@ const groupFor = (eventName: string, event?: string, headRepository?: string) =>
   );
 };
 
-describe("release.yml の concurrency", () => {
-  // Cancel ができるかどうかは job ではなく run で決まるので、jobs を全部 skip する run まで
-  // main の group に入ると、その run が待ち行列の main の run を取り消す。cancel-in-progress が
-  // false でも、後から来た run は先に queue された pending の run を取り消す。
-  // だから main の group に入れるのは「その repo の main への push に対する CI の run」だけ。
-  test("その repo の main への push に対する run だけが main の group に入る", () => {
+describe("release.yml concurrency", () => {
+  // Whether a run can be cancelled is decided per run, not per job, so a run that skips
+  // every job would still cancel a queued main run if it entered the main group. Even
+  // with cancel-in-progress false, a later run cancels an earlier pending one.
+  // That is why only "the CI run for a push to this repo's main" enters the main group.
+  test("only the run for a push to this repo's main enters the main group", () => {
     expect(groupFor("workflow_run", "push", REPO)).toBe("release-main");
   });
 
-  // この repo の PR の CI も workflow_run を起きる。jobs は event が push でないので全部
-  // skip されるが、run 自体は queue に入る。main と同じ group には入れない
-  test("この repo の PR の run は自分の run_id の group に入る", () => {
+  // This repo's PR CI also triggers workflow_run. Its jobs are all skipped because the
+  // event is not push, but the run itself enters the queue. It must not share main's group
+  test("this repo's PR run enters its own run_id group", () => {
     expect(groupFor("workflow_run", "pull_request", REPO)).toBe("release-1");
   });
 
-  // fork の中の main という名前の branch への push も、この repo の main への pushでは
-  // ないので run_id 側 (#3)
-  test("fork の run は自分の run_id の group に入る", () => {
+  // A push to a branch named main inside a fork is also not a push to this repo's main,
+  // so it goes to the run_id side (#3)
+  test("a fork's run enters its own run_id group", () => {
     expect(groupFor("workflow_run", "push", "someone/uptime-kuma-cli")).toBe("release-1");
   });
 
-  // 手で push した tag の release と再 dispatch は、それぞれ別 group に入れているので、
-  // 次の main の run に取り消されない
-  test("tag の push と手動 dispatch は自分の run_id の group に入る", () => {
+  // Releases of hand-pushed tags and re-dispatches each get their own group, so a later
+  // main run cannot cancel them
+  test("a tag push and a manual dispatch each enter their own run_id group", () => {
     expect(groupFor("push")).toBe("release-1");
     expect(groupFor("workflow_dispatch")).toBe("release-1");
   });
 
-  test("cancel-in-progress は false", () => {
+  test("cancel-in-progress is false", () => {
     expect(release().concurrency["cancel-in-progress"]).toBe(false);
   });
 });
 
-describe("action の固定", () => {
-  // action は tag ではなく commit (docker image は digest) で固定する。動かされた tag の下で
-  // 差し替えられた action は「自分たちが作った」ものとして署名の証明に使われる
-  test("全部 commit SHA / image digest で固定し、版を行末コメントに残す", () => {
+describe("pinning actions", () => {
+  // Actions are pinned by commit (docker images by digest), not tag. Under a moved tag a
+  // swapped action is used as proof of "what we built" in the signature
+  test("pins everything by commit SHA / image digest and leaves the version in a trailing comment", () => {
     const uses: string[] = [];
     for (const file of WORKFLOWS) {
       for (const line of read(file).split("\n")) {
@@ -152,11 +153,12 @@ describe("action の固定", () => {
   });
 });
 
-// publish-release.sh は main の先頭と比べるのと、push / dispatch で checkout された tag が既に
-// 誰のものかを確かめる。checkout は shallow なので、release step の fetch が全部
-// 取って初めてできる。版の比較は gh release list を見るので、この tag 一覧には依存しない
-describe("release.yml の publish job", () => {
-  test("publish-release.sh を走らせる前に全 tag を fetch する", () => {
+// publish-release.sh compares against main's head and checks who a tag checked out by
+// push / dispatch already belongs to. The checkout is shallow, so this only works once
+// the release step's fetch takes everything. Version comparison uses gh release list, so
+// it does not depend on this tag list.
+describe("release.yml publish job", () => {
+  test("fetches all tags before running publish-release.sh", () => {
     const run = releaseStep();
 
     expect(run).toContain("+refs/tags/*:refs/tags/*");
@@ -164,28 +166,30 @@ describe("release.yml の publish job", () => {
     expect(run.indexOf("+refs/tags/*")).toBeLessThan(run.indexOf("sh scripts/publish-release.sh"));
   });
 
-  // push / workflow_run / workflow_dispatch で「main の先頭でない commit の tag」の扱い方が
-  // 変わる。スクリプトは event 名以外から経路を知れないので、この env が抜けると `:?` の
-  // 検査で止まり、release を作る前に必ず失敗する
-  test("publish-release.sh に event 名を渡す", () => {
+  // push / workflow_run / workflow_dispatch differ in how they treat "a tag on a commit
+  // that is not main's head". The script cannot tell the path apart from anything but the
+  // event name, so if this env is missing the `:?` check stops it and it always fails
+  // before creating a release
+  test("passes the event name to publish-release.sh", () => {
     const env = release().jobs.publish.steps.find((step) => step.name === "release")?.env ?? {};
 
     expect(env.RELEASE_TRIGGER).toBe("${{ github.event_name }}");
   });
 
-  // publish-release.sh は tag を API で ref として作るので、この job に書き込み権限が無いと
-  // tag が作れず、すべての release が止まる
-  test("release step の job が ref を作れる contents: write を持つ", () => {
+  // publish-release.sh creates the tag as a ref via the API, so without write permission
+  // on this job no tag can be made and every release stops
+  test("the job running the release step has contents: write, enough to create refs", () => {
     const publish = release().jobs.publish;
 
     expect(publish.permissions?.contents).toBe("write");
   });
 });
 
-// publish-release.sh は `:?` の後で tag の形を厳格に要求する (0 始まりと 9 桁を超える数を受け付け
-// ない)。workflow 側が緩い形だと、checkout と build を全部走らせてから script で落とすことになる
-describe("release.yml の tag の形", () => {
-  test("check the requested tag が publish-release.sh と同じ形で見る", () => {
+// publish-release.sh strictly requires the tag shape after `:?` (no leading zeros, no
+// number wider than 9 digits). A looser shape on the workflow side would run checkout
+// and build to the end and only then fail in the script.
+describe("release.yml tag shape", () => {
+  test("check the requested tag uses the same shape as publish-release.sh", () => {
     const run = stepRun("tag", "check the requested tag");
 
     expect(run).toContain(
@@ -194,8 +198,8 @@ describe("release.yml の tag の形", () => {
     expect(run).not.toContain("[0-9]+\\.");
   });
 
-  // 取り直しの tag も後で release できる必要がある。緩い形だと script で落とす
-  test("decide the tag が取り直し用の rc tag も同じ形で見る", () => {
+  // A re-picked tag must also be releasable later; a loose shape would fail in the script
+  test("decide the tag checks the rc tag picked for reuse against the same shape", () => {
     const run = stepRun("tag", "decide the tag");
 
     expect(run).toContain(
@@ -204,7 +208,7 @@ describe("release.yml の tag の形", () => {
   });
 });
 
-describe("release.yml: 公開前に 4 種を各 runner で動かす (#13)", () => {
+describe("release.yml: run all four on their runners before publishing (#13)", () => {
   type Step = { name?: string; uses?: string; run?: string; with?: Record<string, unknown> };
   type AnyJob = {
     needs?: string | string[];
@@ -219,7 +223,7 @@ describe("release.yml: 公開前に 4 種を各 runner で動かす (#13)", () =
   const uses = (job: AnyJob, action: string) =>
     job.steps.some((s) => s.uses?.startsWith(`${action}@`));
 
-  test("verify job は 4 種それぞれを、その OS / CPU の runner で走らせる", () => {
+  test("the verify job runs each of the four on the runner for its OS / CPU", () => {
     const verify = jobs().verify!;
     const pairs = (verify.strategy?.matrix?.include ?? [])
       .map((m) => `${m.target} ${m.runner}`)
@@ -235,7 +239,7 @@ describe("release.yml: 公開前に 4 種を各 runner で動かす (#13)", () =
     expect(verify.strategy?.["fail-fast"]).toBe(false);
   });
 
-  test("verify は build が上げた成果物を落として検査し、自分では build しない", () => {
+  test("verify downloads and checks the artifact build uploaded, and does not build itself", () => {
     const { build, verify } = jobs();
 
     expect(uses(build!, "actions/upload-artifact")).toBe(true);
@@ -247,7 +251,7 @@ describe("release.yml: 公開前に 4 種を各 runner で動かす (#13)", () =
     expect(runs(verify!)).toMatch(/sha256sum|shasum/);
   });
 
-  test("公開は全部の verify が通ってからで、同じ成果物を落として SHA256SUMS を照合する", () => {
+  test("publishing waits for every verify to pass, downloads the same artifact, and checks SHA256SUMS", () => {
     const { publish } = jobs();
 
     expect(needs(publish!)).toEqual(expect.arrayContaining(["build", "verify"]));
@@ -257,7 +261,7 @@ describe("release.yml: 公開前に 4 種を各 runner で動かす (#13)", () =
     expect(runs(publish!)).toContain("sh scripts/publish-release.sh");
   });
 
-  test("書き込みの権限を持つのは公開の job だけ", () => {
+  test("only the publish job holds write permissions", () => {
     const { build, verify, publish } = jobs();
 
     expect(build!.permissions?.contents ?? "read").toBe("read");
@@ -270,9 +274,9 @@ describe("release.yml: 公開前に 4 種を各 runner で動かす (#13)", () =
   });
 });
 
-// publish が照合する SHA256SUMS は build が出したもの。バイナリか sums の片方だけが
-// artifact に入れば、公開する物と照合する物が食い違う (#13)
-describe("release.yml: build の上げる artifact (#13)", () => {
+// The SHA256SUMS publish checks is the one build produced. If only the binaries or only
+// the sums land in the artifact, what is published and what is checked disagree (#13)
+describe("release.yml: the artifact build uploads (#13)", () => {
   type Step = {
     uses?: string;
     with?: Record<string, unknown>;
@@ -285,16 +289,16 @@ describe("release.yml: build の上げる artifact (#13)", () => {
   const upload = () =>
     job("build").steps.find((s) => s.uses?.startsWith("actions/upload-artifact@"))?.with ?? {};
 
-  test("4 個と SHA256SUMS を同じ artifact に上げる", () => {
+  test("uploads the four binaries and SHA256SUMS to the same artifact", () => {
     const path = String(upload().path ?? "");
 
     expect(path).toContain("dist/uptime-kuma-cli-*");
     expect(path).toContain("dist/SHA256SUMS");
   });
 
-  // 走らせるのは matrix の target、中身は publish する tag。どちらかが欠けると、別の
-  // バイナリか別の tag を検査したことになる
-  test("verify は tag と target を script に渡す", () => {
+  // What runs is the matrix target; what is inside is the tag being published. Missing
+  // either means a different binary or a different tag was checked
+  test("verify passes the tag and target to the script", () => {
     const step = job("verify").steps.find((s) => s.run?.includes("run-binary.sh"));
 
     expect(step?.env?.TAG).toBe("${{ needs.tag.outputs.tag }}");
@@ -303,7 +307,7 @@ describe("release.yml: build の上げる artifact (#13)", () => {
   });
 });
 
-describe("release.yml: 検査した commit と成果物をそのまま公開する (#13 の 2 周目)", () => {
+describe("release.yml: publish the checked commit and artifact as is (second round of #13)", () => {
   type Step = {
     id?: string;
     name?: string;
@@ -326,7 +330,7 @@ describe("release.yml: 検査した commit と成果物をそのまま公開す�
   const stepsUsing = (job: AnyJob, action: string) =>
     job.steps.filter((s) => s.uses?.startsWith(`${action}@`));
 
-  test("tag job が検査した commit の SHA を出し、build / verify / publish はその SHA を checkout する", () => {
+  test("the tag job outputs the SHA of the commit it checked, and build / verify / publish check out that SHA", () => {
     const all = jobs();
 
     expect(all.tag!.outputs?.sha).toBe("${{ steps.commit.outputs.sha }}");
@@ -342,7 +346,7 @@ describe("release.yml: 検査した commit と成果物をそのまま公開す�
     }
   });
 
-  test("verify には時間の上限があり、止まったバイナリが main の release を詰まらせない", () => {
+  test("verify has a time limit so a hung binary does not jam main's release", () => {
     const limit = jobs().verify!["timeout-minutes"];
 
     expect(typeof limit).toBe("number");
@@ -350,7 +354,7 @@ describe("release.yml: 検査した commit と成果物をそのまま公開す�
     expect(limit!).toBeLessThanOrEqual(30);
   });
 
-  test("artifact は保持期間を明示し、build が上げた名前を verify と publish が落とす", () => {
+  test("the artifact states a retention period, and verify and publish download the name build uploaded", () => {
     const { build, verify, publish } = jobs();
     const up = stepsUsing(build!, "actions/upload-artifact");
 
@@ -367,7 +371,7 @@ describe("release.yml: 検査した commit と成果物をそのまま公開す�
     }
   });
 
-  test("verify は SHA256SUMS を Linux でも macOS でも照合し、run-binary.sh の失敗を潰さない", () => {
+  test("verify checks SHA256SUMS on both Linux and macOS and does not swallow run-binary.sh's failure", () => {
     const text = runs(jobs().verify!);
 
     expect(text).toContain("sha256sum -c");
@@ -376,7 +380,7 @@ describe("release.yml: 検査した commit と成果物をそのまま公開す�
     expect(text).not.toMatch(/run-binary\.sh[^\n]*(\|\||;)/);
   });
 
-  test("publish は status 関数で verify の失敗を通さず、全ファイルを照合し、TAG を受け取る", () => {
+  test("publish does not pass verify's failure through the status function, checks every file, and receives TAG", () => {
     const publish = jobs().publish!;
 
     expect(publish.if).toBe("needs.tag.outputs.tag != ''");
@@ -384,7 +388,7 @@ describe("release.yml: 検査した commit と成果物をそのまま公開す�
     expect(publish.env?.TAG).toBe("${{ needs.tag.outputs.tag }}");
   });
 
-  test("権限は object で書き、署名の権限は publish だけが持つ", () => {
+  test("permissions are written as an object, and only publish holds the signing permissions", () => {
     const { build, verify, publish } = jobs();
 
     for (const job of [build!, verify!, publish!]) expect(typeof job.permissions).toBe("object");

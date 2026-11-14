@@ -8,7 +8,7 @@ const TAG = "v0.1.1-rc.2";
 const VERSION = "0.1.1-rc.2";
 const TARGETS = ["linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64"] as const;
 
-// `file -b` が本当に出す文。長い部分を切って、形と CPU の語だけを残してある
+// The text `file -b` really outputs. Long parts are cut, keeping only the shape and CPU words
 const IMAGES: Record<(typeof TARGETS)[number], string> = {
   "linux-x64": "ELF 64-bit LSB executable, x86-64, version 1 (SYSV), dynamically linked",
   "linux-arm64": "ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), dynamically linked",
@@ -17,7 +17,8 @@ const IMAGES: Record<(typeof TARGETS)[number], string> = {
 };
 
 let sb: Sandbox;
-// file(1) の偽。対象ごとの説明が DESCS/<name>.txt に書いてあるから、試験の形を差し替えられる
+// A fake file(1). Each target's description lives in DESCS/<name>.txt, so the test
+// shape can be swapped
 let descs: string;
 
 beforeEach(() => {
@@ -41,24 +42,28 @@ cat "${descs}/\${name}.txt"
 });
 afterEach(() => sb.cleanup());
 
-/** この target に対して file(1) が返す文を差し替える */
+/** Swaps the text file(1) returns for this target */
 function imageOf(target: (typeof TARGETS)[number], image: string): void {
   writeFileSync(join(descs, `uptime-kuma-cli-${target}.txt`), image);
 }
 
 /**
- * 偽のバイナリ。`site` だけが本物の define と同じ形にしてあり、これを tag と照合する
+ * A fake binary. Only `site` is shaped like the real define, and this is what gets
+ * compared against the tag
  */
 type Opts = {
-  /** --define が出す定義そのもの (既定は Bun 1.4.3 の形)。変えない限り検査は本物と同じ */
+  /**
+   * The definition --define emits (default is Bun 1.4.3's shape). The check is the same
+   * as the real one unless changed
+   */
   site?: string;
-  /** --version の答え (既定は埋め込んだ版) */
+  /** What --version answers (default is the embedded version) */
   says?: string;
-  /** 本物のバイナリにはあるが define はない、余分なバイト。行頭に # を付けてコメントにする */
+  /** Extra bytes a real binary has but the define does not. Prefixed with # to become comments */
   extra?: string;
 };
 
-/** 余分なバイトは、偽が /bin/sh として壊れないようコメントにして入れる */
+/** Extra bytes go in as comments so the fake does not break as /bin/sh */
 function asComments(text: string): string {
   return text
     .split("\n")
@@ -66,7 +71,10 @@ function asComments(text: string): string {
     .join("\n");
 }
 
-/** tag を define と同じ形で抱えていて、--version には別の値を答える偽のバイナリ */
+/**
+ * A fake binary carrying the tag in the define's shape, but answering --version with a
+ * different value
+ */
 function writeBinary(target: (typeof TARGETS)[number], embedded: string, opts: Opts = {}): void {
   const path = join(sb.dir, "dist", `uptime-kuma-cli-${target}`);
   writeFileSync(
@@ -84,7 +92,7 @@ esac
   chmodSync(path, 0o755);
 }
 
-/** 4 つとも「その target の形」を名乗り、tag を抱えている dist を用意する */
+/** Prepares a dist where all four claim their own target's shape and carry the tag */
 function built(opts: { only?: (typeof TARGETS)[number]; version?: string } = {}): void {
   for (const target of TARGETS) {
     imageOf(target, IMAGES[target]);
@@ -106,7 +114,7 @@ function check(env: Record<string, string | undefined> = {}, path?: string) {
 }
 
 describe("check-binaries.sh", () => {
-  test("4 つとも自分の形を名乗って tag を抱えていれば通る", () => {
+  test("passes when all four claim their own shape and carry the tag", () => {
     built();
 
     const r = check();
@@ -114,9 +122,9 @@ describe("check-binaries.sh", () => {
     expect(r.exitCode).toBe(0);
   });
 
-  test("別の CPU の形を名乗るバイナリが落ちたら通らない", () => {
+  test("fails when a binary claims another CPU's shape", () => {
     built();
-    // build が 4 つとも host のままだったとき、--version は linux-x64 しか見ない
+    // When the build left all four as the host's, --version only sees linux-x64
     imageOf("linux-arm64", IMAGES["linux-x64"]);
 
     const r = check();
@@ -125,7 +133,7 @@ describe("check-binaries.sh", () => {
     expect(r.stderr.toString()).toContain("dist/uptime-kuma-cli-linux-arm64");
   });
 
-  test("Mach-O を ELF と読み違えていても通らない", () => {
+  test("fails even when a Mach-O is misread as ELF", () => {
     built();
     imageOf("darwin-arm64", IMAGES["linux-arm64"]);
 
@@ -135,7 +143,7 @@ describe("check-binaries.sh", () => {
     expect(r.stderr.toString()).toContain("dist/uptime-kuma-cli-darwin-arm64");
   });
 
-  test("tag を抱えていないバイナリは通らない (埋め込みが効いていない)", () => {
+  test("fails on a binary that does not carry the tag (the embedding did not work)", () => {
     built();
     writeBinary("darwin-x64", "0.1.0");
 
@@ -145,9 +153,9 @@ describe("check-binaries.sh", () => {
     expect(r.stderr.toString()).toContain("dist/uptime-kuma-cli-darwin-x64 does not carry the tag");
   });
 
-  test("走らせられるバイナリが tag と違う版を名乗れば通らない", () => {
+  test("fails when a runnable binary names a version other than the tag", () => {
     built();
-    // 中身は tag を抱えていても、syntax が違えば --version が違う値になる
+    // Even if the contents carry the tag, a different syntax makes --version answer a different value
     writeBinary("linux-x64", VERSION, { says: "0.1.0" });
 
     const r = check();
@@ -156,7 +164,7 @@ describe("check-binaries.sh", () => {
     expect(r.stderr.toString()).toContain(`says 0.1.0, tag is ${TAG}`);
   });
 
-  test("走らせられない 3 つも無ければ通らない (build は成功でも中身は無い)", () => {
+  test("fails when the three unrunnable binaries are missing (the build succeeded but there is no content)", () => {
     built({ only: "linux-x64" });
 
     const r = check();
@@ -165,7 +173,7 @@ describe("check-binaries.sh", () => {
     expect(r.stderr.toString()).toContain("dist/uptime-kuma-cli-linux-arm64 was not built");
   });
 
-  test("TAG が無ければ止まる", () => {
+  test("stops when TAG is missing", () => {
     built();
 
     const r = check({ TAG: undefined });
@@ -174,8 +182,8 @@ describe("check-binaries.sh", () => {
     expect(r.stderr.toString()).toContain("TAG");
   });
 
-  // file(1) が無いと、走らせない 3 つを確かめる方法が無いので黙って通さない
-  test("file が無ければ止まる", () => {
+  // Without file(1) there is no way to check the three that cannot run, so do not pass silently
+  test("stops when file is missing", () => {
     built();
 
     const r = check({}, "/nonexistent");
@@ -185,10 +193,11 @@ describe("check-binaries.sh", () => {
   });
 });
 
-// Bun がどのバイナリにも同梱する `bun create` の template の一部。本物のバイナリにもこの
-// "version": "0.1.0" が 3 箇所ある。版の前後も版の文字で繋がっていないので、版の前後だけを
-// 見て tag を数える検査では必ず当てになり、rc.2 のバイナリが v0.1.0 の tag を通ってしまう。
-// そのため tag を数えるのは define が出す行だけに限る。
+// Part of the `bun create` template Bun bundles into every binary. A real binary really has
+// this "version": "0.1.0" in three places. The version is not glued to other version
+// characters on either side, so a check that only looks around the version always matches
+// it, and an rc.2 binary would pass a v0.1.0 tag. That is why the tag is only counted on
+// the line the define emits.
 const BUN_TEMPLATE = `{
   "name": "bun-react-template",
   "version": "0.1.0",
@@ -196,12 +205,12 @@ const BUN_TEMPLATE = `{
   "type": "module",
 }`;
 
-// 埋め込みの版は、define が出す行そのものとして出ていなければ tag と数えない
-describe("埋め込みの版は define の形でなければ tag と数えない", () => {
+// An embedded version only counts as the tag when it appears as the define's own line
+describe("an embedded version only counts as the tag in the define's shape", () => {
   const TAG_010 = "v0.1.0";
   const noTag = "dist/uptime-kuma-cli-darwin-x64 does not carry the tag";
 
-  test("tag の define があれば通る (4 つとも)", () => {
+  test("passes when the tag's define is there (all four)", () => {
     built({ version: "0.1.0" });
 
     const r = check({ TAG: TAG_010 });
@@ -209,7 +218,7 @@ describe("埋め込みの版は define の形でなければ tag と数えない
     expect(r.exitCode).toBe(0);
   });
 
-  test("define が別の版なら tag と数えない", () => {
+  test("does not count the tag when the define says a different version", () => {
     built({ version: "0.1.0" });
     writeBinary("darwin-x64", "0.1.0-rc.2");
 
@@ -219,9 +228,9 @@ describe("埋め込みの版は define の形でなければ tag と数えない
     expect(r.stderr.toString()).toContain(noTag);
   });
 
-  // 本物の衝突。rc.2 のバイナリには同梱の template の 0.1.0 がある。define を見ないと
-  // v0.1.0 の tag を素通りして、rc.2 のバイナリを 0.1.0 として配ってしまう
-  test("rc.2 のバイナリは、同梱の template が 0.1.0 でも v0.1.0 の tag を通らない", () => {
+  // The real collision. An rc.2 binary carries the bundled template's 0.1.0. Without
+  // looking at the define it would pass a v0.1.0 tag and ship an rc.2 binary as 0.1.0
+  test("an rc.2 binary does not pass a v0.1.0 tag even though the bundled template says 0.1.0", () => {
     built({ version: "0.1.0" });
     writeBinary("darwin-x64", "0.1.1-rc.2", { extra: BUN_TEMPLATE });
 
@@ -229,13 +238,15 @@ describe("埋め込みの版は define の形でなければ tag と数えない
 
     expect(r.exitCode).toBe(1);
     expect(r.stderr.toString()).toContain(noTag);
-    // 探した行も出す。ずれたとき、何を探して無かったのかがログから分かる
+    // The searched line is printed too, so a mismatch shows in the log what was looked
+    // for and not found
     expect(r.stderr.toString()).toContain(`no 'var VERSION = "0.1.0";' in it`);
   });
 
-  // Bun は mise で 1.4.3 に固定してある。出した形が変われば一致は失われる。黙って緑にして
-  // 出すのではなく release を止めるのは狙いで、形が変わるごとに直せば済むから
-  test("define の形が Bun 1.4.3 と違えば通らない (出力がずれたら閉じる)", () => {
+  // Bun is pinned to 1.4.3 via mise. If the emitted shape changes the match is lost. The
+  // point of stopping the release instead of staying quietly green is that each shape
+  // change only needs a fix here
+  test("fails when the define's shape differs from Bun 1.4.3's (closes when the output drifts)", () => {
     built({ version: "0.1.0" });
     writeBinary("darwin-x64", "0.1.0", { site: `var VERSION="0.1.0"` });
 

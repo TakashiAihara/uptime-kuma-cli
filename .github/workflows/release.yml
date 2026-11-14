@@ -1,40 +1,41 @@
 name: release
 
 on:
-  # CI が通った main への push はすべて release にする。install.sh は latest を取るので、
-  # 最後に手で切った tag ではなく main の中身が配られる。
+  # Release every push to main that passes CI. install.sh takes latest, so what gets
+  # distributed is main's content, not the last hand-cut tag.
   workflow_run:
     workflows: [CI]
     types: [completed]
     branches: [main]
-  # 手で push した tag はその tag のまま release にする。確定版はこれで切る。
+  # A hand-pushed tag is released as that tag. Final versions are cut this way.
   push:
     tags: ["v*"]
-  # 既に push 済みの tag を release し直す (途中で落ちた run の再実行など)。新しい tag は
-  # ここでは切れない。無い tag は checkout で落ちる。確定版は tag を push して切る。
+  # Re-release a tag that was already pushed (re-running a run that died midway, etc.).
+  # New tags cannot be cut here; a missing tag fails at checkout. Cut final versions by
+  # pushing a tag.
   workflow_dispatch:
     inputs:
       tag:
-        description: "release し直す既存の tag (例: v0.1.0)"
+        description: "an existing tag to re-release (e.g. v0.1.0)"
         required: true
 
-# 権限は job ごとに必要な分だけ付ける
+# Grant each job only the permissions it needs
 permissions: {}
 
 defaults:
   run:
     shell: bash
 
-# main の自動 release どうしだけを 1 本ずつ流す (同じ最大 tag を読んで同じ次の tag を取り合わ
-# ないため)。pending は 1 本しか持てず新しい方が古い方を取り消すが、main では古い commit は
-# どのみち release しない。手で push した tag の release は run ごとに別の group に入れ、
-# 後続の main の run に取り消されないようにする。
+# Run automatic main releases one at a time, so two runs do not read the same highest tag
+# and race for the same next tag. A group holds only one pending run and a newer one
+# cancels the older, but on main an older commit would not be released anyway. Releases of
+# hand-pushed tags each get their own group so a later main run cannot cancel them.
 #
-# main の group に入れるのは「その repo の main への push に対する CI の run」だけ。それ以外の
-# workflow_run (この repo の PR も、fork の main という名前の branch への push も) も起きるが、
-# どれも jobs を全部 skip するだけ。Cancel ができるかどうかは job ではなく run で決まるので、
-# それらの run まで同じ group に入ると、skip されるはずの run が待ち行列の main の run を
-# 取り消す。
+# Only "the CI run for a push to this repo's main" enters the main group. Other
+# workflow_run events fire too (this repo's PRs, pushes to a branch named main in a fork),
+# but they only skip every job. Whether a run can be cancelled is decided per run, not per
+# job, so letting those runs into the same group would let a run that should be skipped
+# cancel a queued main run.
 concurrency:
   group: >-
     release-${{ github.event_name == 'workflow_run' &&
@@ -44,18 +45,20 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # action は tag ではなく commit で固定する (版は行末コメント)。build も publish も動かされた
-  # tag の下で動くので、差し替えられた action は「検査した」「作った」ものとして通ってしまう。
-  # publish は provenance に署名するので、その差替えも署名されて出て行く
+  # Pin actions by commit, not tag (the version is in the trailing comment). Build and
+  # publish both run under a moved tag, so a swapped action would pass as "what was
+  # checked" and "what was built". Publish signs provenance, so that swap would be
+  # signed and shipped too.
   tag:
-    # workflow_run は main という名前の branch の CI すべてで起きる。fork の PR の main
-    # も含むので、この repo の main への push だけを release にする。
+    # workflow_run fires for the CI of every branch named main, including a fork's PR
+    # main, so only a push to this repo's main becomes a release.
     if: >-
       github.event_name != 'workflow_run' ||
       (github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_repository.full_name == github.repository)
-    # repo のコード (mise / bun / script / check) を動かす job なので書き込み権限を持たせない
+    # This job runs the repo's code (mise / bun / scripts / check), so it gets no write
+    # permissions
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -63,9 +66,10 @@ jobs:
       tag: ${{ steps.decide.outputs.tag }}
       sha: ${{ steps.commit.outputs.sha }}
     steps:
-      # 入力を checkout の ref に使う前に見る。branch 名を渡されて、その branch の中身が
-      # tag の名前で release されるのを防ぐ。形は publish-release.sh が比べる形と同じで、数を
-      # 0 始まりにせず 9 桁までにする。ここで落ちれば checkout も build も走らない。
+      # Look at the input before using it as checkout's ref. This keeps a branch name
+      # from being released under a tag's name with that branch's content. The shape
+      # matches what publish-release.sh compares: numbers have no leading zero and at
+      # most 9 digits. Failing here means checkout and build never run.
       - name: check the requested tag
         if: github.event_name != 'workflow_run'
         env:
@@ -77,12 +81,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.workflow_run.head_sha || (github.event.inputs.tag && format('refs/tags/{0}', github.event.inputs.tag)) || github.ref }}
-          # 次の tag を数えるための全 tag と、main が進んだかを見るための origin/main
+          # All tags for counting the next tag, and origin/main for seeing whether main moved on
           fetch-depth: 0
           persist-credentials: false
 
-      # 後の job は全部この commit を使う。tag がこの後で動くと、検査も公開もしていない
-      # commit を出すことになるので、使う commit はここで決めてから渡す
+      # Every later job uses this commit. If the tag moved after this, a commit that was
+      # neither checked nor published would ship, so the commit to use is decided here and passed on
       - name: read the checked commit
         id: commit
         run: |
@@ -90,15 +94,16 @@ jobs:
           sha="$(git rev-parse HEAD)"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
-      # setup-bun は .mise.toml を読めない (.tool-versions と package.json と .bun-version
-      # だけ) ので、CI と同じ mise で bun の版を .mise.toml 1 か所に保つ。cache を切るのは、
-      # 他の run (PR など) が書いた cache を、署名して出すバイナリの build に読ませないため。
+      # setup-bun cannot read .mise.toml (only .tool-versions, package.json and
+      # .bun-version), so bun's version stays in one place, .mise.toml, via the same mise
+      # CI uses. The cache is off so a cache written by another run (a PR, say) is not
+      # read by the build of binaries that get signed and shipped.
       - uses: jdx/mise-action@08ae2a091c038e1e05ec6f5115dc5c69d5a2a6b8 # v5.1.2
         with:
           cache: false
 
-      # main の run は CI が通った commit なのでそのまま使う。tag と dispatch は CI を通って
-      # いない commit を指せるので、build の前にここで通す。
+      # A main run already points at a commit CI passed, so it is used as is. A tag or
+      # dispatch can point at a commit that never passed CI, so it is checked here before build.
       - name: check
         if: github.event_name != 'workflow_run'
         run: |
@@ -117,26 +122,29 @@ jobs:
             echo "tag=$GIVEN" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # main にはもっと新しい commit があり、その run が release する。古い方を後から
-          # release すると古いコードが latest になる。origin/main が引けないときは、
-          # 「進んでいない」と読まず job ごと落とす (空文字との比較で黙って skip しない)。
+          # main has a newer commit and that run will release it. Releasing the older one
+          # later would make old code latest. When origin/main cannot be fetched, do not
+          # read it as "not moved on"; fail the whole job instead of silently skipping by
+          # comparing against an empty string.
           git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
           main_sha="$(git rev-parse --verify refs/remotes/origin/main)"
           head_sha="$(git rev-parse HEAD)"
           if [ "$main_sha" != "$head_sha" ]; then
-            # build が skip される理由が run summary に残らないと、「緑なのに release が無い」
-            # ようにしか見えないので annotation にする。
+            # Without a reason in the run summary for build being skipped, this would
+            # only look like "green but no release", so make it an annotation.
             echo "::notice::main has moved to ${main_sha}; this run for ${head_sha} releases nothing"
             exit 0
           fi
-          # 同じ commit の再実行は、別の tag を切らず前回の tag を使う。
-          # 自動の再実行が使い直すのは自分が切った rc の tag だけ。同じ commit に手の正式版があっても選ばない
+          # A re-run for the same commit reuses the previous tag instead of cutting a
+          # new one. An automatic re-run reuses only the rc tag it cut itself; a hand-cut
+          # final version on the same commit is not picked.
           rc_tags="$(git tag --points-at HEAD --list 'v*-rc.*')"
-          # 一致が 0 件の grep は 1 で抜けるので、それだけを空として受ける (git の失敗は上の代入で止まる)。
-          # publish-release.sh と同じ形で見るので、ここで拾った tag は後で release できる
+          # grep exits 1 when nothing matches, so only that is accepted as empty (a git
+          # failure stops at the assignment above). It uses the same shape as
+          # publish-release.sh, so a tag picked here can be released later.
           existing="$(printf '%s\n' "$rc_tags" | grep -E '^v(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})-rc\.(0|[1-9][0-9]{0,8})$' | sort -V | tail -n 1)" || existing=""
-          # コマンド置換は代入に分ける。echo の引数の中に置くと、失敗しても set -e が止まらず
-          # 空の tag で緑のまま終わる。
+          # Keep the command substitution in an assignment. Inside echo's arguments a
+          # failure would not stop set -e and the run would end green with an empty tag.
           if [ -n "$existing" ]; then
             tag="$existing"
           else
@@ -147,16 +155,16 @@ jobs:
   build:
     needs: tag
     if: needs.tag.outputs.tag != ''
-    # 書き込み権限と署名権限を持たない。tag や release を作れるのは publish job だけで、
-    # 動かされた tag の下で build が tag を切る余地を残さない。
+    # No write or signing permissions. Only the publish job can create tags or releases,
+    # leaving no room for build to cut a tag under a moved tag.
     permissions:
       contents: read
     runs-on: ubuntu-latest
     env:
       TAG: ${{ needs.tag.outputs.tag }}
     steps:
-      # tag job が検査した commit をそのまま build する。tag がその後に動いても、検査していない
-      # commit のバイナリを作らない
+      # Build the commit the tag job checked, as is. Even if the tag moved afterwards, no
+      # binary is built from an unchecked commit.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.tag.outputs.sha }}
@@ -166,9 +174,9 @@ jobs:
           cache: false
       - run: bun install --frozen-lockfile
 
-      # bun はクロスコンパイルできるので 4 つとも 1 台で作る。OS ごとに runner を分けると、
-      # 同じ入力から作ったという保証が弱くなる。build の中身は scripts/build.ts が正。
-      # RELEASE_TAG は --version に埋め込まれる。
+      # bun cross-compiles, so all four are built on one machine. Splitting runners per
+      # OS would weaken the guarantee they came from the same input. scripts/build.ts is
+      # the source of truth for the build. RELEASE_TAG is embedded into --version.
       - name: build
         env:
           RELEASE_TAG: ${{ env.TAG }}
@@ -177,22 +185,24 @@ jobs:
           bun run build
           cd dist && sha256sum uptime-kuma-cli-* > SHA256SUMS && cat SHA256SUMS
 
-      # この runner で動くのは linux-x64 だけ。--version は埋め込みが効いたかの検査で、
-      # tag と違う版を名乗るバイナリは配らない。残り 3 つはここからは動かせないので、
-      # check-binaries.sh が file(1) で形と埋め込みを見てから、この 1 個を走らせる。
-      # 残り 3 個を動かせるのは verify job の runner だけなので、実行はそちらに任せる
+      # Only linux-x64 runs on this runner. --version checks that the embedding worked;
+      # a binary naming a version other than the tag is not shipped. The other three
+      # cannot run here, so check-binaries.sh inspects their shape and embedding with
+      # file(1) and then runs this one. Only the verify job's runners can run the other
+      # three, so running them is left to that job.
       - name: check the built binaries
         run: sh scripts/check-binaries.sh
 
-      # 公開する物はここで上げる archive だけ。publish も verify もそれを落とすだけなので、
-      # 検査したものと公開するものは同じ物になる。artifact が無ければ落とす側が止まるので、
-      # 空の dist を配す経路は無い。if-no-files-found は一部だけ上がった場合を見ないため、
-      # 4 個揃っていることは check-binaries.sh に任せる
+      # The only thing published is the archive uploaded here. Publish and verify only
+      # download it, so what was checked is what gets published. If the artifact is
+      # missing the download side stops, so there is no path that ships an empty dist.
+      # if-no-files-found does not catch a partial upload, so confirming all four are
+      # present is left to check-binaries.sh.
       - name: upload
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-binaries
-          # 読むのは同じ run の verify と publish だけなので、短い方を選ぶ
+          # Only this run's verify and publish read it, so pick the shorter one
           retention-days: 7
           if-no-files-found: error
           path: |
@@ -204,7 +214,8 @@ jobs:
     if: needs.tag.outputs.tag != ''
     permissions:
       contents: read
-    # 1 つが失敗しても残りを止めず、4 つとも結果を run に残す (publish はどれか 1 つの失敗で止まる)
+    # Do not let one failure stop the rest; all four leave their result on the run
+    # (publish stops on any single failure)
     strategy:
       fail-fast: false
       matrix:
@@ -217,13 +228,13 @@ jobs:
             runner: macos-15-intel
           - target: darwin-arm64
             runner: macos-15
-    # 止まったバイナリが次の main の release を待たせないように、1 つのバイナリが動き続ける
-    # 時間の上限を設ける
+    # Cap how long a single binary may keep running so a hung binary does not hold up
+    # the next main release
     timeout-minutes: 15
     runs-on: ${{ matrix.runner }}
     steps:
-      # 走らせる script も build と同じ commit から取る。使うのは script 1 本だけで、bun も
-      # mise も要らない
+      # The script being run also comes from the same commit as build. Only that one
+      # script is used; neither bun nor mise is needed.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.tag.outputs.sha }}
@@ -239,8 +250,8 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           set -eu
-          # 落とした物を build の SHA256SUMS と突き合わせる。使える道具 (sha256sum / shasum) で
-          # どの runner でも同じ照合になるようにする
+          # Check what was downloaded against build's SHA256SUMS. Use whichever tool is
+          # available (sha256sum / shasum) so every runner does the same check.
           if command -v sha256sum >/dev/null 2>&1; then
             (cd dist && sha256sum -c SHA256SUMS)
           else
@@ -248,36 +259,37 @@ jobs:
           fi
           sh scripts/run-binary.sh "dist/uptime-kuma-cli-$TARGET" "$TAG"
 
-  # verify が 4 つとも走らせた形だけを公開する。needs の job が 1 つでも落ちた (または
-  # skip された) run では何も公開しない
+  # Publish only the shape verify ran all four of. Nothing is published when any needed
+  # job failed (or was skipped)
   publish:
     needs: [tag, build, verify]
     if: needs.tag.outputs.tag != ''
     permissions:
       contents: write
-      # checksum は同じ release の中にあるので真正性の証明にならない。どの workflow が
-      # どの commit から作ったかを検証できるよう provenance を付ける。
+      # The checksum lives in the same release, so it proves nothing about authenticity.
+      # Add provenance so it can be verified which workflow built it from which commit.
       id-token: write
       attestations: write
     runs-on: ubuntu-latest
     env:
       TAG: ${{ needs.tag.outputs.tag }}
     steps:
-      # release の中身と落とした dist/ を同じ commit から取る。別の commit の script で
-      # 出すと、公開する物と作った物が別の物になる
+      # Take the release contents and the downloaded dist/ from the same commit. A script
+      # from a different commit would make what is published differ from what was built.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.tag.outputs.sha }}
           persist-credentials: false
 
-      # build が上げたものをそのまま落とす。attest の対象も release に載るのも、この dist/
+      # Download exactly what build uploaded. This dist/ is both what gets attested and
+      # what lands on the release.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-binaries
           path: dist
 
-      # 4 個とも build が出した sums に合うことを確かめてから署名する。署名も release に載る
-      # のもこの dist/ なので、公開する物と署名する物を別にしない
+      # Confirm all four match the sums build produced before signing. What is signed and
+      # what lands on the release are this same dist/, so published and signed things are not split.
       - name: check the sums
         working-directory: dist
         run: |
@@ -288,20 +300,22 @@ jobs:
         with:
           subject-path: "dist/uptime-kuma-cli-*"
 
-      # publish-release.sh は tag を API で先に作ってから release を作る。contents: write は tag を
-      # 作るためだけでなく、release そのものにも要る。
-      # この token で作った tag は workflow を起動しないので、上の tag push の trigger で
-      # 二重に release されない。
+      # publish-release.sh creates the tag via the API before creating the release.
+      # contents: write is needed not only to create the tag but for the release itself.
+      # A tag made with this token does not trigger a workflow, so the tag push trigger
+      # above does not release it a second time.
       - name: release
         env:
           GH_TOKEN: ${{ github.token }}
-          # 3 つの経路 (push / workflow_run / workflow_dispatch) で「main の先頭でない commit の
-          # tag」をどう扱うかが変わる。スクリプトは event 名でしか見分けられないので渡す
+          # The three paths (push / workflow_run / workflow_dispatch) differ in how they
+          # treat "a tag on a commit that is not main's head". The script can tell them
+          # apart only by event name, so pass it
           RELEASE_TRIGGER: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          # main の先頭と比べるためと、publish-release.sh が「その tag が既に誰のものか」を確かめる
-          # ため。版の比較は gh release list で行う。checkout は shallow なので tag は勝手には取られない。
+          # To compare against main's head and to let publish-release.sh check "who the
+          # tag already belongs to". Version comparison uses gh release list. The checkout
+          # is shallow, so tags are not fetched on their own.
           git fetch --no-tags origin \
             '+refs/heads/main:refs/remotes/origin/main' \
             '+refs/tags/*:refs/tags/*'

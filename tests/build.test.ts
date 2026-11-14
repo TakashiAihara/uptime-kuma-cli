@@ -19,7 +19,7 @@ const PKG_VERSION = "7.7.7";
 let sb: Sandbox;
 beforeEach(() => {
   sb = sandbox();
-  // src は複製する。symlink だと ../package.json が本体の package.json に解決されてしまう
+  // src is copied. With a symlink, ../package.json would resolve to the real package.json
   cpSync(join(REPO, "src"), join(sb.dir, "src"), { recursive: true });
   symlinkSync(join(REPO, "node_modules"), join(sb.dir, "node_modules"));
   writeFileSync(
@@ -47,19 +47,19 @@ function version(env: Record<string, string> = {}): string {
 }
 
 describe("scripts/build.ts", () => {
-  test("RELEASE_TAG を埋め込んだバイナリは、その版を名乗る (v を落とした形)", () => {
+  test("a binary with RELEASE_TAG embedded names that version (in the form without the v)", () => {
     build({ RELEASE_TAG: "v3.2.1-rc.4" });
 
     expect(version()).toBe("3.2.1-rc.4");
   });
 
-  test("RELEASE_TAG が無ければ package.json の版を名乗り、env では偽れない", () => {
+  test("names package.json's version when RELEASE_TAG is missing, and cannot be faked via env", () => {
     build({});
 
     expect(version({ __BUILD_VERSION__: "0.0.1" })).toBe(PKG_VERSION);
   });
 
-  test("target を名指したときは、その target だけを作る", () => {
+  test("builds only that target when one is named", () => {
     build({ RELEASE_TAG: "v3.2.1-rc.4" });
 
     expect(existsSync(join(sb.dir, "dist/uptime-kuma-cli-linux-x64"))).toBe(true);

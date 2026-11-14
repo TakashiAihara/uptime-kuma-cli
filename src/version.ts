@@ -1,8 +1,8 @@
 import pkg from "../package.json" with { type: "json" };
 
-// `bun build --define` が差し込む識別子。release のバイナリは tag と同じ版を名乗り、開発実行
-// (定義が無い) は package.json の版を名乗る。process.env にしないのは、利用者の env で版を
-// 偽れてしまうため。
+// The identifier `bun build --define` injects. Release binaries name the same version as
+// the tag; a development run (no definition) names package.json's version. It is not
+// process.env because a user's env could fake the version.
 declare const __BUILD_VERSION__: string | undefined;
 
 export const VERSION: string =

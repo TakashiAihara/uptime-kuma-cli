@@ -52,7 +52,8 @@ base="https://github.com/${REPO}/releases/download/${VERSION}"
 mkdir -p "$INSTALL_DIR"
 tmp="$(mktemp -d "${INSTALL_DIR}/.uptime-kuma-cli.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
-# dash は signal では EXIT trap を走らせないので、exit を通して PATH の dir に残骸を残さない
+# dash does not run the EXIT trap on a signal, so go through exit to leave no leftovers
+# in the PATH dir
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
