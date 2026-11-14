@@ -48,6 +48,8 @@ export type FakeState = {
   beats: Record<number, Beat[]>;
   notifications: NotificationRow[];
   proxies: ProxyRow[];
+  // rows pushed as dockerHostList after login; the CLI checks docker_host ids against them
+  dockerHosts: { id: number }[];
   // event name -> msg; the next call to that event answers { ok: false, msg }
   fail: Record<string, string>;
   // monitor ids whose heartbeatList is never pushed
@@ -70,7 +72,10 @@ export type FakeKuma = { url: string; calls: Call[]; state: FakeState; close: ()
 const now = () => new Date().toISOString().replace("T", " ").slice(0, 19);
 
 // Kuma 1.23 runs redbean frozen, so `add` with a key that is not a monitor column fails.
-// The set is monitorDefaults of src/pages/EditMonitor.vue (1.23.17) plus the fields the form edits.
+// The set is the monitor columns: monitorDefaults of src/pages/EditMonitor.vue (1.23.17)
+// plus the fields the form edits through v-model (e.g. description, body, headers,
+// basic_auth_user). Kept as a literal copy, independent of src/, so the fake keeps
+// checking the implementation.
 const ADD_KEYS = new Set([
   "type",
   "name",
@@ -108,11 +113,43 @@ const ADD_KEYS = new Set([
   "gamedigGivenPortOnly",
   "active",
   "keyword",
+  "invertKeyword",
   "jsonPath",
   "expectedValue",
   "hostname",
   "port",
   "pushToken",
+  "description",
+  "game",
+  "grpcUrl",
+  "grpcProtobuf",
+  "grpcMethod",
+  "grpcServiceName",
+  "grpcEnableTls",
+  "grpcBody",
+  "grpcMetadata",
+  "radiusUsername",
+  "radiusPassword",
+  "radiusCalledStationId",
+  "radiusCallingStationId",
+  "radiusSecret",
+  "databaseConnectionString",
+  "databaseQuery",
+  "kafkaProducerTopic",
+  "kafkaProducerMessage",
+  "body",
+  "headers",
+  "tlsCa",
+  "tlsCert",
+  "tlsKey",
+  "oauth_token_url",
+  "oauth_client_id",
+  "oauth_client_secret",
+  "oauth_scopes",
+  "basic_auth_user",
+  "basic_auth_pass",
+  "authDomain",
+  "authWorkstation",
 ]);
 
 export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<FakeKuma> {
@@ -123,6 +160,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     beats: {},
     notifications: [],
     proxies: [],
+    dockerHosts: [],
     fail: {},
     silentHeartbeat: [],
     testNotificationResult: { ok: true, msg: "Sent Successfully." },
@@ -193,6 +231,10 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
         socket.emit(
           "proxyList",
           state.proxies.map((p) => structuredClone(p)),
+        );
+        socket.emit(
+          "dockerHostList",
+          state.dockerHosts.map((h) => structuredClone(h)),
         );
         for (const m of state.monitors) {
           if (state.silentHeartbeat.includes(m.id)) continue;

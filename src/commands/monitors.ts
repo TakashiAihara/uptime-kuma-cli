@@ -6,13 +6,72 @@ import {
   parseId,
   parseNonNegativeInteger,
   parsePort,
+  parsePositiveInteger,
   parsePositiveNumber,
   parseSets,
   printJson,
+  readJsonFile,
 } from "../lib.ts";
-import { connect, type KumaSession, type Monitor } from "../kuma.ts";
+import { connect, MONITOR_ADD_FIELDS, type KumaSession, type Monitor } from "../kuma.ts";
 
-const MONITOR_TYPES = ["http", "keyword", "json-query", "port", "push"] as const;
+// Order follows the type picker of EditMonitor.vue in Kuma 1.23.17; the
+// monitor types not listed here come in later parts.
+const MONITOR_TYPES = [
+  "group",
+  "http",
+  "port",
+  "ping",
+  "keyword",
+  "json-query",
+  "dns",
+  "docker",
+  "push",
+  "steam",
+  "gamedig",
+  "tailscale-ping",
+] as const;
+
+// Every type the 1.23.17 EditMonitor.vue picker offers, in its order. `add`
+// only supports MONITOR_TYPES, but `edit --set type=` may switch a monitor to
+// any of these — the CLI just cannot create them from scratch yet.
+const KUMA_MONITOR_TYPES = [
+  "group",
+  "http",
+  "port",
+  "ping",
+  "keyword",
+  "json-query",
+  "grpc-keyword",
+  "dns",
+  "docker",
+  "real-browser",
+  "push",
+  "steam",
+  "gamedig",
+  "mqtt",
+  "kafka-producer",
+  "sqlserver",
+  "postgres",
+  "mysql",
+  "mongodb",
+  "radius",
+  "redis",
+  "tailscale-ping",
+] as const;
+
+// dnsresolvetypeOptions of EditMonitor.vue
+const DNS_RESOLVE_TYPES = [
+  "A",
+  "AAAA",
+  "CAA",
+  "CNAME",
+  "MX",
+  "NS",
+  "PTR",
+  "SOA",
+  "SRV",
+  "TXT",
+] as const;
 
 // monitorDefaults of src/pages/EditMonitor.vue in Kuma 1.23.17, minus the fields the CLI always
 // sets. Fields from Kuma 2.x must not be added: 1.23 stores the object as-is and fails on unknown columns.
@@ -78,6 +137,10 @@ const SECRET_KEYS = new Set([
 // only the fields that name the method and the identity stay readable.
 const SASL_VISIBLE_KEYS = new Set(["mechanism", "username", "awsRegion", "accessKeyId"]);
 
+// The fields docs/design/cli.md Output redacts. They may only arrive through
+// --config-file so the secret stays out of argv.
+const HATCH_SECRET_KEYS = new Set([...SECRET_KEYS, "kafkaProducerSaslOptions"]);
+
 // A monitor URL may carry credentials as user:pass@; keep the URL readable and hide the password
 function redactUrl(value: unknown): unknown {
   if (typeof value !== "string" || value === "") return value;
@@ -131,6 +194,280 @@ function validateNotificationIdEntries(value: unknown): void {
   }
 }
 
+// The merged notificationIDList must keep the array-or-object shape before
+// it is normalized to the object Kuma stores.
+function checkNotificationIdList(value: unknown): void {
+  if (!Array.isArray(value) && (value === null || typeof value !== "object")) {
+    fail(2, "notificationIDList must be an array or an object");
+  }
+  validateNotificationIdEntries(value);
+}
+
+// `monitors add --set/--config-file`: every key must be a field the `add`
+// event accepts; id/type/name are set by the dedicated flags instead.
+function checkAddFields(fields: Record<string, unknown>, source: string): void {
+  for (const key of Object.keys(fields)) {
+    if (key === "id") fail(2, `${source} cannot set "id"; the id is assigned by Kuma`);
+    if (key === "type" || key === "name") {
+      fail(2, `${source} cannot set "${key}"; use --type/--name instead`);
+    }
+    if (!MONITOR_ADD_FIELDS.has(key)) {
+      fail(2, `${source} key "${key}" is not a monitor field`);
+    }
+  }
+}
+
+// `monitors edit`: same field set; only id is read-only, name/type keep the
+// --set behavior they had before the escape hatch existed.
+function checkEditFields(fields: Record<string, unknown>, source: string): void {
+  for (const key of Object.keys(fields)) {
+    if (key === "id") fail(2, `${source} cannot set "id"; the id selects the monitor`);
+    if (!MONITOR_ADD_FIELDS.has(key)) {
+      fail(2, `${source} key "${key}" is not a monitor field`);
+    }
+  }
+}
+
+// --set lands in argv; the secret fields only go through --config-file.
+function refuseSecretSets(sets: Record<string, unknown>): void {
+  for (const key of Object.keys(sets)) {
+    if (HATCH_SECRET_KEYS.has(key)) {
+      fail(2, `--set ${key}=... would put a secret in the command line; use --config-file instead`);
+    }
+  }
+}
+
+// "none" clears the parent; anything else must be a monitor id.
+function parseParent(value: string): number | null {
+  if (value === "none") return null;
+  return parseId(value, "--parent");
+}
+
+// parent reaches Kuma as a number or null. A numeric string would slip past
+// editMonitor's descendant check, which compares ids with includes().
+function normalizeParent(value: unknown): number | null {
+  if (value === null) return null;
+  if (value === "") fail(2, "parent must not be an empty string");
+  let n = NaN;
+  if (typeof value === "number") {
+    n = value;
+  } else if (typeof value === "string" && /^[1-9]\d*$/.test(value)) {
+    n = Number(value);
+  }
+  if (!Number.isInteger(n) || n <= 0) {
+    fail(2, `parent must be a monitor id, got ${JSON.stringify(value)}`);
+  }
+  return n;
+}
+
+// The pushed monitorList is the only source for the parent check: it must be
+// an existing monitor of type group. null means "no parent".
+function checkParentGroup(s: KumaSession, parent: number | null): void {
+  if (parent === null) return;
+  const m = s.monitorById(parent);
+  if (!m) fail(1, `monitor ${parent} not found`);
+  if (m.type !== "group") fail(1, `monitor ${parent} is not a group`);
+}
+
+// docker_host must name a host Kuma pushed in dockerHostList, like the ids
+// the UI's docker host picker offers. Already normalized to number|null.
+function checkDockerHost(s: KumaSession, dockerHost: unknown): void {
+  if (typeof dockerHost !== "number") return;
+  if (!s.dockerHosts().some((h) => h.id === dockerHost)) {
+    fail(1, `docker host ${dockerHost} not found`);
+  }
+}
+
+// A hatch value for a key that has a typed flag goes through the flag's
+// parser; flags take strings, so a string here parses the same way while a
+// number is stringified first. The key names the error.
+function hatchNumber(
+  value: unknown,
+  key: string,
+  parse: (value: string, flag: string) => number,
+): number {
+  if (typeof value !== "number" && typeof value !== "string") {
+    fail(2, `${key} must be a number`);
+  }
+  return parse(String(value), key);
+}
+
+// Kuma 1.23.17 monitor.js patches a timeout of 0 (or less) to
+// interval * 1000 * 0.8 at check time and then multiplies by 1000 for axios,
+// so the effective timeout silently becomes interval × 800 seconds.
+function parseTimeoutSeconds(value: string, flag: string): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) {
+    fail(
+      2,
+      `${flag} must be a positive number of seconds, got "${value}"; Kuma 1.23 turns 0 into interval × 800 seconds`,
+    );
+  }
+  return n;
+}
+
+// MIN/MAX_INTERVAL_SECOND of src/util.ts in Kuma 1.23.17; Monitor.validate()
+// enforces the same bounds server-side before the monitor is stored.
+const MIN_INTERVAL_SECOND = 20;
+const MAX_INTERVAL_SECOND = 2073600;
+
+function parseMonitorInterval(value: string, flag: string): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < MIN_INTERVAL_SECOND || n > MAX_INTERVAL_SECOND) {
+    fail(
+      2,
+      `${flag} must be between ${MIN_INTERVAL_SECOND} and ${MAX_INTERVAL_SECOND} seconds, got "${value}"`,
+    );
+  }
+  return n;
+}
+
+const HATCH_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unknown> = {
+  interval: (v, k) => hatchNumber(v, k, parseMonitorInterval),
+  retryInterval: (v, k) => hatchNumber(v, k, parsePositiveNumber),
+  resendInterval: (v, k) => hatchNumber(v, k, parseNonNegativeInteger),
+  maxretries: (v, k) => hatchNumber(v, k, parseNonNegativeInteger),
+  timeout: (v, k) => hatchNumber(v, k, parseTimeoutSeconds),
+  port: (v, k) => hatchNumber(v, k, parsePort),
+  packetSize: (v, k) => hatchNumber(v, k, parsePositiveInteger),
+  proxyId: (v, k) => (v === null ? null : hatchNumber(v, k, parseId)),
+  parent: (v) => normalizeParent(v),
+  docker_host: (v, k) => (v === null ? null : hatchNumber(v, k, parseId)),
+  dns_resolve_type: (v, k) => {
+    if (typeof v !== "string" || !(DNS_RESOLVE_TYPES as readonly string[]).includes(v)) {
+      fail(2, `${k} must be one of ${DNS_RESOLVE_TYPES.join(", ")}`);
+    }
+    return v;
+  },
+  // edit may switch to any type the 1.23.17 picker offers, including the ones
+  // `add` cannot create yet; anything else is not a monitor type at all.
+  type: (v, k) => {
+    if (typeof v !== "string" || !(KUMA_MONITOR_TYPES as readonly string[]).includes(v)) {
+      fail(2, `${k} must be one of ${KUMA_MONITOR_TYPES.join(", ")}`);
+    }
+    return v;
+  },
+  accepted_statuscodes: (v, k) => {
+    if (!Array.isArray(v) || v.some((c) => typeof c !== "string")) {
+      fail(2, `${k} must be an array of strings`);
+    }
+    return v;
+  },
+  kafkaProducerBrokers: (v, k) => {
+    if (!Array.isArray(v)) fail(2, `${k} must be an array`);
+    return v;
+  },
+};
+
+// Runs before connecting so a bad hatch value exits 2 with nothing sent.
+// The coerced result is written back: the payload then carries the same type
+// the typed flag would have produced.
+function validateHatchValues(fields: Record<string, unknown>): void {
+  for (const [key, value] of Object.entries(fields)) {
+    const check = HATCH_VALUE_CHECKS[key];
+    if (check !== undefined) fields[key] = check(value, key);
+  }
+}
+
+// retryInterval follows the interval and the timeout stays within 80% of
+// it, derived from the final interval after the hatch had its say. Explicit
+// values are kept; the cap applies to them the same way. On edit the caller
+// runs this only when the edit touches interval or timeout — a stored
+// timeout of 0 is otherwise sent back untouched, and Kuma 1.23.17 runs it
+// as interval × 800 seconds on HTTP checks (the reason parseTimeoutSeconds
+// refuses a user-supplied 0).
+function deriveMonitorTiming(monitor: Record<string, unknown>): void {
+  if (typeof monitor.interval !== "number") return;
+  monitor.retryInterval = monitor.retryInterval ?? monitor.interval;
+  monitor.timeout = Math.min(
+    typeof monitor.timeout === "number" ? monitor.timeout : 48,
+    Math.trunc(monitor.interval * 8) / 10,
+  );
+}
+
+// The merged monitor is validated once on its final values, right before it is
+// sent. On add that is the whole monitor; on edit only the fields the edit
+// sets, plus every required field when the edit changes the type — a stored
+// value the edit does not touch (the UI may save timeout 0, a deleted docker
+// host as docker_host null, proxyId 0 or port 0) is sent back unchanged.
+function validateFinalMonitor(
+  s: KumaSession,
+  monitor: Record<string, unknown>,
+  edit?: { touched: ReadonlySet<string>; typeChanged: boolean },
+): void {
+  const type = typeof monitor.type === "string" ? monitor.type : "";
+  const inScope = (field: string): boolean =>
+    edit === undefined || edit.touched.has(field) || edit.typeChanged;
+  const needString = (field: string): void => {
+    if (!inScope(field)) return;
+    const v = monitor[field];
+    if (typeof v !== "string" || v === "") fail(2, `${field} must be a non-empty string`);
+  };
+  if (type === "http" || type === "keyword" || type === "json-query") needString("url");
+  if (type === "keyword") needString("keyword");
+  if (type === "json-query") {
+    needString("jsonPath");
+    needString("expectedValue");
+  }
+  if (
+    type === "port" ||
+    type === "steam" ||
+    type === "gamedig" ||
+    type === "ping" ||
+    type === "dns" ||
+    type === "tailscale-ping"
+  ) {
+    needString("hostname");
+  }
+  if ((type === "port" || type === "steam" || type === "gamedig") && inScope("port")) {
+    const port = monitor.port;
+    if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535) {
+      fail(2, "port must be a port number");
+    }
+  }
+  if (type === "gamedig") needString("game");
+  if (type === "docker") {
+    needString("docker_container");
+    if (inScope("docker_host") && typeof monitor.docker_host !== "number") {
+      fail(2, "docker_host must be a docker host id");
+    }
+  }
+  if (type === "push" && inScope("pushToken")) {
+    const token = monitor.pushToken;
+    if (typeof token !== "string" || token === "") {
+      fail(2, "pushToken must be a non-empty string");
+    }
+  }
+  // dns_resolve_server is required only of a dns monitor; on edit it is
+  // judged only when the edit sets it or switches the type to dns.
+  if (type === "dns" && inScope("dns_resolve_server")) {
+    const server = monitor.dns_resolve_server;
+    if (typeof server !== "string" || server === "") {
+      fail(2, "dns_resolve_server must be a non-empty string");
+    }
+  }
+
+  if (edit === undefined || edit.touched.has("parent")) {
+    // parent reaches Kuma as a number or null; the sources above already
+    // normalized it, so this only re-checks the merged result against the
+    // pushed monitorList.
+    checkParentGroup(s, normalizeParent(monitor.parent ?? null));
+  }
+  if (
+    edit === undefined ||
+    edit.touched.has("docker_host") ||
+    (edit.typeChanged && type === "docker")
+  ) {
+    checkDockerHost(s, monitor.docker_host);
+  }
+  if (edit === undefined || edit.touched.has("proxyId")) {
+    const proxyId = monitor.proxyId;
+    if (typeof proxyId === "number" && !s.proxies().some((p) => p.id === proxyId)) {
+      fail(1, `proxy ${proxyId} not found`);
+    }
+  }
+}
+
 const summarize = (m: Monitor) => ({
   id: m.id,
   name: m.name,
@@ -180,11 +517,21 @@ export function registerMonitors(program: Command): void {
     )
     .requiredOption("--name <name>", "monitor name")
     .option("--url <url>", "monitor url")
-    .option("--hostname <hostname>", "hostname (port type)")
-    .option("--port <port>", "port (port type)")
+    .option("--hostname <hostname>", "hostname (port, ping, dns, steam, gamedig, tailscale-ping)")
+    .option("--port <port>", "port (port, dns, steam, gamedig)")
     .option("--keyword <keyword>", "keyword (keyword type)")
     .option("--json-path <path>", "json path (json-query type)")
     .option("--expected-value <value>", "expected value (json-query type)")
+    .option("--packet-size <bytes>", "ping packet size")
+    .option("--dns-resolve-server <server>", "DNS resolver server")
+    .addOption(
+      new Option("--dns-resolve-type <type>", "DNS resource record type").choices([
+        ...DNS_RESOLVE_TYPES,
+      ]),
+    )
+    .option("--docker-container <name>", "docker container name or id")
+    .option("--docker-host <id>", "docker host id")
+    .option("--game <game>", "game (gamedig type)")
     .option("--interval <seconds>", "heartbeat interval")
     .option("--retry-interval <seconds>", "retry interval")
     .option("--max-retries <n>", "maximum retries")
@@ -193,11 +540,15 @@ export function registerMonitors(program: Command): void {
     .option("--proxy-id <id>", "proxy id")
     .option("--notification-id <id>", "notification id (repeatable)", collect, [])
     .option("--notifications-from <monitorId>", "copy notifications from a monitor")
+    .option("--parent <groupId>", "parent group monitor id")
     .option("--paused", "create the monitor paused")
     .option("--push-token <token>", "push token (push type)")
+    .option("--set <key=value>", "set a monitor field (repeatable)", collect, [])
+    .option("--config-file <path>", "JSON file of monitor fields")
     .action(async (opts) => {
       const type = opts.type as string;
-      if (type !== "port" && type !== "push" && !opts.url) {
+      const urlTypes = type === "http" || type === "keyword" || type === "json-query";
+      if (urlTypes && !opts.url) {
         fail(2, `--type ${type} requires --url`);
       }
       if (type === "keyword" && !opts.keyword) fail(2, "--type keyword requires --keyword");
@@ -206,31 +557,117 @@ export function registerMonitors(program: Command): void {
         if (opts.expectedValue === undefined) {
           fail(2, "--type json-query requires --expected-value");
         }
+        if (opts.expectedValue === "") fail(2, "expectedValue must be a non-empty string");
       }
-      if (type === "port") {
-        if (!opts.hostname) fail(2, "--type port requires --hostname");
-        if (opts.port === undefined) fail(2, "--type port requires --port");
+      if (type === "port" || type === "steam" || type === "gamedig") {
+        if (!opts.hostname) fail(2, `--type ${type} requires --hostname`);
+        if (opts.port === undefined) fail(2, `--type ${type} requires --port`);
       }
+      if (type === "ping" || type === "dns" || type === "tailscale-ping") {
+        if (!opts.hostname) fail(2, `--type ${type} requires --hostname`);
+      }
+      if (type === "docker") {
+        if (!opts.dockerContainer) fail(2, "--type docker requires --docker-container");
+        if (opts.dockerHost === undefined) fail(2, "--type docker requires --docker-host");
+      }
+      if (type === "gamedig" && !opts.game) fail(2, "--type gamedig requires --game");
       if (opts.pushToken === "") fail(2, "--push-token must not be empty");
-      const interval = parsePositiveNumber(opts.interval ?? "60", "--interval");
+
+      const sets = parseSets(opts.set as string[] | undefined);
+      const fileConfig =
+        opts.configFile === undefined ? {} : readJsonFile(opts.configFile, "--config-file");
+      checkAddFields(sets, "--set");
+      checkAddFields(fileConfig, "--config-file");
+      refuseSecretSets(sets);
+      validateHatchValues(sets);
+      validateHatchValues(fileConfig);
+      if (sets.notificationIDList !== undefined) {
+        checkNotificationIdList(sets.notificationIDList);
+      }
+      if (fileConfig.notificationIDList !== undefined) {
+        checkNotificationIdList(fileConfig.notificationIDList);
+      }
+      const parentOpt = opts.parent === undefined ? undefined : parseParent(opts.parent);
+      if (
+        parentOpt !== undefined &&
+        (sets.parent !== undefined || fileConfig.parent !== undefined)
+      ) {
+        fail(2, "use either --parent or a parent key in --set/--config-file, not both");
+      }
+      // --parent and a hatch parent key are mutually exclusive (checked
+      // above); between the hatch sources --set beats --config-file.
+      let parentInput: unknown;
+      if (sets.parent !== undefined) {
+        parentInput = sets.parent;
+      } else if (fileConfig.parent !== undefined) {
+        parentInput = fileConfig.parent;
+      } else {
+        parentInput = parentOpt;
+      }
+      const normalizedParent = parentInput === undefined ? undefined : normalizeParent(parentInput);
+
+      // The merged pushToken must be a non-empty string; the token printed and
+      // built into pushUrl is always the one sent to Kuma.
+      let pushToken: string | undefined;
+      if (type === "push") {
+        let source = "--push-token";
+        let merged: unknown = (opts.pushToken as string | undefined) ?? generatePushToken();
+        if (fileConfig.pushToken !== undefined) {
+          source = "--config-file";
+          merged = fileConfig.pushToken;
+        }
+        if (sets.pushToken !== undefined) {
+          source = "--set";
+          merged = sets.pushToken;
+        }
+        if (typeof merged !== "string" || merged === "") {
+          fail(2, `${source} pushToken must be a non-empty string`);
+        }
+        pushToken = merged;
+      }
+
+      const interval = parseMonitorInterval(opts.interval ?? "60", "--interval");
       const retryInterval =
         opts.retryInterval === undefined
-          ? interval
+          ? undefined
           : parsePositiveNumber(opts.retryInterval, "--retry-interval");
       const maxRetries = parseNonNegativeInteger(opts.maxRetries ?? "0", "--max-retries");
       const resendInterval = parseNonNegativeInteger(
         opts.resendInterval ?? "0",
         "--resend-interval",
       );
-      // The UI's clampTimeout keeps every timeout within 80% of the interval
-      const maxTimeout = Math.trunc(interval * 8) / 10;
-      const timeout = Math.min(
-        opts.timeout === undefined ? 48 : parsePositiveNumber(opts.timeout, "--timeout"),
-        maxTimeout,
-      );
+      const timeout =
+        opts.timeout === undefined ? undefined : parseTimeoutSeconds(opts.timeout, "--timeout");
       const proxyIdOption =
         opts.proxyId === undefined ? undefined : parseId(opts.proxyId, "--proxy-id");
-      const port = type === "port" ? parsePort(opts.port, "--port") : undefined;
+      // dns defaults to resolver port 53 like the UI's type watcher; the other
+      // port types require --port (checked above).
+      let port: number | undefined;
+      if (type === "dns") {
+        port = opts.port === undefined ? 53 : parsePort(opts.port, "--port");
+      } else if (type === "port" || type === "steam" || type === "gamedig") {
+        port = parsePort(opts.port, "--port");
+      }
+      const packetSize =
+        type === "ping" && opts.packetSize !== undefined
+          ? parsePositiveInteger(opts.packetSize, "--packet-size")
+          : undefined;
+      const dockerHost = type === "docker" ? parseId(opts.dockerHost, "--docker-host") : undefined;
+      // A hatch can null out the host the flag supplied; docker still needs one.
+      // Precedence matches the merge below: --set beats --config-file beats the flag.
+      let mergedDockerHost: unknown = dockerHost;
+      let dockerHostSource = "--docker-host";
+      if (fileConfig.docker_host !== undefined) {
+        mergedDockerHost = fileConfig.docker_host;
+        dockerHostSource = "--config-file";
+      }
+      if (sets.docker_host !== undefined) {
+        mergedDockerHost = sets.docker_host;
+        dockerHostSource = "--set";
+      }
+      if (type === "docker" && typeof mergedDockerHost !== "number") {
+        fail(2, `${dockerHostSource} docker_host must be a docker host id`);
+      }
       const notificationIds = ((opts.notificationId ?? []) as string[]).map((v) =>
         parseId(v, "--notification-id"),
       );
@@ -261,44 +698,57 @@ export function registerMonitors(program: Command): void {
       let proxyId: number | null;
       if (proxyIdOption !== undefined) {
         proxyId = proxyIdOption;
-      } else if (type === "http" || type === "keyword" || type === "json-query") {
+      } else if (type !== "port" && type !== "push") {
+        // The UI assigns the default proxy on add for every type; only the
+        // picker is limited to http / keyword / json-query. port and push keep
+        // the CLI's existing null.
         proxyId = s.proxies().find((p) => p.default)?.id ?? null;
       } else {
         proxyId = null;
       }
 
       const active = !opts.paused;
-      const monitor: Record<string, unknown> = {
-        ...MONITOR_DEFAULTS,
+      // Precedence: UI defaults < typed flags < --config-file < --set.
+      const typed: Record<string, unknown> = {
         type,
         name,
         url: null,
         interval,
-        retryInterval,
         resendInterval,
         maxretries: maxRetries,
-        timeout,
         notificationIDList: notificationIdObject(ids),
         proxyId,
         active,
       };
-      if (type === "http" || type === "keyword" || type === "json-query") {
-        monitor.url = opts.url;
-      }
-      if (type === "keyword") monitor.keyword = opts.keyword;
+      // retryInterval and timeout are only sent when explicit; their defaults
+      // derive from the final interval after the merge below.
+      if (retryInterval !== undefined) typed.retryInterval = retryInterval;
+      if (timeout !== undefined) typed.timeout = timeout;
+      if (normalizedParent !== undefined) typed.parent = normalizedParent;
+      if (urlTypes) typed.url = opts.url;
+      if (type === "keyword") typed.keyword = opts.keyword;
       if (type === "json-query") {
-        monitor.jsonPath = opts.jsonPath;
-        monitor.expectedValue = opts.expectedValue;
+        typed.jsonPath = opts.jsonPath;
+        typed.expectedValue = opts.expectedValue;
       }
-      if (type === "port") {
-        monitor.hostname = opts.hostname;
-        monitor.port = port;
+      if (port !== undefined) {
+        typed.hostname = opts.hostname;
+        typed.port = port;
       }
-      let pushToken: string | undefined;
-      if (type === "push") {
-        pushToken = (opts.pushToken as string | undefined) ?? generatePushToken();
-        monitor.pushToken = pushToken;
+      if (type === "ping" || type === "tailscale-ping") typed.hostname = opts.hostname;
+      if (packetSize !== undefined) typed.packetSize = packetSize;
+      if (type === "dns") {
+        if (opts.dnsResolveServer !== undefined) {
+          typed.dns_resolve_server = opts.dnsResolveServer;
+        }
+        if (opts.dnsResolveType !== undefined) typed.dns_resolve_type = opts.dnsResolveType;
       }
+      if (type === "docker") {
+        typed.docker_container = opts.dockerContainer;
+        typed.docker_host = dockerHost;
+      }
+      if (type === "gamedig") typed.game = opts.game;
+      if (type === "push") typed.pushToken = pushToken;
 
       let pushBase = s.url;
       if (pushToken !== undefined) {
@@ -310,12 +760,23 @@ export function registerMonitors(program: Command): void {
         }
       }
 
+      const monitor: Record<string, unknown> = {
+        ...MONITOR_DEFAULTS,
+        ...typed,
+        ...fileConfig,
+        ...sets,
+      };
+      if (normalizedParent !== undefined) monitor.parent = normalizedParent;
+      monitor.notificationIDList = notificationIdObject(monitor.notificationIDList);
+      deriveMonitorTiming(monitor);
+      validateFinalMonitor(s, monitor);
+
       const res = await s.request("add", [monitor]);
       const out: Record<string, unknown> = {
         id: res?.monitorID ?? null,
         name,
         type,
-        active,
+        active: monitor.active !== false,
       };
       if (pushToken !== undefined) {
         out.pushToken = pushToken;
@@ -328,34 +789,71 @@ export function registerMonitors(program: Command): void {
     .command("edit <id>")
     .description("Edit a monitor")
     .option("--set <key=value>", "set a field (repeatable)", collect, [])
+    .option("--parent <groupId>", "parent group monitor id ('none' clears it)")
+    .option("--config-file <path>", "JSON file of monitor fields")
     .action(async (rawId, opts) => {
       const id = parseId(rawId, "monitor id");
       const sets = parseSets(opts.set as string[] | undefined);
-      if (!opts.set || (opts.set as string[]).length === 0) {
-        fail(2, "monitors edit requires at least one --set key=value");
+      const fileConfig =
+        opts.configFile === undefined ? {} : readJsonFile(opts.configFile, "--config-file");
+      const parentOpt = opts.parent === undefined ? undefined : parseParent(opts.parent);
+      if (
+        parentOpt !== undefined &&
+        (sets.parent !== undefined || fileConfig.parent !== undefined)
+      ) {
+        fail(2, "use either --parent or a parent key in --set/--config-file, not both");
       }
+      if (
+        (opts.set as string[]).length === 0 &&
+        Object.keys(fileConfig).length === 0 &&
+        parentOpt === undefined
+      ) {
+        fail(2, "monitors edit requires at least one --set key=value, --config-file or --parent");
+      }
+      checkEditFields(sets, "--set");
+      checkEditFields(fileConfig, "--config-file");
+      refuseSecretSets(sets);
+      validateHatchValues(sets);
+      validateHatchValues(fileConfig);
+      // The parent checks run on the final merged value, whichever source set
+      // it: --parent and a hatch parent key are mutually exclusive (checked
+      // above); between the hatch sources --set beats --config-file.
+      let parentInput: unknown;
+      if (parentOpt !== undefined) {
+        parentInput = parentOpt;
+      } else if (sets.parent !== undefined) {
+        parentInput = sets.parent;
+      } else {
+        parentInput = fileConfig.parent;
+      }
+      const normalizedParent = parentInput === undefined ? undefined : normalizeParent(parentInput);
       // Kuma 1.23 only rejects descendants as parent, not the monitor itself, and a self-parent
       // makes its parent walk loop forever
-      if (sets.parent !== undefined && Number(sets.parent) === id) {
-        fail(2, "--set parent cannot be the monitor itself");
+      if (normalizedParent === id) fail(2, "parent cannot be the monitor itself");
+      if (sets.notificationIDList !== undefined) {
+        checkNotificationIdList(sets.notificationIDList);
       }
-      if ("id" in sets) {
-        fail(2, "--set id=... would retarget the edit to another monitor");
-      }
-      const notifValue = sets.notificationIDList;
-      if (notifValue !== undefined) {
-        if (!Array.isArray(notifValue) && (notifValue === null || typeof notifValue !== "object")) {
-          fail(2, "notificationIDList must be an array or an object");
-        }
-        validateNotificationIdEntries(notifValue);
+      if (fileConfig.notificationIDList !== undefined) {
+        checkNotificationIdList(fileConfig.notificationIDList);
       }
       const s = await connect();
       const fetched = await fetchMonitor(s, id);
       const monitor: Record<string, unknown> = { ...fetched };
+      for (const [k, v] of Object.entries(fileConfig)) monitor[k] = v;
       for (const [k, v] of Object.entries(sets)) monitor[k] = v;
+      if (normalizedParent !== undefined) monitor.parent = normalizedParent;
       // Kuma iterates notificationIDList with for...in, so an array would be
       // stored under its indexes; always send the object shape.
       monitor.notificationIDList = notificationIdObject(monitor.notificationIDList);
+      const touched = new Set([...Object.keys(fileConfig), ...Object.keys(sets)]);
+      if (parentOpt !== undefined) touched.add("parent");
+      const timingTouched =
+        sets.interval !== undefined ||
+        fileConfig.interval !== undefined ||
+        sets.timeout !== undefined ||
+        fileConfig.timeout !== undefined;
+      if (timingTouched) deriveMonitorTiming(monitor);
+      validateFinalMonitor(s, monitor, { touched, typeChanged: monitor.type !== fetched.type });
       await s.request("editMonitor", [monitor]);
       // editMonitor ignores fields like `active`, so print what Kuma saved.
       const saved = await fetchMonitor(s, id);

@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { type FakeKuma, startFakeKuma } from "./helpers/fake-kuma";
 import { creds, run, type Sandbox, sandbox } from "./helpers/run";
 
@@ -14,11 +16,25 @@ const http = (id: number, name: string, extra: Record<string, unknown> = {}) => 
   hostname: null,
   port: null,
   interval: 60,
+  retryInterval: 60,
+  timeout: 48,
+  proxyId: null,
+  docker_host: null,
+  dns_resolve_server: "1.1.1.1",
   parent: null,
   maxretries: 0,
   notificationIDList: {},
   accepted_statuscodes: ["200-299"],
   ...extra,
+});
+
+const group = (id: number, name: string) => ({
+  id,
+  name,
+  type: "group",
+  active: true,
+  parent: null,
+  notificationIDList: {},
 });
 
 beforeEach(async () => {
@@ -363,6 +379,7 @@ describe("monitors add", () => {
   });
 
   test("--proxy-id, --max-retries, --retry-interval, --resend-interval and --timeout are sent as numbers", async () => {
+    kuma.state.proxies = [{ ...defaultProxy(), id: 4, default: 0 }];
     const r = await run(
       sb,
       [
@@ -610,7 +627,7 @@ describe("monitors add", () => {
     [["--type", "push", "--name", "x", "--retry-interval", "-5"], "--retry-interval"],
     [["--type", "push", "--name", "x", "--max-retries", "1.5"], "--max-retries"],
     [["--type", "push", "--name", "x", "--resend-interval", "-1"], "--resend-interval"],
-    [["--type", "push", "--name", "x", "--timeout", "0"], "--timeout"],
+    [["--type", "push", "--name", "x", "--timeout", "-1"], "--timeout"],
     [["--type", "push", "--name", "x", "--notification-id", "0"], "--notification-id"],
   ])("empty or out-of-range values exit 2 before connecting: %p", async (args, word) => {
     const r = await run(sb, ["monitors", "add", ...args], creds(kuma.url));
@@ -628,6 +645,1619 @@ describe("monitors add", () => {
     );
     expect(r.code).toBe(1);
     expect(r.stderr).toContain("Invalid monitor");
+  });
+
+  test("ping: sends hostname and packetSize 56 by default", async () => {
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "ping", "--name", "p1", "--hostname", "10.0.0.1"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.hostname).toBe("10.0.0.1");
+    expect(sent.packetSize).toBe(56);
+    expect(sent.port).toBeUndefined();
+  });
+
+  test("ping: --packet-size overrides the default", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "ping",
+        "--name",
+        "p2",
+        "--hostname",
+        "10.0.0.1",
+        "--packet-size",
+        "128",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).packetSize).toBe(128);
+  });
+
+  test("dns: sends hostname, resolver 1.1.1.1, type A and port 53", async () => {
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "dns", "--name", "d1", "--hostname", "example.com"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.hostname).toBe("example.com");
+    expect(sent.dns_resolve_server).toBe("1.1.1.1");
+    expect(sent.dns_resolve_type).toBe("A");
+    expect(sent.port).toBe(53);
+  });
+
+  test("dns: --dns-resolve-server, --dns-resolve-type and --port are sent", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "dns",
+        "--name",
+        "d2",
+        "--hostname",
+        "example.com",
+        "--dns-resolve-server",
+        "8.8.8.8",
+        "--dns-resolve-type",
+        "AAAA",
+        "--port",
+        "5353",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.dns_resolve_server).toBe("8.8.8.8");
+    expect(sent.dns_resolve_type).toBe("AAAA");
+    expect(sent.port).toBe(5353);
+  });
+
+  test("docker: sends docker_container and the docker_host id", async () => {
+    kuma.state.dockerHosts = [{ id: 2 }];
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "docker",
+        "--name",
+        "ctr",
+        "--docker-container",
+        "web-1",
+        "--docker-host",
+        "2",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.docker_container).toBe("web-1");
+    expect(sent.docker_host).toBe(2);
+    expect(sent.hostname).toBeUndefined();
+  });
+
+  test("group: sends the common fields and no type-specific ones", async () => {
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "group", "--name", "grp"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.type).toBe("group");
+    expect(sent.name).toBe("grp");
+    expect(sent.url).toBeNull();
+    expect(sent.hostname).toBeUndefined();
+    expect(sent.port).toBeUndefined();
+  });
+
+  test("steam: sends hostname and port", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "steam",
+        "--name",
+        "srv",
+        "--hostname",
+        "game.example.com",
+        "--port",
+        "27015",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.hostname).toBe("game.example.com");
+    expect(sent.port).toBe(27015);
+  });
+
+  test("gamedig: sends hostname, port, game and gamedigGivenPortOnly", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "gamedig",
+        "--name",
+        "mc",
+        "--hostname",
+        "mc.example.com",
+        "--port",
+        "25565",
+        "--game",
+        "minecraft",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.hostname).toBe("mc.example.com");
+    expect(sent.port).toBe(25565);
+    expect(sent.game).toBe("minecraft");
+    expect(sent.gamedigGivenPortOnly).toBe(true);
+  });
+
+  test("tailscale-ping: sends hostname only", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "tailscale-ping",
+        "--name",
+        "ts",
+        "--hostname",
+        "node.tailnet.ts.net",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.hostname).toBe("node.tailnet.ts.net");
+    expect(sent.port).toBeUndefined();
+  });
+
+  test.each([
+    [["--type", "ping", "--name", "x"], "--hostname"],
+    [["--type", "dns", "--name", "x"], "--hostname"],
+    [["--type", "docker", "--name", "x"], "--docker-container"],
+    [["--type", "docker", "--name", "x", "--docker-container", "c"], "--docker-host"],
+    [["--type", "steam", "--name", "x", "--hostname", "h"], "--port"],
+    [["--type", "steam", "--name", "x", "--port", "1"], "--hostname"],
+    [["--type", "gamedig", "--name", "x", "--hostname", "h", "--port", "1"], "--game"],
+    [["--type", "gamedig", "--name", "x", "--hostname", "h", "--game", "g"], "--port"],
+    [["--type", "tailscale-ping", "--name", "x"], "--hostname"],
+  ])("missing required options exit 2 before connecting: %p", async (args, word) => {
+    const r = await run(sb, ["monitors", "add", ...args], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(word);
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("--type docker without --docker-host exits 2 before connecting", async () => {
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "docker", "--name", "x", "--docker-container", "c"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--type docker requires --docker-host");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("--set beats --config-file which beats typed flags which beat the defaults", async () => {
+    const f = join(sb.dir, "add.json");
+    writeFileSync(f, JSON.stringify({ interval: 90, maxretries: 7, resendInterval: 5 }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "prec",
+        "--url",
+        "https://p.example.com",
+        "--interval",
+        "120",
+        "--max-retries",
+        "9",
+        "--resend-interval",
+        "8",
+        "--config-file",
+        f,
+        "--set",
+        "interval=45",
+        "--set",
+        "maxretries=2",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.interval).toBe(45);
+    expect(sent.maxretries).toBe(2);
+    expect(sent.resendInterval).toBe(5);
+  });
+
+  test("--set with a key that is not a monitor field exits 2 before connecting", async () => {
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "push", "--name", "x", "--set", "bogus=1"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("bogus");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("--config-file with a key that is not a monitor field exits 2 before connecting", async () => {
+    const f = join(sb.dir, "bad.json");
+    writeFileSync(f, JSON.stringify({ bogus: 1 }));
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "push", "--name", "x", "--config-file", f],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("bogus");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test.each([["id=1"], ["type=ping"], ["name=other"]])(
+    "--set %s is refused before connecting",
+    async (set) => {
+      const r = await run(
+        sb,
+        ["monitors", "add", "--type", "push", "--name", "x", "--set", set],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain(set.split("=")[0]!);
+      expect(kuma.calls).toHaveLength(0);
+    },
+  );
+
+  test("--config-file cannot set type", async () => {
+    const f = join(sb.dir, "typed.json");
+    writeFileSync(f, JSON.stringify({ type: "ping" }));
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "push", "--name", "x", "--config-file", f],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("type");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test.each([
+    ["basic_auth_pass=x"],
+    ["oauth_client_secret=x"],
+    ["tlsKey=x"],
+    ["headers=x"],
+    ["body=x"],
+    ["grpcBody=x"],
+    ["grpcMetadata=x"],
+    ["mqttPassword=x"],
+    ["radiusPassword=x"],
+    ["radiusSecret=x"],
+    ["databaseConnectionString=x"],
+    ["kafkaProducerSaslOptions={}"],
+  ])("--set %s would put a secret in argv and exits 2", async (set) => {
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "push", "--name", "x", "--set", set],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--config-file");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("a secret field is accepted through --config-file", async () => {
+    const f = join(sb.dir, "sec.json");
+    writeFileSync(f, JSON.stringify({ mqttPassword: "cfg-secret-value" }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "sec",
+        "--url",
+        "https://s.example.com",
+        "--config-file",
+        f,
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).mqttPassword).toBe("cfg-secret-value");
+  });
+
+  test("--parent sends an existing group id", async () => {
+    kuma.state.monitors.push(group(20, "grp"));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "ping",
+        "--name",
+        "child",
+        "--hostname",
+        "127.0.0.1",
+        "--parent",
+        "20",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).parent).toBe(20);
+  });
+
+  test("--parent rejects a monitor that is not a group", async () => {
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "ping", "--name", "c2", "--hostname", "h", "--parent", "7"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("monitor 7 is not a group");
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test("--parent rejects an unknown monitor id", async () => {
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "ping", "--name", "c3", "--hostname", "h", "--parent", "404"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("monitor 404 not found");
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test("add --parent with --set parent exits 2 before connecting", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "ping",
+        "--name",
+        "x",
+        "--hostname",
+        "h",
+        "--parent",
+        "20",
+        "--set",
+        "parent=21",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("not both");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("add --parent with --config-file parent exits 2 before connecting", async () => {
+    const f = join(sb.dir, "add-parent-cfg.json");
+    writeFileSync(f, JSON.stringify({ parent: 20 }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "ping",
+        "--name",
+        "x",
+        "--hostname",
+        "h",
+        "--parent",
+        "20",
+        "--config-file",
+        f,
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("not both");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("a new monitor type gets the default proxy the UI assigns on add", async () => {
+    kuma.state.proxies = [defaultProxy()];
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "ping", "--name", "pp", "--hostname", "h"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).proxyId).toBe(3);
+  });
+
+  test("port monitors still get no default proxy", async () => {
+    kuma.state.proxies = [defaultProxy()];
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "port", "--name", "pt", "--hostname", "h", "--port", "22"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).proxyId).toBeNull();
+  });
+
+  test.each([['pushToken=""'], ["pushToken=null"], ["pushToken=123"], ["pushToken=false"]])(
+    "push --set %s exits 2 before connecting",
+    async (set) => {
+      const r = await run(
+        sb,
+        ["monitors", "add", "--type", "push", "--name", "x", "--set", set],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("pushToken");
+      expect(kuma.calls).toHaveLength(0);
+    },
+  );
+
+  test("push --config-file with an empty pushToken exits 2 before connecting", async () => {
+    const f = join(sb.dir, "pt.json");
+    writeFileSync(f, JSON.stringify({ pushToken: "" }));
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "push", "--name", "x", "--config-file", f],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("pushToken");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("push: the printed pushToken and pushUrl use the merged value that was sent", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "push",
+        "--name",
+        "x",
+        "--push-token",
+        "flag-tok",
+        "--set",
+        'pushToken="set-tok"',
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).pushToken).toBe("set-tok");
+    const out = r.json();
+    expect(out.pushToken).toBe("set-tok");
+    expect(out.pushUrl).toContain("set-tok");
+  });
+
+  test("push: --config-file pushToken is sent and printed", async () => {
+    const f = join(sb.dir, "pt2.json");
+    writeFileSync(f, JSON.stringify({ pushToken: "cfg-tok" }));
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "push", "--name", "x", "--config-file", f],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).pushToken).toBe("cfg-tok");
+    expect(r.json().pushToken).toBe("cfg-tok");
+  });
+
+  test("add --set parent as a numeric string is sent as a number", async () => {
+    kuma.state.monitors.push(group(20, "grp"));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "ping",
+        "--name",
+        "c",
+        "--hostname",
+        "h",
+        "--set",
+        'parent="20"',
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).parent).toBe(20);
+  });
+
+  test.each([['parent=""'], ["parent=abc"], ["parent=-1"], ["parent=1.5"]])(
+    "add --set %s exits 2 before connecting",
+    async (set) => {
+      const r = await run(
+        sb,
+        ["monitors", "add", "--type", "ping", "--name", "x", "--hostname", "h", "--set", set],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("parent");
+      expect(kuma.calls).toHaveLength(0);
+    },
+  );
+
+  test("add --set parent as a JSON empty string names the empty-string error", async () => {
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "ping", "--name", "x", "--hostname", "h", "--set", 'parent=""'],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("parent must not be an empty string");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("retryInterval and the timeout cap derive from the final interval", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "iv",
+        "--url",
+        "https://i.example.com",
+        "--interval",
+        "120",
+        "--set",
+        "interval=30",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.interval).toBe(30);
+    expect(sent.retryInterval).toBe(30);
+    expect(sent.timeout).toBe(24);
+  });
+
+  test("explicit retryInterval and timeout are kept; the cap uses the final interval", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "iv2",
+        "--url",
+        "https://i2.example.com",
+        "--interval",
+        "20",
+        "--timeout",
+        "30",
+        "--set",
+        "interval=100",
+        "--set",
+        "retryInterval=10",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.interval).toBe(100);
+    expect(sent.retryInterval).toBe(10);
+    expect(sent.timeout).toBe(30);
+  });
+
+  test("--config-file interval drives the derived values too", async () => {
+    const f = join(sb.dir, "iv.json");
+    writeFileSync(f, JSON.stringify({ interval: 45 }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "iv3",
+        "--url",
+        "https://i3.example.com",
+        "--config-file",
+        f,
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.interval).toBe(45);
+    expect(sent.retryInterval).toBe(45);
+    expect(sent.timeout).toBe(36);
+  });
+
+  test("docker: an unknown --docker-host exits 1 before add", async () => {
+    kuma.state.dockerHosts = [{ id: 2 }];
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "docker",
+        "--name",
+        "ctr2",
+        "--docker-container",
+        "web-1",
+        "--docker-host",
+        "9",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("docker host 9 not found");
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test("a hatch docker_host is checked against the pushed dockerHostList", async () => {
+    kuma.state.dockerHosts = [{ id: 2 }];
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        "--set",
+        "docker_host=9",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("docker host 9 not found");
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test("a hatch docker_host in the list is sent", async () => {
+    kuma.state.dockerHosts = [{ id: 2 }];
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        "--set",
+        "docker_host=2",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).docker_host).toBe(2);
+  });
+
+  test.each([
+    ["interval=abc"],
+    ["interval=0"],
+    ["interval=-5"],
+    ["retryInterval=abc"],
+    ["resendInterval=1.5"],
+    ["maxretries=-1"],
+    ["timeout=0"],
+    ["timeout=-1"],
+    ["port=70000"],
+    ["port=abc"],
+    ["port=[80]"],
+    ["packetSize=0"],
+    ["packetSize=1.5"],
+    ["proxyId=abc"],
+    ["proxyId=0"],
+    ["dns_resolve_type=BOGUS"],
+    ["docker_host=abc"],
+    ["accepted_statuscodes=200-299"],
+    ['accepted_statuscodes=["200-299",404]'],
+    ['kafkaProducerBrokers="a:9092"'],
+  ])("monitors add --set %s exits 2 before connecting", async (set) => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        "--set",
+        set,
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(`${set.split("=")[0]!} must`);
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("hatch values for typed-flag keys are coerced like the flags", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        "--set",
+        'interval="30"',
+        "--set",
+        'port="8080"',
+        "--set",
+        'maxretries="4"',
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.interval).toBe(30);
+    expect(sent.port).toBe(8080);
+    expect(sent.maxretries).toBe(4);
+  });
+
+  test("--config-file values get the same validation", async () => {
+    const f = join(sb.dir, "badval.json");
+    writeFileSync(f, JSON.stringify({ interval: "abc" }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        "--config-file",
+        f,
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("interval");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("an unknown --type exits 2 with the choices error before connecting", async () => {
+    const r = await run(sb, ["monitors", "add", "--type", "nope", "--name", "x"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("nope");
+    expect(r.stderr).toContain("choices");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("--set active=false is merged into the sent monitor and the output", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "act",
+        "--url",
+        "https://a.example.com",
+        "--set",
+        "active=false",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).active).toBe(false);
+    expect(r.json().active).toBe(false);
+  });
+
+  test("--config-file active=false is merged into the sent monitor and the output", async () => {
+    const f = join(sb.dir, "act.json");
+    writeFileSync(f, JSON.stringify({ active: false }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "act2",
+        "--url",
+        "https://a2.example.com",
+        "--config-file",
+        f,
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).active).toBe(false);
+    expect(r.json().active).toBe(false);
+  });
+
+  test.each([
+    ["notificationIDList=[null]"],
+    ["notificationIDList=5"],
+    ['notificationIDList={"a":true}'],
+  ])("monitors add --set %s exits 2 before connecting", async (set) => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        "--set",
+        set,
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("notificationIDList");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("monitors add --config-file with a bad notificationIDList exits 2 before connecting", async () => {
+    const f = join(sb.dir, "nid.json");
+    writeFileSync(f, JSON.stringify({ notificationIDList: ["x"] }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        "--config-file",
+        f,
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("notificationIDList");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("add --config-file parent as a numeric string is sent as a number", async () => {
+    kuma.state.monitors.push(group(21, "g21"));
+    const f = join(sb.dir, "parent.json");
+    writeFileSync(f, JSON.stringify({ parent: "21" }));
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "ping", "--name", "pc", "--hostname", "h", "--config-file", f],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).parent).toBe(21);
+  });
+
+  test("--interval flag loses to --set interval for the derived values", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "iv4",
+        "--url",
+        "https://i4.example.com",
+        "--interval",
+        "120",
+        "--set",
+        "interval=45",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.interval).toBe(45);
+    expect(sent.retryInterval).toBe(45);
+    expect(sent.timeout).toBe(36);
+  });
+
+  test("an explicit --retry-interval is kept when --set changes the interval", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "iv5",
+        "--url",
+        "https://i5.example.com",
+        "--interval",
+        "120",
+        "--retry-interval",
+        "30",
+        "--set",
+        "interval=45",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.interval).toBe(45);
+    expect(sent.retryInterval).toBe(30);
+    expect(sent.timeout).toBe(36);
+  });
+
+  test("--config-file basic_auth_pass is a real column and is sent", async () => {
+    const f = join(sb.dir, "ba.json");
+    writeFileSync(f, JSON.stringify({ basic_auth_user: "u", basic_auth_pass: "cfg-bp" }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "ba",
+        "--url",
+        "https://ba.example.com",
+        "--config-file",
+        f,
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.basic_auth_user).toBe("u");
+    expect(sent.basic_auth_pass).toBe("cfg-bp");
+  });
+
+  test("docker: --set docker_host=null names the hatch source", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "docker",
+        "--name",
+        "dnull",
+        "--docker-container",
+        "c",
+        "--docker-host",
+        "2",
+        "--set",
+        "docker_host=null",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--set docker_host must be a docker host id");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("docker: --config-file docker_host=null names the hatch source", async () => {
+    const f = join(sb.dir, "dnull.json");
+    writeFileSync(f, JSON.stringify({ docker_host: null }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "docker",
+        "--name",
+        "dnull2",
+        "--docker-container",
+        "c",
+        "--docker-host",
+        "2",
+        "--config-file",
+        f,
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--config-file docker_host must be a docker host id");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("--set proxyId=null opts out of the default proxy", async () => {
+    kuma.state.proxies = [defaultProxy()];
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "np",
+        "--url",
+        "https://np.example.com",
+        "--set",
+        "proxyId=null",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).proxyId).toBeNull();
+  });
+
+  test("--set docker_host=null on a non-docker type is sent as null", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "dh",
+        "--url",
+        "https://dh.example.com",
+        "--set",
+        "docker_host=null",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).docker_host).toBeNull();
+  });
+
+  test("--set timeout=0 exits 2: Kuma 1.23 turns it into interval × 800 seconds", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "t0",
+        "--url",
+        "https://t0.example.com",
+        "--set",
+        "timeout=0",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("Kuma 1.23 turns 0 into interval × 800 seconds");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("--timeout 0 exits 2 with the same Kuma 1.23 reason", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "t1",
+        "--url",
+        "https://t1.example.com",
+        "--timeout",
+        "0",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("Kuma 1.23 turns 0 into interval × 800 seconds");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test.each([[["--timeout", ""]], [["--timeout", "abc"]], [["--set", 'timeout="abc"']]])(
+    "a non-numeric timeout exits 2 before connecting: %p",
+    async (extra) => {
+      const r = await run(
+        sb,
+        [
+          "monitors",
+          "add",
+          "--type",
+          "http",
+          "--name",
+          "x",
+          "--url",
+          "https://x.example.com",
+          ...extra,
+        ],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("timeout must");
+      expect(r.stderr).toContain("Kuma 1.23 turns 0 into interval × 800 seconds");
+      expect(kuma.calls).toHaveLength(0);
+    },
+  );
+
+  test("ping: --set hostname=null exits 2 before sending add", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "ping",
+        "--name",
+        "x",
+        "--hostname",
+        "h",
+        "--set",
+        "hostname=null",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("hostname");
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test("ping: --config-file hostname null exits 2 before sending add", async () => {
+    const f = join(sb.dir, "hn.json");
+    writeFileSync(f, JSON.stringify({ hostname: null }));
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "ping", "--name", "x", "--hostname", "h", "--config-file", f],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("hostname");
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test("docker: --set docker_container empty exits 2 before sending add", async () => {
+    kuma.state.dockerHosts = [{ id: 2 }];
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "docker",
+        "--name",
+        "x",
+        "--docker-container",
+        "c",
+        "--docker-host",
+        "2",
+        "--set",
+        'docker_container=""',
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("docker_container");
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test("docker: --config-file docker_container empty exits 2 before sending add", async () => {
+    kuma.state.dockerHosts = [{ id: 2 }];
+    const f = join(sb.dir, "dc.json");
+    writeFileSync(f, JSON.stringify({ docker_container: "" }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "docker",
+        "--name",
+        "x",
+        "--docker-container",
+        "c",
+        "--docker-host",
+        "2",
+        "--config-file",
+        f,
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("docker_container");
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test("--set proxyId naming an unknown proxy exits 1 before sending add", async () => {
+    kuma.state.proxies = [defaultProxy()];
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        "--set",
+        "proxyId=9",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("proxy 9 not found");
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test("http: --set url=null exits 2 before sending add", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        "--set",
+        "url=null",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("url must be a non-empty string");
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test("http: --config-file url empty exits 2 before sending add", async () => {
+    const f = join(sb.dir, "ue.json");
+    writeFileSync(f, JSON.stringify({ url: "" }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        "--config-file",
+        f,
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("url must be a non-empty string");
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test("port: --set port=null exits 2 before sending add", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "port",
+        "--name",
+        "x",
+        "--hostname",
+        "h",
+        "--port",
+        "80",
+        "--set",
+        "port=null",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("port must");
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test("gamedig: --set game empty exits 2 before sending add", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "gamedig",
+        "--name",
+        "x",
+        "--hostname",
+        "h",
+        "--port",
+        "1",
+        "--game",
+        "minecraft",
+        "--set",
+        'game=""',
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("game must be a non-empty string");
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test.each([
+    [
+      [
+        "--type",
+        "keyword",
+        "--name",
+        "x",
+        "--url",
+        "https://x",
+        "--keyword",
+        "k",
+        "--set",
+        "keyword=null",
+      ],
+      "keyword",
+    ],
+    [
+      [
+        "--type",
+        "json-query",
+        "--name",
+        "x",
+        "--url",
+        "https://x",
+        "--json-path",
+        "$.a",
+        "--expected-value",
+        "1",
+        "--set",
+        "jsonPath=null",
+      ],
+      "jsonPath",
+    ],
+    [
+      [
+        "--type",
+        "json-query",
+        "--name",
+        "x",
+        "--url",
+        "https://x",
+        "--json-path",
+        "$.a",
+        "--expected-value",
+        "1",
+        "--set",
+        "expectedValue=null",
+      ],
+      "expectedValue",
+    ],
+    [
+      [
+        "--type",
+        "port",
+        "--name",
+        "x",
+        "--hostname",
+        "h",
+        "--port",
+        "80",
+        "--set",
+        "hostname=null",
+      ],
+      "hostname",
+    ],
+    [
+      [
+        "--type",
+        "steam",
+        "--name",
+        "x",
+        "--hostname",
+        "h",
+        "--port",
+        "1",
+        "--set",
+        "hostname=null",
+      ],
+      "hostname",
+    ],
+    [
+      [
+        "--type",
+        "gamedig",
+        "--name",
+        "x",
+        "--hostname",
+        "h",
+        "--port",
+        "1",
+        "--game",
+        "minecraft",
+        "--set",
+        "hostname=null",
+      ],
+      "hostname",
+    ],
+    [
+      ["--type", "tailscale-ping", "--name", "x", "--hostname", "h", "--set", "hostname=null"],
+      "hostname",
+    ],
+    [
+      ["--type", "steam", "--name", "x", "--hostname", "h", "--port", "1", "--set", "port=null"],
+      "port must",
+    ],
+    [
+      [
+        "--type",
+        "gamedig",
+        "--name",
+        "x",
+        "--hostname",
+        "h",
+        "--port",
+        "1",
+        "--game",
+        "minecraft",
+        "--set",
+        "port=null",
+      ],
+      "port must",
+    ],
+    [
+      ["--type", "dns", "--name", "x", "--hostname", "h", "--set", "dns_resolve_server=null"],
+      "dns_resolve_server",
+    ],
+    [
+      ["--type", "dns", "--name", "x", "--hostname", "h", "--set", 'dns_resolve_server=""'],
+      "dns_resolve_server",
+    ],
+  ])("a hatch-nulled required field exits 2 before sending add: %p", async (extra, field) => {
+    const r = await run(sb, ["monitors", "add", ...extra], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(field);
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test.each([[["--interval", "19"]], [["--interval", "2073601"]], [["--set", "interval=19"]]])(
+    "an interval outside Kuma's 20..2073600 bounds exits 2: %p",
+    async (extra) => {
+      const r = await run(
+        sb,
+        [
+          "monitors",
+          "add",
+          "--type",
+          "http",
+          "--name",
+          "x",
+          "--url",
+          "https://x.example.com",
+          ...extra,
+        ],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("interval must be between 20 and 2073600");
+      expect(addCalls()).toHaveLength(0);
+    },
+  );
+
+  test("--interval 20 is accepted", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        "--interval",
+        "20",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).interval).toBe(20);
+  });
+
+  test('--expected-value "" exits 2 before connecting', async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "json-query",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        "--json-path",
+        "$.a",
+        "--expected-value",
+        "",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("expectedValue must be a non-empty string");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("add --type http with dns_resolve_server null is sent: only dns requires it", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        "--set",
+        "dns_resolve_server=null",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.dns_resolve_server).toBeNull();
   });
 });
 
@@ -713,10 +2343,11 @@ describe("monitors edit", () => {
     },
   );
 
-  test("another parent id is still sent", async () => {
-    const r = await run(sb, ["monitors", "edit", "7", "--set", "parent=2"], creds(kuma.url));
+  test("--set parent naming a group is sent", async () => {
+    kuma.state.monitors.push(group(20, "g20"));
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "parent=20"], creds(kuma.url));
     expect(r.code).toBe(0);
-    expect((kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as any).parent).toBe(2);
+    expect((kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as any).parent).toBe(20);
   });
 
   test("--set id is refused before connecting", async () => {
@@ -732,6 +2363,635 @@ describe("monitors edit", () => {
     expect(r.code).toBe(0);
     expect(r.stdout).not.toContain("fixture-hidden-e1");
     expect(r.json().basic_auth_pass).toBe("***");
+  });
+
+  test("--config-file merges into the monitor below --set", async () => {
+    const f = join(sb.dir, "edit.json");
+    writeFileSync(f, JSON.stringify({ maxretries: 5, name: "from-file" }));
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--config-file", f, "--set", "maxretries=2"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.maxretries).toBe(2);
+    expect(sent.name).toBe("from-file");
+    expect(r.json().name).toBe("from-file");
+  });
+
+  test("--parent cannot be combined with --set and --config-file parent", async () => {
+    kuma.state.monitors.push(group(20, "g20"), group(21, "g21"), group(22, "g22"));
+    const f = join(sb.dir, "edit-parent.json");
+    writeFileSync(f, JSON.stringify({ parent: 20 }));
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--config-file", f, "--set", "parent=21", "--parent", "22"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("not both");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("edit --parent with --set parent exits 2 before connecting", async () => {
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--parent", "20", "--set", "parent=21"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("not both");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("edit --parent with --config-file parent exits 2 before connecting", async () => {
+    const f = join(sb.dir, "edit-parent-cfg.json");
+    writeFileSync(f, JSON.stringify({ parent: 20 }));
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--parent", "20", "--config-file", f],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("not both");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("--set parent wins over --config-file parent", async () => {
+    kuma.state.monitors.push(group(20, "g20"), group(21, "g21"));
+    const f = join(sb.dir, "edit-parent2.json");
+    writeFileSync(f, JSON.stringify({ parent: 20 }));
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--config-file", f, "--set", "parent=21"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.parent).toBe(21);
+  });
+
+  test("--config-file parent must name an existing group", async () => {
+    const f = join(sb.dir, "edit-parent3.json");
+    writeFileSync(f, JSON.stringify({ parent: 7 }));
+    const r = await run(sb, ["monitors", "edit", "2", "--config-file", f], creds(kuma.url));
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("monitor 7 is not a group");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit --parent sets an existing group as parent", async () => {
+    kuma.state.monitors.push(group(20, "g20"));
+    const r = await run(sb, ["monitors", "edit", "7", "--parent", "20"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.parent).toBe(20);
+    expect(r.json().parent).toBe(20);
+  });
+
+  test("edit --parent rejects a monitor that is not a group", async () => {
+    const r = await run(sb, ["monitors", "edit", "7", "--parent", "2"], creds(kuma.url));
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("monitor 2 is not a group");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit --parent rejects an unknown monitor id", async () => {
+    const r = await run(sb, ["monitors", "edit", "7", "--parent", "404"], creds(kuma.url));
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("monitor 404 not found");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit --parent none clears the parent", async () => {
+    kuma.state.monitors.find((m) => m.id === 7)!.parent = 20;
+    const r = await run(sb, ["monitors", "edit", "7", "--parent", "none"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.parent).toBeNull();
+    expect(r.json().parent).toBeNull();
+  });
+
+  test("edit --parent to itself exits 2 before connecting", async () => {
+    const r = await run(sb, ["monitors", "edit", "7", "--parent", "7"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("parent");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("edit --config-file parent to itself exits 2 before connecting", async () => {
+    const f = join(sb.dir, "edit-self.json");
+    writeFileSync(f, JSON.stringify({ parent: 7 }));
+    const r = await run(sb, ["monitors", "edit", "7", "--config-file", f], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("parent");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("edit --set with a secret field exits 2 and points to --config-file", async () => {
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "basic_auth_pass=x"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--config-file");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("edit --set with a key that is not a monitor field exits 2 before connecting", async () => {
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "bogus=1"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("bogus");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("edit --config-file with a key that is not a monitor field exits 2 before connecting", async () => {
+    const f = join(sb.dir, "edit-bad.json");
+    writeFileSync(f, JSON.stringify({ bogus: 1 }));
+    const r = await run(sb, ["monitors", "edit", "7", "--config-file", f], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("bogus");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("edit --config-file cannot set id", async () => {
+    const f = join(sb.dir, "edit-id.json");
+    writeFileSync(f, JSON.stringify({ id: 9 }));
+    const r = await run(sb, ["monitors", "edit", "7", "--config-file", f], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("id");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("edit without --set, --config-file or --parent exits 2 before connecting", async () => {
+    const r = await run(sb, ["monitors", "edit", "7"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("edit --config-file accepts a secret field and the output stays redacted", async () => {
+    const f = join(sb.dir, "edit-sec.json");
+    writeFileSync(f, JSON.stringify({ basic_auth_pass: "cfg-secret-value" }));
+    const r = await run(sb, ["monitors", "edit", "7", "--config-file", f], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.basic_auth_pass).toBe("cfg-secret-value");
+    expect(r.stdout).not.toContain("cfg-secret-value");
+    expect(r.json().basic_auth_pass).toBe("***");
+  });
+
+  test("edit --set parent must name a group too", async () => {
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "parent=2"], creds(kuma.url));
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("monitor 2 is not a group");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit parent checks run on the final merged hatch value", async () => {
+    kuma.state.monitors.push(group(20, "g20"));
+    const f = join(sb.dir, "edit-parent-final.json");
+    writeFileSync(f, JSON.stringify({ parent: 2 }));
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--config-file", f, "--set", "parent=20"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.parent).toBe(20);
+  });
+
+  test("edit parent group-check applies to the winning hatch value", async () => {
+    kuma.state.monitors.push(group(20, "g20"));
+    const f = join(sb.dir, "edit-parent-lose.json");
+    writeFileSync(f, JSON.stringify({ parent: 20 }));
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--config-file", f, "--set", "parent=2"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("monitor 2 is not a group");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit --set parent beats --config-file parent for the self-parent check", async () => {
+    kuma.state.monitors.push(group(20, "g20"));
+    const f = join(sb.dir, "edit-self2.json");
+    writeFileSync(f, JSON.stringify({ parent: 20 }));
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--config-file", f, "--set", "parent=7"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("parent");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("edit --set parent as a numeric string is sent as a number", async () => {
+    kuma.state.monitors.push(group(20, "g20"));
+    const r = await run(sb, ["monitors", "edit", "7", "--set", 'parent="20"'], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.parent).toBe(20);
+  });
+
+  test("edit --set parent empty string exits 2 before connecting", async () => {
+    const r = await run(sb, ["monitors", "edit", "7", "--set", 'parent=""'], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("parent");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("edit --config-file parent as an empty string names the empty-string error", async () => {
+    const f = join(sb.dir, "edit-parent-empty.json");
+    writeFileSync(f, JSON.stringify({ parent: "" }));
+    const r = await run(sb, ["monitors", "edit", "7", "--config-file", f], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("parent must not be an empty string");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("edit --set parent=null clears the parent", async () => {
+    kuma.state.monitors.find((m) => m.id === 7)!.parent = 20;
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "parent=null"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.parent).toBeNull();
+  });
+
+  test("edit --set interval=abc exits 2 before connecting", async () => {
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "interval=abc"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("interval");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test.each([
+    ["basic_auth_pass=x"],
+    ["oauth_client_secret=x"],
+    ["tlsKey=x"],
+    ["headers=x"],
+    ["body=x"],
+    ["grpcBody=x"],
+    ["grpcMetadata=x"],
+    ["mqttPassword=x"],
+    ["radiusPassword=x"],
+    ["radiusSecret=x"],
+    ["databaseConnectionString=x"],
+    ["kafkaProducerSaslOptions={}"],
+  ])("edit --set %s would put a secret in argv and exits 2", async (set) => {
+    const r = await run(sb, ["monitors", "edit", "7", "--set", set], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(set.split("=")[0]!);
+    expect(r.stderr).toContain("--config-file");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("edit --config-file with a bad notificationIDList exits 2 before connecting", async () => {
+    const f = join(sb.dir, "edit-nid.json");
+    writeFileSync(f, JSON.stringify({ notificationIDList: [0] }));
+    const r = await run(sb, ["monitors", "edit", "7", "--config-file", f], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("notificationIDList");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("edit --config-file parent as a numeric string is sent as a number", async () => {
+    kuma.state.monitors.push(group(21, "g21"));
+    const f = join(sb.dir, "edit-parent.json");
+    writeFileSync(f, JSON.stringify({ parent: "21" }));
+    const r = await run(sb, ["monitors", "edit", "7", "--config-file", f], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.parent).toBe(21);
+  });
+
+  test("edit --config-file values get the same validation", async () => {
+    const f = join(sb.dir, "edit-badval.json");
+    writeFileSync(f, JSON.stringify({ interval: "abc" }));
+    const r = await run(sb, ["monitors", "edit", "7", "--config-file", f], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("interval must");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("edit --set timeout=0 exits 2: Kuma 1.23 turns it into interval × 800 seconds", async () => {
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "timeout=0"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("Kuma 1.23 turns 0 into interval × 800 seconds");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("edit --config-file timeout=0 exits 2 with the same reason", async () => {
+    const f = join(sb.dir, "edit-t0.json");
+    writeFileSync(f, JSON.stringify({ timeout: 0 }));
+    const r = await run(sb, ["monitors", "edit", "7", "--config-file", f], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("Kuma 1.23 turns 0 into interval × 800 seconds");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("edit --set docker_host is checked against dockerHostList", async () => {
+    kuma.state.dockerHosts = [{ id: 2 }];
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "docker_host=9"], creds(kuma.url));
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("docker host 9 not found");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit --set docker_host in the list is sent", async () => {
+    kuma.state.dockerHosts = [{ id: 2 }];
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "docker_host=2"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.docker_host).toBe(2);
+  });
+
+  test.each([['pushToken=""'], ["pushToken=null"]])(
+    "edit on a push monitor with %s exits 2",
+    async (set) => {
+      kuma.state.monitors.find((m) => m.id === 9)!.pushToken = "tok-9";
+      const r = await run(sb, ["monitors", "edit", "9", "--set", set], creds(kuma.url));
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("pushToken");
+      expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+    },
+  );
+
+  test("edit derives timeout from the final interval like add", async () => {
+    const m7 = kuma.state.monitors.find((m) => m.id === 7)!;
+    m7.retryInterval = 60;
+    m7.timeout = 48;
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "interval=30"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.interval).toBe(30);
+    expect(sent.retryInterval).toBe(60);
+    expect(sent.timeout).toBe(24);
+  });
+
+  test("edit a docker monitor: --config-file docker_host null exits 2", async () => {
+    kuma.state.dockerHosts = [{ id: 2 }];
+    kuma.state.monitors.push({
+      id: 30,
+      name: "dkr",
+      type: "docker",
+      active: true,
+      docker_container: "c",
+      docker_host: 2,
+      interval: 60,
+      parent: null,
+      notificationIDList: {},
+    });
+    const f = join(sb.dir, "edit-dh.json");
+    writeFileSync(f, JSON.stringify({ docker_host: null }));
+    const r = await run(sb, ["monitors", "edit", "30", "--config-file", f], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("docker_host");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit --set interval=0.1 exits 2 naming interval", async () => {
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "interval=0.1"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("interval");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit --set type=dns on a monitor without hostname exits 2", async () => {
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "type=dns"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("hostname");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit --set type=port on a monitor without a stored port exits 2", async () => {
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=port", "--set", "hostname=h"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("port must be a port number");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit --set type=nonsense exits 2 before connecting", async () => {
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "type=nonsense"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("type must be one of");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("edit --set type=mqtt is accepted: any 1.23.17 picker type may be set", async () => {
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "type=mqtt"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.type).toBe("mqtt");
+  });
+
+  test("edit name-only keeps a stored timeout of 0", async () => {
+    kuma.state.monitors.find((m) => m.id === 7)!.timeout = 0;
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "name=x2"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.timeout).toBe(0);
+  });
+
+  test("edit name-only keeps docker_host null on a docker monitor", async () => {
+    kuma.state.monitors.push({
+      id: 30,
+      name: "dkr",
+      type: "docker",
+      active: true,
+      docker_container: "c",
+      docker_host: null,
+      interval: 60,
+      parent: null,
+      notificationIDList: {},
+    });
+    const r = await run(sb, ["monitors", "edit", "30", "--set", "name=x2"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.docker_host).toBeNull();
+  });
+
+  test("edit name-only keeps stored proxyId 0 and port 0", async () => {
+    const m7 = kuma.state.monitors.find((m) => m.id === 7)!;
+    m7.proxyId = 0;
+    m7.port = 0;
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "name=x2"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.proxyId).toBe(0);
+    expect(sent.port).toBe(0);
+  });
+
+  test("edit --set dns_resolve_server empty on a dns monitor exits 2", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "type=dns",
+        "--set",
+        "hostname=h",
+        "--set",
+        'dns_resolve_server=""',
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("dns_resolve_server must be a non-empty string");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit --set dns_resolve_server empty on a non-dns monitor is sent", async () => {
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", 'dns_resolve_server=""'],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.dns_resolve_server).toBe("");
+  });
+
+  test("edit name-only on a port monitor keeps a stored port of 0", async () => {
+    kuma.state.monitors.push({ ...http(31, "pt"), type: "port", hostname: "h", port: 0 });
+    const r = await run(sb, ["monitors", "edit", "31", "--set", "name=x2"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.port).toBe(0);
+  });
+
+  test("edit name-only on a steam monitor keeps a stored port of 0", async () => {
+    kuma.state.monitors.push({ ...http(32, "stm"), type: "steam", hostname: "h", port: 0 });
+    const r = await run(sb, ["monitors", "edit", "32", "--set", "name=x2"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.port).toBe(0);
+  });
+
+  test("edit name-only on a ping monitor keeps a stored empty hostname", async () => {
+    kuma.state.monitors.push({ ...http(33, "png"), type: "ping", hostname: "" });
+    const r = await run(sb, ["monitors", "edit", "33", "--set", "name=x2"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.hostname).toBe("");
+  });
+
+  test("edit name-only on a push monitor keeps a stored null pushToken", async () => {
+    kuma.state.monitors.find((m) => m.id === 9)!.pushToken = null;
+    const r = await run(sb, ["monitors", "edit", "9", "--set", "name=x2"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.pushToken).toBeNull();
+  });
+
+  test("edit name-only keeps a stored parent that is no longer a group", async () => {
+    kuma.state.monitors.push({ ...http(34, "pp"), parent: 2 });
+    const r = await run(sb, ["monitors", "edit", "34", "--set", "name=x2"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.parent).toBe(2);
+  });
+
+  test("edit --set proxyId naming an unknown proxy exits 1", async () => {
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "proxyId=999"], creds(kuma.url));
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("proxy 999 not found");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit --set type=dns on a monitor with stored dns_resolve_server null exits 2", async () => {
+    kuma.state.monitors.push({
+      ...http(40, "dnsw"),
+      hostname: "h",
+      dns_resolve_server: null,
+    });
+    const r = await run(sb, ["monitors", "edit", "40", "--set", "type=dns"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("dns_resolve_server");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit --set type=docker without a docker_host exits 2", async () => {
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=docker", "--set", "docker_container=c"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("docker_host");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit --set type=http on a dns monitor with null resolver passes", async () => {
+    kuma.state.monitors.push({
+      ...http(42, "dnstohttp"),
+      type: "dns",
+      hostname: "h",
+      url: null,
+      dns_resolve_server: null,
+    });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "42", "--set", "type=http", "--set", "url=https://x.example.com"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.type).toBe("http");
+  });
+
+  test("edit --config-file with a numeric type exits 2 before connecting", async () => {
+    const f = join(sb.dir, "edit-type.json");
+    writeFileSync(f, JSON.stringify({ type: 5 }));
+    const r = await run(sb, ["monitors", "edit", "7", "--config-file", f], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("type must be one of");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("edit --set timeout=100 on interval 60 sends the capped 48", async () => {
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "timeout=100"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.timeout).toBe(48);
+    expect(sent.retryInterval).toBe(60);
+  });
+
+  test("edit --config-file interval re-derives the timing", async () => {
+    const f = join(sb.dir, "edit-int.json");
+    writeFileSync(f, JSON.stringify({ interval: 30 }));
+    const r = await run(sb, ["monitors", "edit", "7", "--config-file", f], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.interval).toBe(30);
+    expect(sent.timeout).toBe(24);
+  });
+
+  test("edit --config-file timeout=100 is capped at 80% of the interval", async () => {
+    const f = join(sb.dir, "edit-t100.json");
+    writeFileSync(f, JSON.stringify({ timeout: 100 }));
+    const r = await run(sb, ["monitors", "edit", "7", "--config-file", f], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.timeout).toBe(48);
+  });
+
+  test("edit --set interval=19 exits 2 before connecting", async () => {
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "interval=19"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("interval must be between 20 and 2073600");
+    expect(kuma.calls).toHaveLength(0);
   });
 });
 

@@ -56,7 +56,13 @@ uptime-kuma-cli monitors add --type json-query --name "relay jp" --url https://a
   --json-path '$[hostname="jp-1"].active' --expected-value true --proxy-id 2
 uptime-kuma-cli monitors add --type port --name "ssh" --hostname 10.0.0.5 --port 22
 uptime-kuma-cli monitors add --type push --name "nightly job" --paused --notifications-from 14
+uptime-kuma-cli monitors add --type group --name "edge"
+uptime-kuma-cli monitors add --type ping --name "gw" --hostname 192.0.2.1 --parent 12 --paused
+uptime-kuma-cli monitors add --type dns --name "resolver" --hostname example.com --set 'dns_resolve_type="AAAA"'
+uptime-kuma-cli monitors add --type http --name "wiki" --url https://wiki.example.com --config-file wiki.json
 uptime-kuma-cli monitors edit 14 --set maxretries=2 --set 'notificationIDList=[3,5]'
+uptime-kuma-cli monitors edit 14 --parent 12
+uptime-kuma-cli monitors edit 14 --parent none
 uptime-kuma-cli monitors pause 14
 uptime-kuma-cli monitors resume 14
 uptime-kuma-cli monitors delete 14 --yes
@@ -82,7 +88,8 @@ uptime-kuma-cli proxies delete 2 --yes
 - `--paused` creates the monitor without starting it (push to a paused monitor returns HTTP 404, so resume before the pusher starts)
 - Kuma only notifies on status changes; with `resendInterval` 0 a monitor that stays down does not notify again
 - Notification configs, proxy passwords and secret monitor fields (basic auth, OAuth secret, TLS key, headers, body, ...) are never printed; pass secrets with `--config-file` / `--password-file`
-- New monitors get the notifications marked default, and http / keyword / json-query monitors get the default proxy, as in the UI
+- `monitors add` / `monitors edit` take `--set key=value` and `--config-file` for monitor fields without a dedicated flag; secret fields only go through `--config-file` so they stay out of argv
+- New monitors get the notifications marked default; every type except port / push gets the proxy flagged `default` (proxyId), and `--proxy-id` overrides it
 - Each command logs in once; Kuma allows 20 logins per minute per instance, so pace long loops. Accounts with 2FA are not supported
 
 ## Exit codes

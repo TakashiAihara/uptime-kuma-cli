@@ -6,6 +6,87 @@ export interface Monitor extends Record<string, unknown> {
   name: string;
 }
 
+// Fields the Kuma 1.23.17 `add` event accepts: monitorDefaults of
+// src/pages/EditMonitor.vue plus the fields the form edits, in the wire
+// spelling. `add` runs bean.import + store on a redbean frozen bean, so any
+// other key fails the store. tests/helpers/fake-kuma.ts keeps its own literal
+// copy of the same columns so it keeps checking this list.
+export const MONITOR_ADD_FIELDS = new Set([
+  "type",
+  "name",
+  "parent",
+  "url",
+  "method",
+  "interval",
+  "retryInterval",
+  "resendInterval",
+  "maxretries",
+  "timeout",
+  "notificationIDList",
+  "ignoreTls",
+  "upsideDown",
+  "packetSize",
+  "expiryNotification",
+  "maxredirects",
+  "accepted_statuscodes",
+  "dns_resolve_type",
+  "dns_resolve_server",
+  "docker_container",
+  "docker_host",
+  "proxyId",
+  "mqttUsername",
+  "mqttPassword",
+  "mqttTopic",
+  "mqttSuccessMessage",
+  "authMethod",
+  "oauth_auth_method",
+  "httpBodyEncoding",
+  "kafkaProducerBrokers",
+  "kafkaProducerSaslOptions",
+  "kafkaProducerSsl",
+  "kafkaProducerAllowAutoTopicCreation",
+  "gamedigGivenPortOnly",
+  "active",
+  "keyword",
+  "invertKeyword",
+  "jsonPath",
+  "expectedValue",
+  "hostname",
+  "port",
+  "pushToken",
+  "description",
+  "game",
+  "grpcUrl",
+  "grpcProtobuf",
+  "grpcMethod",
+  "grpcServiceName",
+  "grpcEnableTls",
+  "grpcBody",
+  "grpcMetadata",
+  "radiusUsername",
+  "radiusPassword",
+  "radiusCalledStationId",
+  "radiusCallingStationId",
+  "radiusSecret",
+  "databaseConnectionString",
+  "databaseQuery",
+  "kafkaProducerTopic",
+  "kafkaProducerMessage",
+  "body",
+  "headers",
+  "tlsCa",
+  "tlsCert",
+  "tlsKey",
+  "oauth_token_url",
+  "oauth_client_id",
+  "oauth_client_secret",
+  "oauth_scopes",
+  "basic_auth_user",
+  "basic_auth_pass",
+  "authDomain",
+  "authWorkstation",
+]);
+
 export interface NotificationRow extends Record<string, unknown> {
   id: number;
   name: string;
@@ -15,6 +96,10 @@ export interface NotificationRow extends Record<string, unknown> {
 }
 
 export interface ProxyRow extends Record<string, unknown> {
+  id: number;
+}
+
+export interface DockerHostRow extends Record<string, unknown> {
   id: number;
 }
 
@@ -58,6 +143,7 @@ export class KumaSession {
     readonly monitorList: Record<string, Monitor>,
     readonly notificationList: NotificationRow[],
     readonly proxyList: ProxyRow[],
+    readonly dockerHostList: DockerHostRow[],
     readonly heartbeats: Map<number, BeatRow[]>,
     private readonly disconnected: Promise<never>,
   ) {}
@@ -93,6 +179,10 @@ export class KumaSession {
 
   proxyById(id: number): ProxyRow | undefined {
     return this.proxies().find((p) => p.id === id);
+  }
+
+  dockerHosts(): DockerHostRow[] {
+    return [...this.dockerHostList].sort((a, b) => a.id - b.id);
   }
 
   heartbeat(id: number): BeatRow[] | undefined {
@@ -139,6 +229,7 @@ export async function connect(): Promise<KumaSession> {
     monitorList?: Record<string, Monitor>;
     notificationList?: NotificationRow[];
     proxyList?: ProxyRow[];
+    dockerHostList?: DockerHostRow[];
   } = {};
   const heartbeats = new Map<number, BeatRow[]>();
   // The server pushes these right after the login callback, so the listeners
@@ -151,6 +242,9 @@ export async function connect(): Promise<KumaSession> {
   });
   socket.on("proxyList", (data: ProxyRow[]) => {
     pushed.proxyList = data;
+  });
+  socket.on("dockerHostList", (data: DockerHostRow[]) => {
+    pushed.dockerHostList = data;
   });
   socket.on("heartbeatList", (id: unknown, beats: unknown) => {
     heartbeats.set(Number(id), Array.isArray(beats) ? (beats as BeatRow[]) : []);
@@ -186,9 +280,14 @@ export async function connect(): Promise<KumaSession> {
   }
 
   const listsDeadline = Date.now() + timeoutMs;
-  while (!pushed.monitorList || !pushed.notificationList || !pushed.proxyList) {
+  while (
+    !pushed.monitorList ||
+    !pushed.notificationList ||
+    !pushed.proxyList ||
+    !pushed.dockerHostList
+  ) {
     if (Date.now() >= listsDeadline) {
-      fail(2, "timed out waiting for pushed monitor/notification/proxy lists");
+      fail(2, "timed out waiting for pushed monitor/notification/proxy/docker host lists");
     }
     await Promise.race([sleep(10), disconnected]);
   }
@@ -201,6 +300,7 @@ export async function connect(): Promise<KumaSession> {
     lists.monitorList,
     lists.notificationList,
     lists.proxyList,
+    lists.dockerHostList,
     heartbeats,
     disconnected,
   );
