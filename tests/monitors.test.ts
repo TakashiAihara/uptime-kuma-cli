@@ -16,6 +16,11 @@ const http = (id: number, name: string, extra: Record<string, unknown> = {}) => 
   hostname: null,
   port: null,
   interval: 60,
+  retryInterval: 60,
+  timeout: 48,
+  proxyId: null,
+  docker_host: null,
+  dns_resolve_server: "1.1.1.1",
   parent: null,
   maxretries: 0,
   notificationIDList: {},
@@ -2026,6 +2031,212 @@ describe("monitors add", () => {
     expect(r.stderr).toContain("game must be a non-empty string");
     expect(addCalls()).toHaveLength(0);
   });
+
+  test.each([
+    [
+      [
+        "--type",
+        "keyword",
+        "--name",
+        "x",
+        "--url",
+        "https://x",
+        "--keyword",
+        "k",
+        "--set",
+        "keyword=null",
+      ],
+      "keyword",
+    ],
+    [
+      [
+        "--type",
+        "json-query",
+        "--name",
+        "x",
+        "--url",
+        "https://x",
+        "--json-path",
+        "$.a",
+        "--expected-value",
+        "1",
+        "--set",
+        "jsonPath=null",
+      ],
+      "jsonPath",
+    ],
+    [
+      [
+        "--type",
+        "json-query",
+        "--name",
+        "x",
+        "--url",
+        "https://x",
+        "--json-path",
+        "$.a",
+        "--expected-value",
+        "1",
+        "--set",
+        "expectedValue=null",
+      ],
+      "expectedValue",
+    ],
+    [
+      [
+        "--type",
+        "port",
+        "--name",
+        "x",
+        "--hostname",
+        "h",
+        "--port",
+        "80",
+        "--set",
+        "hostname=null",
+      ],
+      "hostname",
+    ],
+    [
+      [
+        "--type",
+        "steam",
+        "--name",
+        "x",
+        "--hostname",
+        "h",
+        "--port",
+        "1",
+        "--set",
+        "hostname=null",
+      ],
+      "hostname",
+    ],
+    [
+      [
+        "--type",
+        "gamedig",
+        "--name",
+        "x",
+        "--hostname",
+        "h",
+        "--port",
+        "1",
+        "--game",
+        "minecraft",
+        "--set",
+        "hostname=null",
+      ],
+      "hostname",
+    ],
+    [
+      ["--type", "tailscale-ping", "--name", "x", "--hostname", "h", "--set", "hostname=null"],
+      "hostname",
+    ],
+    [
+      ["--type", "steam", "--name", "x", "--hostname", "h", "--port", "1", "--set", "port=null"],
+      "port must",
+    ],
+    [
+      [
+        "--type",
+        "gamedig",
+        "--name",
+        "x",
+        "--hostname",
+        "h",
+        "--port",
+        "1",
+        "--game",
+        "minecraft",
+        "--set",
+        "port=null",
+      ],
+      "port must",
+    ],
+    [
+      ["--type", "dns", "--name", "x", "--hostname", "h", "--set", "dns_resolve_server=null"],
+      "dns_resolve_server",
+    ],
+    [
+      ["--type", "dns", "--name", "x", "--hostname", "h", "--set", 'dns_resolve_server=""'],
+      "dns_resolve_server",
+    ],
+  ])("a hatch-nulled required field exits 2 before sending add: %p", async (extra, field) => {
+    const r = await run(sb, ["monitors", "add", ...extra], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(field);
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test.each([[["--interval", "19"]], [["--interval", "2073601"]], [["--set", "interval=19"]]])(
+    "an interval outside Kuma's 20..2073600 bounds exits 2: %p",
+    async (extra) => {
+      const r = await run(
+        sb,
+        [
+          "monitors",
+          "add",
+          "--type",
+          "http",
+          "--name",
+          "x",
+          "--url",
+          "https://x.example.com",
+          ...extra,
+        ],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("interval must be between 20 and 2073600");
+      expect(addCalls()).toHaveLength(0);
+    },
+  );
+
+  test("--interval 20 is accepted", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        "--interval",
+        "20",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).interval).toBe(20);
+  });
+
+  test('--expected-value "" exits 2 before connecting', async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "json-query",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        "--json-path",
+        "$.a",
+        "--expected-value",
+        "",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("expectedValue must be a non-empty string");
+    expect(kuma.calls).toHaveLength(0);
+  });
 });
 
 describe("monitors edit", () => {
@@ -2545,6 +2756,75 @@ describe("monitors edit", () => {
     expect(r.code).toBe(2);
     expect(r.stderr).toContain("port must be a port number");
     expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit --set type=nonsense exits 2 before connecting", async () => {
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "type=nonsense"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("type must be one of");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("edit --set type=mqtt is accepted: any 1.23.17 picker type may be set", async () => {
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "type=mqtt"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.type).toBe("mqtt");
+  });
+
+  test("edit name-only keeps a stored timeout of 0", async () => {
+    kuma.state.monitors.find((m) => m.id === 7)!.timeout = 0;
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "name=x2"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.timeout).toBe(0);
+  });
+
+  test("edit name-only keeps docker_host null on a docker monitor", async () => {
+    kuma.state.monitors.push({
+      id: 30,
+      name: "dkr",
+      type: "docker",
+      active: true,
+      docker_container: "c",
+      docker_host: null,
+      interval: 60,
+      parent: null,
+      notificationIDList: {},
+    });
+    const r = await run(sb, ["monitors", "edit", "30", "--set", "name=x2"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.docker_host).toBeNull();
+  });
+
+  test("edit name-only keeps stored proxyId 0 and port 0", async () => {
+    const m7 = kuma.state.monitors.find((m) => m.id === 7)!;
+    m7.proxyId = 0;
+    m7.port = 0;
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "name=x2"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.proxyId).toBe(0);
+    expect(sent.port).toBe(0);
+  });
+
+  test("edit --set dns_resolve_server empty exits 2", async () => {
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", 'dns_resolve_server=""'],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("dns_resolve_server must be a non-empty string");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit --set interval=19 exits 2 before connecting", async () => {
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "interval=19"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("interval must be between 20 and 2073600");
+    expect(kuma.calls).toHaveLength(0);
   });
 });
 
