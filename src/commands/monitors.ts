@@ -379,6 +379,20 @@ export function registerMonitors(program: Command): void {
         printJson({ id, active });
       });
   }
+
+  monitors
+    .command("delete <id>")
+    .description("Delete a monitor")
+    .option("--yes", "confirm deletion")
+    .action(async (rawId, opts) => {
+      const id = parseId(rawId, "monitor id");
+      if (!opts.yes) fail(2, `would delete monitor ${id}; pass --yes to delete`);
+      const s = await connect();
+      // Kuma 1.23 answers ok even for an unknown id, so the pushed list is the only check
+      if (!s.monitorById(id)) fail(1, `monitor ${id} not found`);
+      await s.request("deleteMonitor", [id]);
+      printJson({ id, deleted: true });
+    });
 }
 
 function collect(value: string, previous: string[]): string[] {

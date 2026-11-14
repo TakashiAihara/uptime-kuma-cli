@@ -126,4 +126,16 @@ export function registerNotifications(program: Command): void {
       const res = await s.request("testNotification", [storedConfig(row)]);
       printJson({ id, ok: true, msg: res?.msg ?? null });
     });
+
+  notifications
+    .command("delete <id>")
+    .description("Delete a notification")
+    .option("--yes", "confirm deletion")
+    .action(async (rawId, opts) => {
+      const id = parseId(rawId, "notification id");
+      if (!opts.yes) fail(2, `would delete notification ${id}; pass --yes to delete`);
+      const s = await connect();
+      await s.request("deleteNotification", [id]);
+      printJson({ id, deleted: true });
+    });
 }

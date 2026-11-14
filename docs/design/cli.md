@@ -13,6 +13,7 @@
 ## Transport
 
 - Socket.IO v4 client (`socket.io-client`) against the Kuma base URL, `transports: ["websocket"]`
+- Kuma 1.23 has no OpenAPI / REST API for management (only badge, push, status page and metrics are REST), so the CLI talks Socket.IO
 - Log in with `login` `{ username, password, token: "" }`; the callback returns `{ ok, msg }`
 - After login the server pushes `monitorList` (object keyed by id), `notificationList` (array), `proxyList` (array), then one `heartbeatList (monitorID, beats)` and one `importantHeartbeatList (monitorID, beats)` per monitor
 - Request events used, all with a trailing callback returning `{ ok, msg, ... }`:
@@ -24,6 +25,7 @@
     - `addNotification (notification, idOrNull)` → `id`; the server stores the whole object as the `config` JSON string
     - `testNotification (notification)` → `msg`
     - `addProxy (proxy, idOrNull)` → `id`
+    - `deleteMonitor (id)` / `deleteNotification (id)` / `deleteProxy (id)`
 - A request whose callback has `ok: false` exits 1 with `msg` on stderr
 
 ## Configuration
@@ -80,6 +82,7 @@
     - `--set parent=<the same id>` exits 2: Kuma 1.23 rejects only descendants, and a self-parent makes its parent walk loop forever
     - prints the monitor as Kuma saved it (fetched again with `getMonitor`), redacted as in `monitors get`; Kuma ignores some fields here (`active`), and this shows it
 - `monitors pause <id>` / `monitors resume <id>`: prints `{ id, active }`
+- `monitors delete <id> --yes`: sends `deleteMonitor` and prints `{ id, deleted: true }`; without `--yes` exits 2 before connecting. The id is checked against the pushed `monitorList` first because Kuma 1.23 answers ok even for an unknown id
 
 ### beats
 
@@ -104,14 +107,15 @@
     - prints `{ id, name, type }`
 - `notifications edit <id> [--set k=v]... [--config-file <json>]`: merges into the stored config and sends `addNotification (merged, id)` with `applyExisting: false` (a stored `true` would re-attach the notification to every monitor on each edit, so `--set applyExisting=...` exits 2); at least one of `--set` / `--config-file`; prints `{ id, name, type }`
 - `notifications test <id>`: sends the stored config to `testNotification`; prints `{ id, ok: true, msg }`, Kuma's failure exits 1
+- `notifications delete <id> --yes`: sends `deleteNotification` and prints `{ id, deleted: true }`; without `--yes` exits 2 before connecting
 
 ### proxies
 
 - `proxies list`: `[{ id, protocol, host, port, auth, username, active, default }]`
 - `proxies add --protocol <http|https|socks|socks5|socks5h|socks4> --host <h> --port <p> [--username <u> --password-file <f>] [--default] [--apply-existing]`: prints `{ id }`
 - `proxies edit <id> [--set k=v]... [--password-file <f>]`: merges into the listed proxy (password kept as stored unless `--password-file` is given, which also turns `auth` on) and sends `addProxy (merged, id)`; prints `{ id }`
+- `proxies delete <id> --yes`: sends `deleteProxy` and prints `{ id, deleted: true }`; without `--yes` exits 2 before connecting
 
 ## Not in scope
 
-- Deleting monitors, notifications, or proxies (do it in the UI; nobody asked for it)
 - Kuma 2.x event differences (the instance in use is 1.23.17)

@@ -98,4 +98,16 @@ export function registerProxies(program: Command): void {
       const res = await s.request("addProxy", [merged, id]);
       printJson({ id: res?.id ?? id });
     });
+
+  proxies
+    .command("delete <id>")
+    .description("Delete a proxy")
+    .option("--yes", "confirm deletion")
+    .action(async (rawId, opts) => {
+      const id = parseId(rawId, "proxy id");
+      if (!opts.yes) fail(2, `would delete proxy ${id}; pass --yes to delete`);
+      const s = await connect();
+      await s.request("deleteProxy", [id]);
+      printJson({ id, deleted: true });
+    });
 }

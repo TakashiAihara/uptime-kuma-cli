@@ -248,4 +248,42 @@ describe("notifications", () => {
     expect(r.code).toBe(1);
     expect(r.stderr).toContain("401 Unauthorized");
   });
+
+  test("delete removes the row and prints { id, deleted: true }", async () => {
+    const r = await run(sb, ["notifications", "delete", "3", "--yes"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json()).toEqual({ id: 3, deleted: true });
+    expect(kuma.state.notifications.map((n) => n.id)).toEqual([1]);
+    expect(kuma.calls.find((c) => c.event === "deleteNotification")!.args).toEqual([3]);
+  });
+
+  test("delete without --yes exits 2 before connecting", async () => {
+    const r = await run(sb, ["notifications", "delete", "3"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("would delete notification 3");
+    expect(r.stderr).toContain("--yes");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("delete with an invalid id exits 2 before connecting", async () => {
+    const r = await run(sb, ["notifications", "delete", "abc", "--yes"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("positive integer");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("delete of an unknown id exits 1", async () => {
+    const r = await run(sb, ["notifications", "delete", "99", "--yes"], creds(kuma.url));
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("notification not found");
+    expect(kuma.state.notifications.map((n) => n.id).sort((a, b) => a - b)).toEqual([1, 3]);
+  });
+
+  test("delete: Kuma's ok:false exits 1 with its message", async () => {
+    kuma.state.fail.deleteNotification = "cannot delete";
+    const r = await run(sb, ["notifications", "delete", "3", "--yes"], creds(kuma.url));
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("cannot delete");
+    expect(kuma.state.notifications.map((n) => n.id).sort((a, b) => a - b)).toEqual([1, 3]);
+  });
 });

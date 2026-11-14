@@ -260,6 +260,13 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     handle("pauseMonitor", setActive(false));
     handle("resumeMonitor", setActive(true));
 
+    // Kuma 1.23 does not check that the id exists: the DELETE affects 0 rows and still answers ok
+    handle("deleteMonitor", (id: number) => {
+      state.monitors = state.monitors.filter((m) => m.id !== Number(id));
+      socket.emit("monitorList", monitorList());
+      return { ok: true, msg: "Deleted Successfully." };
+    });
+
     handle("getMonitorBeats", (id: number, period: number) => {
       if (period == null) throw new Error("Invalid period.");
       const cutoff = Date.now() - Number(period) * 3600_000;
@@ -292,6 +299,17 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     });
 
     handle("testNotification", () => structuredClone(state.testNotificationResult));
+
+    handle("deleteNotification", (id: number) => {
+      const i = state.notifications.findIndex((x) => x.id === Number(id));
+      if (i < 0) return { ok: false, msg: "notification not found" };
+      state.notifications.splice(i, 1);
+      socket.emit(
+        "notificationList",
+        state.notifications.map((n) => structuredClone(n)),
+      );
+      return { ok: true, msg: "Deleted" };
+    });
 
     handle("getSettings", () => ({ ok: true, data: structuredClone(state.settings) }));
 
@@ -327,6 +345,19 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
         default: Boolean(p.default),
       });
       return { ok: true, msg: "Saved", id: row.id };
+    });
+
+    handle("deleteProxy", (id: number) => {
+      const i = state.proxies.findIndex((x) => x.id === Number(id));
+      if (i < 0) return { ok: false, msg: "proxy not found" };
+      // monitors using the proxy get proxy_id = null
+      for (const m of state.monitors) if (m.proxyId === Number(id)) m.proxyId = null;
+      state.proxies.splice(i, 1);
+      socket.emit(
+        "proxyList",
+        state.proxies.map((p) => structuredClone(p)),
+      );
+      return { ok: true, msg: "Deleted" };
     });
   });
 
