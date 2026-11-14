@@ -48,7 +48,7 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("notifications (real Kuma)", ()
     expect(row).toMatchObject({ name: "it-webhook", type: "webhook" });
   }, 120_000);
 
-  test("edit --set webhookContentType=form-data reaches Kuma", async () => {
+  test("edit sends the config to Kuma and a rename is listed", async () => {
     const r = await cliRun(sb, [
       "notifications",
       "edit",
@@ -59,7 +59,7 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("notifications (real Kuma)", ()
     expect(r.code).toBe(0);
     expect(r.json()).toMatchObject({ id: notifId, name: "it-webhook", type: "webhook" });
 
-    // Config values are never printed by design; the rename proves the edit landed
+    // Config values are never printed, so only the name can be read back
     const renamed = await cliRun(sb, [
       "notifications",
       "edit",
@@ -72,6 +72,7 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("notifications (real Kuma)", ()
     expect(list.code).toBe(0);
     expect(list.json().find((n: any) => n.id === notifId)).toMatchObject({
       name: "it-webhook-2",
+      type: "webhook",
     });
   }, 240_000);
 

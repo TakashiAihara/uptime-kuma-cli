@@ -157,6 +157,16 @@ describe("proxies", () => {
     expect((kuma.calls.find((c) => c.event === "addProxy")!.args[0] as any).auth).toBe(false);
   });
 
+  test("add --default sends default true", async () => {
+    const r = await run(
+      sb,
+      ["proxies", "add", "--protocol", "http", "--host", "h", "--port", "1", "--default"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((kuma.calls.find((c) => c.event === "addProxy")!.args[0] as any).default).toBe(true);
+  });
+
   test("add with an unknown protocol exits 2 before connecting", async () => {
     const r = await run(
       sb,

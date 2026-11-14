@@ -83,10 +83,15 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("proxies (real Kuma)", () => {
 
     const list = await cliRun(sb, ["proxies", "list"]);
     expect(list.code).toBe(0);
-    expect(list.json().find((p: any) => p.id === authedId)).toMatchObject({
+    expect(list.json().find((p: any) => p.id === authedId)).toEqual({
+      id: authedId,
+      protocol: "http",
+      host: "127.0.0.1",
+      port: 3128,
       auth: true,
-      default: true,
       username: "u",
+      active: true,
+      default: true,
     });
 
     const del = await cliRun(sb, ["proxies", "delete", String(authedId), "--yes"]);

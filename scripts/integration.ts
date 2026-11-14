@@ -6,9 +6,10 @@
  * Starts louislam/uptime-kuma:1.23.17 from tests/integration/compose.yaml on
  * 127.0.0.1:${UPTIME_KUMA_IT_PORT:-3901}, creates the first-run admin over
  * Socket.IO, then runs `bun test tests/integration` with UPTIME_KUMA_IT_*
- * pointing at it. The compose project is torn down before `up` and after the
- * run (`down -v`, which also removes the anonymous data volume, so the next
- * run starts empty) unless UPTIME_KUMA_IT_KEEP=1.
+ * pointing at it. `down -v` (which also removes the anonymous data volume)
+ * always runs before `up`, clearing a project left by UPTIME_KUMA_IT_KEEP=1
+ * or a killed run when the port matches — the project name includes the
+ * port. UPTIME_KUMA_IT_KEEP=1 skips only the teardown after the run.
  */
 import { join } from "node:path";
 import { io, type Socket } from "socket.io-client";
