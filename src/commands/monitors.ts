@@ -78,8 +78,22 @@ const SECRET_KEYS = new Set([
 // only the fields that name the method and the identity stay readable.
 const SASL_VISIBLE_KEYS = new Set(["mechanism", "username", "awsRegion", "accessKeyId"]);
 
+// A monitor URL may carry credentials as user:pass@; keep the URL readable and hide the password
+function redactUrl(value: unknown): unknown {
+  if (typeof value !== "string" || value === "") return value;
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return value;
+  }
+  if (parsed.password === "") return value;
+  parsed.password = "***";
+  return parsed.toString();
+}
+
 function redactSecrets(monitor: Record<string, unknown>): Record<string, unknown> {
-  const out = { ...monitor };
+  const out: Record<string, unknown> = { ...monitor, url: redactUrl(monitor.url) };
   for (const key of SECRET_KEYS) {
     const value = out[key];
     if (typeof value === "string" && value !== "") out[key] = "***";
@@ -122,7 +136,7 @@ const summarize = (m: Monitor) => ({
   name: m.name,
   type: m.type ?? null,
   active: m.active ?? null,
-  url: m.url ?? null,
+  url: redactUrl(m.url ?? null),
   hostname: m.hostname ?? null,
   port: m.port ?? null,
   interval: m.interval ?? null,
@@ -305,7 +319,7 @@ export function registerMonitors(program: Command): void {
       };
       if (pushToken !== undefined) {
         out.pushToken = pushToken;
-        out.pushUrl = `${pushBase}/api/push/${pushToken}?status=up&msg=OK&ping=`;
+        out.pushUrl = `${pushBase}/api/push/${encodeURIComponent(pushToken)}?status=up&msg=OK&ping=`;
       }
       printJson(out);
     });
@@ -319,6 +333,11 @@ export function registerMonitors(program: Command): void {
       const sets = parseSets(opts.set as string[] | undefined);
       if (!opts.set || (opts.set as string[]).length === 0) {
         fail(2, "monitors edit requires at least one --set key=value");
+      }
+      // Kuma 1.23 only rejects descendants as parent, not the monitor itself, and a self-parent
+      // makes its parent walk loop forever
+      if (sets.parent !== undefined && Number(sets.parent) === id) {
+        fail(2, "--set parent cannot be the monitor itself");
       }
       if ("id" in sets) {
         fail(2, "--set id=... would retarget the edit to another monitor");

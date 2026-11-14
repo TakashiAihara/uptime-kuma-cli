@@ -73,6 +73,17 @@ describe("monitors list", () => {
     expect(out[1].notificationIDList).toEqual([3, 5]);
   });
 
+  test("hides the password in a URL with credentials and keeps plain URLs as they are", async () => {
+    kuma.state.monitors.find((m) => m.id === 7)!.url =
+      "https://u1:fixture-hidden-u1@x.example.com/p";
+    const r = await run(sb, ["monitors", "list"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.stdout).not.toContain("fixture-hidden-u1");
+    const out = r.json();
+    expect(out.find((m: any) => m.id === 7).url).toBe("https://u1:***@x.example.com/p");
+    expect(out.find((m: any) => m.id === 2).url).toBe("https://dav.example.com");
+  });
+
   test("--name filters case-insensitively by substring", async () => {
     const r = await run(sb, ["monitors", "list", "--name", "TAB"], creds(kuma.url));
     expect(r.code).toBe(0);
@@ -149,6 +160,15 @@ describe("monitors get", () => {
       secretAccessKey: "***",
       sessionToken: "***",
     });
+  });
+
+  test("get hides the password in the URL too", async () => {
+    kuma.state.monitors.find((m) => m.id === 7)!.url =
+      "https://u1:fixture-hidden-u2@x.example.com/";
+    const r = await run(sb, ["monitors", "get", "7"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.stdout).not.toContain("fixture-hidden-u2");
+    expect(r.json().url).toBe("https://u1:***@x.example.com/");
   });
 
   test("an empty secret field stays empty so the reader can tell it is unset", async () => {
@@ -561,6 +581,17 @@ describe("monitors add", () => {
     expect(r.json().pushUrl.startsWith(`${kuma.url}/api/push/`)).toBe(true);
   });
 
+  test("pushUrl encodes the token as a path segment and add sends it unchanged", async () => {
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "push", "--name", "enc", "--push-token", "a#b/c"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect(r.json().pushUrl).toBe(`${kuma.url}/api/push/a%23b%2Fc?status=up&msg=OK&ping=`);
+    expect((addCalls()[0]!.args[0] as any).pushToken).toBe("a#b/c");
+  });
+
   test("pushUrl uses the Primary Base URL setting when it is set", async () => {
     kuma.state.settings = { primaryBaseURL: "https://status.example.org/" };
     const r = await run(sb, ["monitors", "add", "--type", "push", "--name", "pb"], creds(kuma.url));
@@ -670,6 +701,22 @@ describe("monitors edit", () => {
     const r = await run(sb, ["monitors", "edit", "7", "--set", "active=false"], creds(kuma.url));
     expect(r.code).toBe(0);
     expect(r.json().active).toBe(true);
+  });
+
+  test.each([["parent=7"], ['parent="7"']])(
+    "making a monitor its own parent is refused before connecting: %s",
+    async (set) => {
+      const r = await run(sb, ["monitors", "edit", "7", "--set", set], creds(kuma.url));
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("parent");
+      expect(kuma.calls).toHaveLength(0);
+    },
+  );
+
+  test("another parent id is still sent", async () => {
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "parent=2"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect((kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as any).parent).toBe(2);
   });
 
   test("--set id is refused before connecting", async () => {

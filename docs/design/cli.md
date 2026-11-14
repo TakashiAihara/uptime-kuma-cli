@@ -43,6 +43,7 @@
 - `notificationIDList` is always printed as a sorted array of numbers, whether Kuma sent `{ "3": true }` or `[3]`
 - Notification configs and proxy passwords are never printed
 - Monitor fields that hold secrets (`basic_auth_pass`, `oauth_client_secret`, `tlsKey`, `headers`, `body`, `grpcBody`, `grpcMetadata`, `mqttPassword`, `radiusPassword`, `radiusSecret`, `databaseConnectionString`, and every `kafkaProducerSaslOptions` value other than `mechanism` / `username` / `awsRegion` / `accessKeyId`) print as `"***"` when non-empty; `pushToken` stays visible because pushers need it
+- A password inside a monitor `url` (`https://user:pass@host/`) prints as `***` in `monitors list` / `get` / `edit`
 
 ## Exit codes
 
@@ -76,6 +77,7 @@
     - fetches the monitor with `getMonitor`, applies each set (value parsed as JSON when it parses, else kept as a string), and sends `editMonitor`
     - `notificationIDList` accepts an array or an object of positive integer ids and is sent as an object (Kuma 1.23 iterates it with `for...in`, so an array would be stored as its indexes)
     - `--set id=...` exits 2: it would make Kuma save into another monitor
+    - `--set parent=<the same id>` exits 2: Kuma 1.23 rejects only descendants, and a self-parent makes its parent walk loop forever
     - prints the monitor as Kuma saved it (fetched again with `getMonitor`), redacted as in `monitors get`; Kuma ignores some fields here (`active`), and this shows it
 - `monitors pause <id>` / `monitors resume <id>`: prints `{ id, active }`
 
