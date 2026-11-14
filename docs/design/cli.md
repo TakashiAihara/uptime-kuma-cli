@@ -65,21 +65,26 @@
     - array sorted by id of `{ id, name, type, active, url, hostname, port, interval, parent, notificationIDList }`
     - `--name` filters case-insensitively
 - `monitors get <id>`: the monitor object from `monitorList`; unknown id exits 1
-- `monitors add --type <http|keyword|json-query|port|push> --name <name> [options]`
-    - options: `--url`, `--hostname`, `--port`, `--keyword`, `--json-path`, `--expected-value`, `--interval <s>` (60), `--retry-interval <s>` (the interval), `--max-retries <n>` (0), `--resend-interval <n>` (0), `--timeout <s>` (48, capped at 80% of the interval like the UI), `--proxy-id <id>`, `--notification-id <id>` (repeatable), `--notifications-from <monitorId>`, `--paused`, `--push-token <token>`
-    - like the UI, notifications marked default are always attached, and http / keyword / json-query monitors get the default proxy unless `--proxy-id` is given
-    - required per type: http / keyword / json-query need `--url`; keyword needs `--keyword`; json-query needs `--json-path` and `--expected-value`; port needs `--hostname` and `--port`. Missing ones exit 2 before connecting
+- `monitors add --type <http|keyword|json-query|port|push|ping|dns|docker|group|steam|gamedig|tailscale-ping> --name <name> [options]`
+    - options: `--url`, `--hostname`, `--port`, `--keyword`, `--json-path`, `--expected-value`, `--packet-size`, `--dns-resolve-server`, `--dns-resolve-type`, `--docker-container`, `--docker-host`, `--game`, `--interval <s>` (60), `--retry-interval <s>` (the interval), `--max-retries <n>` (0), `--resend-interval <n>` (0), `--timeout <s>` (48, capped at 80% of the interval like the UI), `--proxy-id <id>`, `--notification-id <id>` (repeatable), `--notifications-from <monitorId>`, `--parent <groupId>`, `--paused`, `--push-token <token>`, `--set <key>=<value>` (repeatable), `--config-file <json>`
+    - required per type: http / keyword / json-query need `--url`; keyword needs `--keyword`; json-query needs `--json-path` and `--expected-value`; port / steam / gamedig need `--hostname` and `--port`; ping / dns / tailscale-ping need `--hostname`; docker needs `--docker-container` and `--docker-host <docker host id>`; gamedig also needs `--game`. Missing ones exit 2 before connecting
+    - type-specific defaults: ping `--packet-size` (56); dns `--dns-resolve-server` ("1.1.1.1"), `--dns-resolve-type` (A; one of the UI's record types), `--port` (53); gamedig sends `gamedigGivenPortOnly: true`
+    - `--set` / `--config-file` are the escape hatch for fields without a dedicated flag: the value parses as JSON when it parses, else stays a string. Every key must be a monitor field the `add` event accepts (the `MONITOR_ADD_FIELDS` set in `src/kuma.ts`, shared with the test fake); `id`, `type` and `name` are refused (use `--type` / `--name`), and an unknown key exits 2 naming it before connecting. Precedence: UI defaults < typed flags < `--config-file` < `--set`
+    - secret fields (`basic_auth_pass`, `oauth_client_secret`, `tlsKey`, `headers`, `body`, `grpcBody`, `grpcMetadata`, `mqttPassword`, `radiusPassword`, `radiusSecret`, `databaseConnectionString`, `kafkaProducerSaslOptions`) are refused in `--set` — exit 2 pointing at `--config-file` — so they stay out of argv; `--config-file` accepts them
+    - like the UI, notifications marked default are always attached, and every type except port / push gets the default proxy unless `--proxy-id` is given (the UI assigns it on add for all types; only the proxy picker is limited to http / keyword / json-query)
+    - `--parent <groupId>` must be an existing monitor of type `group` in the pushed `monitorList`; an unknown id or a non-group exits 1
     - same name (exact match) already present: print `{ id, name, skipped: true }` and exit 3 without sending `add`
     - the payload starts from the Kuma 1.23 UI defaults (`accepted_statuscodes: ["200-299"]`, `method: "GET"`, `maxredirects: 10`, `kafkaProducerBrokers: []`, `kafkaProducerSaslOptions: { mechanism: "None" }`, ...) and sends `notificationIDList` as `{ "<id>": true }`
     - `--notifications-from` copies that monitor's notifications; `--notification-id` adds to them (both on top of the defaults)
     - push: `pushToken` is `--push-token` or 32 random alphanumerics, sent in `add` itself
     - `--paused` sends `active: false`, so Kuma does not start the monitor
     - prints `{ id, name, type, active }`, plus `pushToken` and `pushUrl` (`<base>/api/push/<token>?status=up&msg=OK&ping=`, where base is the Primary Base URL setting when set, else the CLI url) for push
-- `monitors edit <id> --set <key>=<value>...`
-    - fetches the monitor with `getMonitor`, applies each set (value parsed as JSON when it parses, else kept as a string), and sends `editMonitor`
+- `monitors edit <id> [--set <key>=<value>...] [--config-file <json>] [--parent <groupId|none>]`
+    - fetches the monitor with `getMonitor`, merges `--config-file`, then `--set`, then `--parent` over it (in that order, so `--parent` wins), and sends `editMonitor`; at least one of the three is required
+    - same field validation as add: every key must be a monitor field and `id` exits 2; secret fields are refused in `--set` and accepted in `--config-file`
     - `notificationIDList` accepts an array or an object of positive integer ids and is sent as an object (Kuma 1.23 iterates it with `for...in`, so an array would be stored as its indexes)
-    - `--set id=...` exits 2: it would make Kuma save into another monitor
-    - `--set parent=<the same id>` exits 2: Kuma 1.23 rejects only descendants, and a self-parent makes its parent walk loop forever
+    - `--set parent=<the same id>`, a `--config-file` `parent` or `--parent` naming the monitor itself exits 2: Kuma 1.23 rejects only descendants, and a self-parent makes its parent walk loop forever
+    - `--parent <groupId>` must be an existing monitor of type `group` in the pushed `monitorList` (exit 1 otherwise); `--parent none` sends `parent: null` to clear it. A `--set parent=...` keeps its pass-through and is only checked against the monitor itself
     - prints the monitor as Kuma saved it (fetched again with `getMonitor`), redacted as in `monitors get`; Kuma ignores some fields here (`active`), and this shows it
 - `monitors pause <id>` / `monitors resume <id>`: prints `{ id, active }`
 - `monitors delete <id> --yes`: sends `deleteMonitor` and prints `{ id, deleted: true }`; without `--yes` exits 2 before connecting. The id is checked against the pushed `monitorList` first because Kuma 1.23 answers ok even for an unknown id. Deleting a group monitor does not delete its children: their `parent` becomes null (Kuma 1.23 `ON DELETE SET NULL`), so they become top-level monitors and keep their own active / paused state, and the monitor's heartbeats are deleted with it

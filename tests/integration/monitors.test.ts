@@ -112,4 +112,83 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
     expect(r.code).toBe(0);
     expect(r.json()).toEqual({ id: pushId, deleted: true });
   }, 120_000);
+
+  describe("group / ping / dns", () => {
+    let groupId = 0;
+    let pingId = 0;
+    let dnsId = 0;
+
+    test("add a paused group monitor", async () => {
+      const r = await cliRun(sb, [
+        "monitors",
+        "add",
+        "--type",
+        "group",
+        "--name",
+        "it-group",
+        "--paused",
+      ]);
+      expect(r.code).toBe(0);
+      expect(r.json()).toMatchObject({ name: "it-group", type: "group", active: false });
+      groupId = r.json().id;
+    }, 120_000);
+
+    test("add a paused ping monitor to 127.0.0.1 with --parent", async () => {
+      const r = await cliRun(sb, [
+        "monitors",
+        "add",
+        "--type",
+        "ping",
+        "--name",
+        "it-ping",
+        "--hostname",
+        "127.0.0.1",
+        "--parent",
+        String(groupId),
+        "--paused",
+      ]);
+      expect(r.code).toBe(0);
+      expect(r.json()).toMatchObject({ name: "it-ping", type: "ping", active: false });
+      pingId = r.json().id;
+    }, 120_000);
+
+    test("get shows the parent on the ping monitor", async () => {
+      const r = await cliRun(sb, ["monitors", "get", String(pingId)]);
+      expect(r.code).toBe(0);
+      expect(r.json().parent).toBe(groupId);
+    }, 120_000);
+
+    test("add a paused dns monitor with --set dns_resolve_type", async () => {
+      const r = await cliRun(sb, [
+        "monitors",
+        "add",
+        "--type",
+        "dns",
+        "--name",
+        "it-dns",
+        "--hostname",
+        "localhost",
+        "--set",
+        'dns_resolve_type="AAAA"',
+        "--paused",
+      ]);
+      expect(r.code).toBe(0);
+      expect(r.json()).toMatchObject({ name: "it-dns", type: "dns", active: false });
+      dnsId = r.json().id;
+    }, 120_000);
+
+    test("get shows the dns_resolve_type set through --set", async () => {
+      const r = await cliRun(sb, ["monitors", "get", String(dnsId)]);
+      expect(r.code).toBe(0);
+      expect(r.json().dns_resolve_type).toBe("AAAA");
+    }, 120_000);
+
+    test("delete the group, ping and dns monitors", async () => {
+      for (const id of [groupId, pingId, dnsId]) {
+        const r = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
+        expect(r.code).toBe(0);
+        expect(r.json()).toEqual({ id, deleted: true });
+      }
+    }, 300_000);
+  });
 });
