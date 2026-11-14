@@ -82,7 +82,7 @@
     - `--set parent=<the same id>` exits 2: Kuma 1.23 rejects only descendants, and a self-parent makes its parent walk loop forever
     - prints the monitor as Kuma saved it (fetched again with `getMonitor`), redacted as in `monitors get`; Kuma ignores some fields here (`active`), and this shows it
 - `monitors pause <id>` / `monitors resume <id>`: prints `{ id, active }`
-- `monitors delete <id> --yes`: sends `deleteMonitor` and prints `{ id, deleted: true }`; without `--yes` exits 2 before connecting. The id is checked against the pushed `monitorList` first because Kuma 1.23 answers ok even for an unknown id. Deleting a group monitor does not delete its children: Kuma sets their `parent` to null and they keep running as top-level monitors, and the monitor's heartbeats are deleted with it
+- `monitors delete <id> --yes`: sends `deleteMonitor` and prints `{ id, deleted: true }`; without `--yes` exits 2 before connecting. The id is checked against the pushed `monitorList` first because Kuma 1.23 answers ok even for an unknown id. Deleting a group monitor does not delete its children: their `parent` becomes null (Kuma 1.23 `ON DELETE SET NULL`), so they become top-level monitors and keep their own active / paused state, and the monitor's heartbeats are deleted with it
 
 ### beats
 
@@ -114,7 +114,7 @@
 - `proxies list`: `[{ id, protocol, host, port, auth, username, active, default }]`
 - `proxies add --protocol <http|https|socks|socks5|socks5h|socks4> --host <h> --port <p> [--username <u> --password-file <f>] [--default] [--apply-existing]`: prints `{ id }`
 - `proxies edit <id> [--set k=v]... [--password-file <f>]`: merges into the listed proxy (password kept as stored unless `--password-file` is given, which also turns `auth` on) and sends `addProxy (merged, id)`; prints `{ id }`
-- `proxies delete <id> --yes`: sends `deleteProxy` and prints `{ id, deleted: true }`; without `--yes` exits 2 before connecting
+- `proxies delete <id> --yes`: sends `deleteProxy` and prints `{ id, deleted: true }`; without `--yes` exits 2 before connecting. Kuma sets `proxy_id` to null on the monitors that used the proxy, so they stop using any proxy
 
 ## Not in scope
 
