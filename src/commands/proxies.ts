@@ -93,7 +93,8 @@ export function registerProxies(program: Command): void {
       const row = s.proxyById(id);
       if (!row) fail(1, `proxy ${id} not found`);
       const merged = { ...row, ...sets };
-      if (password !== undefined) merged.password = password;
+      // As in add, a password only takes effect with auth on
+      if (password !== undefined) Object.assign(merged, { password, auth: true });
       const res = await s.request("addProxy", [merged, id]);
       printJson({ id: res?.id ?? id });
     });

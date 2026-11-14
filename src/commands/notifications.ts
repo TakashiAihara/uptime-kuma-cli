@@ -61,14 +61,18 @@ export function registerNotifications(program: Command): void {
       const sets = parseSets(opts.set as string[] | undefined);
       const fileConfig =
         opts.configFile === undefined ? {} : readJsonFile(opts.configFile, "--config-file");
-      const notification = {
+      // Flags win only when given; otherwise the config file and --set may still turn
+      // isDefault / applyExisting on, and both default to false
+      const notification: Record<string, unknown> = {
+        isDefault: false,
+        applyExisting: false,
         ...fileConfig,
         ...sets,
         name: opts.name,
         type: opts.type,
-        isDefault: opts.default === true,
-        applyExisting: opts.applyExisting === true,
       };
+      if (opts.default === true) notification.isDefault = true;
+      if (opts.applyExisting === true) notification.applyExisting = true;
       const s = await connect();
       const res = await s.request("addNotification", [notification, null]);
       printJson({ id: res?.id ?? null, name: notification.name, type: notification.type });
@@ -85,8 +89,14 @@ export function registerNotifications(program: Command): void {
       if (Object.keys(sets).length === 0 && opts.configFile === undefined) {
         fail(2, "notifications edit requires --set key=value or --config-file");
       }
+      if ("applyExisting" in sets) {
+        fail(2, "applyExisting cannot be set on edit; use notifications add --apply-existing");
+      }
       const fileConfig =
         opts.configFile === undefined ? {} : readJsonFile(opts.configFile, "--config-file");
+      if ("applyExisting" in fileConfig) {
+        fail(2, "applyExisting cannot be set on edit; use notifications add --apply-existing");
+      }
       const s = await connect();
       const row = s.notificationById(id);
       if (!row) fail(1, `notification ${id} not found`);

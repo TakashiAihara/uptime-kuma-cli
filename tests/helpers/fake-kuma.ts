@@ -58,6 +58,10 @@ export type FakeState = {
   twoFA: boolean;
   // event name whose request makes the server drop the connection without answering
   disconnectOn: string | null;
+  // after the login answer, drop the connection instead of pushing the lists
+  dropInsteadOfLists: boolean;
+  // drop the connection right after pushing the lists (and the heartbeats not silenced)
+  dropAfterLists: boolean;
 };
 
 export type FakeKuma = { url: string; calls: Call[]; state: FakeState; close: () => Promise<void> };
@@ -124,6 +128,8 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     settings: {},
     twoFA: false,
     disconnectOn: null,
+    dropInsteadOfLists: false,
+    dropAfterLists: false,
     ...init,
   };
   const calls: Call[] = [];
@@ -174,6 +180,10 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
       if (state.twoFA) return { tokenRequired: true };
       loggedIn = true;
       setTimeout(() => {
+        if (state.dropInsteadOfLists) {
+          socket.disconnect(true);
+          return;
+        }
         socket.emit("monitorList", monitorList());
         socket.emit(
           "notificationList",
@@ -191,6 +201,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
           const imp = (state.beats[m.id] ?? []).filter((b) => b.important).reverse();
           socket.emit("importantHeartbeatList", m.id, imp, false);
         }
+        if (state.dropAfterLists) setTimeout(() => socket.disconnect(true), 50);
       }, 20);
       return { ok: true, token: "jwt-token" };
     });

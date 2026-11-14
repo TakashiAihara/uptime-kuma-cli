@@ -66,17 +66,9 @@ export function notificationIdObject(value: unknown): Record<string, true> {
 }
 
 export function parseId(value: string, flag: string): number {
-  if (!/^\d+$/.test(value)) fail(2, `${flag} must be a numeric id, got "${value}"`);
+  // Kuma ids start at 1
+  if (!/^[1-9]\d*$/.test(value)) fail(2, `${flag} must be a positive integer id, got "${value}"`);
   return Number(value);
-}
-
-export function parseNumber(value: string, flag: string): number {
-  const n = Number(value);
-  // Number("") and Number("   ") are 0, so emptiness needs its own check
-  if (value.trim() === "" || !Number.isFinite(n)) {
-    fail(2, `${flag} must be a number, got "${value}"`);
-  }
-  return n;
 }
 
 export function parsePositiveNumber(value: string, flag: string): number {
@@ -91,6 +83,14 @@ export function parsePositiveInteger(value: string, flag: string): number {
   const n = Number(value);
   if (!Number.isInteger(n) || n <= 0) {
     fail(2, `${flag} must be a positive integer, got "${value}"`);
+  }
+  return n;
+}
+
+export function parseNonNegativeInteger(value: string, flag: string): number {
+  const n = Number(value);
+  if (value.trim() === "" || !Number.isInteger(n) || n < 0) {
+    fail(2, `${flag} must be an integer of 0 or more, got "${value}"`);
   }
   return n;
 }

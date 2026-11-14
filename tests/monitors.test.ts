@@ -119,6 +119,38 @@ describe("monitors get", () => {
     expect(m.tlsCert).toBe("");
   });
 
+  test("redacts grpc fields and the secret parts of kafkaProducerSaslOptions", async () => {
+    Object.assign(
+      kuma.state.monitors.find((m) => m.id === 9)!,
+      {
+        grpcBody: '{"k":"fixture-hidden-g1"}',
+        grpcMetadata: '{"m":"fixture-hidden-g2"}',
+        kafkaProducerSaslOptions: {
+          mechanism: "aws",
+          username: "kuser",
+          accessKeyId: "AKIDVISIBLE",
+          awsRegion: "ap-northeast-1",
+          secretAccessKey: "fixture-hidden-g3",
+          sessionToken: "fixture-hidden-g4",
+        },
+      },
+    );
+    const r = await run(sb, ["monitors", "get", "9"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    for (let i = 1; i <= 4; i++) expect(r.stdout).not.toContain(`fixture-hidden-g${i}`);
+    const m = r.json();
+    expect(m.grpcBody).toBe("***");
+    expect(m.grpcMetadata).toBe("***");
+    expect(m.kafkaProducerSaslOptions).toEqual({
+      mechanism: "aws",
+      username: "kuser",
+      accessKeyId: "AKIDVISIBLE",
+      awsRegion: "ap-northeast-1",
+      secretAccessKey: "***",
+      sessionToken: "***",
+    });
+  });
+
   test("an empty secret field stays empty so the reader can tell it is unset", async () => {
     Object.assign(
       kuma.state.monitors.find((m) => m.id === 9)!,
@@ -456,6 +488,79 @@ describe("monitors add", () => {
     expect(sent.timeout).toBe(48);
   });
 
+  test("an explicit --timeout is capped at 80% of the interval too", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "cap",
+        "--url",
+        "https://c.example.com",
+        "--interval",
+        "20",
+        "--timeout",
+        "30",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).timeout).toBe(16);
+  });
+
+  test.each([
+    ["keyword", ["--url", "https://k.example.com", "--keyword", "ok"]],
+    [
+      "json-query",
+      ["--url", "https://j.example.com", "--json-path", "$.a", "--expected-value", "1"],
+    ],
+  ])("%s monitors get the default proxy too", async (type, extra) => {
+    kuma.state.proxies = [defaultProxy()];
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", type, "--name", `p-${type}`, ...extra],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).proxyId).toBe(3);
+  });
+
+  test("--proxy-id wins over the default proxy", async () => {
+    kuma.state.proxies = [defaultProxy(), { ...defaultProxy(), id: 5, default: false }];
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "px5",
+        "--url",
+        "https://x.example.com",
+        "--proxy-id",
+        "5",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).proxyId).toBe(5);
+  });
+
+  test("an empty Primary Base URL falls back to the CLI url", async () => {
+    kuma.state.settings = { primaryBaseURL: "" };
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "push", "--name", "pb0"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect(r.json().pushUrl.startsWith(`${kuma.url}/api/push/`)).toBe(true);
+  });
+
   test("pushUrl uses the Primary Base URL setting when it is set", async () => {
     kuma.state.settings = { primaryBaseURL: "https://status.example.org/" };
     const r = await run(sb, ["monitors", "add", "--type", "push", "--name", "pb"], creds(kuma.url));
@@ -470,7 +575,13 @@ describe("monitors add", () => {
     [["--type", "push", "--name", "x", "--push-token", ""], "--push-token"],
     [["--type", "push", "--name", "x", "--interval", ""], "--interval"],
     [["--type", "push", "--name", "x", "--max-retries", " "], "--max-retries"],
-  ])("empty values exit 2 before connecting: %p", async (args, word) => {
+    [["--type", "push", "--name", "x", "--interval", "0"], "--interval"],
+    [["--type", "push", "--name", "x", "--retry-interval", "-5"], "--retry-interval"],
+    [["--type", "push", "--name", "x", "--max-retries", "1.5"], "--max-retries"],
+    [["--type", "push", "--name", "x", "--resend-interval", "-1"], "--resend-interval"],
+    [["--type", "push", "--name", "x", "--timeout", "0"], "--timeout"],
+    [["--type", "push", "--name", "x", "--notification-id", "0"], "--notification-id"],
+  ])("empty or out-of-range values exit 2 before connecting: %p", async (args, word) => {
     const r = await run(sb, ["monitors", "add", ...args], creds(kuma.url));
     expect(r.code).toBe(2);
     expect(r.stderr).toContain(word);
@@ -536,6 +647,7 @@ describe("monitors edit", () => {
     ["notificationIDList=[-1]"],
     ["notificationIDList=[1.5]"],
     ['notificationIDList={"a":true}'],
+    ['notificationIDList={"0":true}'],
   ])("a notificationIDList with a non-id entry exits 2 before connecting: %s", async (set) => {
     const r = await run(sb, ["monitors", "edit", "7", "--set", set], creds(kuma.url));
     expect(r.code).toBe(2);

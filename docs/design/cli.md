@@ -42,7 +42,7 @@
 - stdout is JSON (pretty, 2-space indent), stderr is for messages
 - `notificationIDList` is always printed as a sorted array of numbers, whether Kuma sent `{ "3": true }` or `[3]`
 - Notification configs and proxy passwords are never printed
-- Monitor fields that hold secrets (`basic_auth_pass`, `oauth_client_secret`, `tlsKey`, `headers`, `body`, `mqttPassword`, `radiusPassword`, `radiusSecret`, `databaseConnectionString`) print as `"***"` when non-empty; `pushToken` stays visible because pushers need it
+- Monitor fields that hold secrets (`basic_auth_pass`, `oauth_client_secret`, `tlsKey`, `headers`, `body`, `grpcBody`, `grpcMetadata`, `mqttPassword`, `radiusPassword`, `radiusSecret`, `databaseConnectionString`, and every `kafkaProducerSaslOptions` value other than `mechanism` / `username` / `awsRegion` / `accessKeyId`) print as `"***"` when non-empty; `pushToken` stays visible because pushers need it
 
 ## Exit codes
 
@@ -98,17 +98,16 @@
 
 - `notifications list`: `[{ id, name, type, active, isDefault }]`, `type` read from the `config` JSON
 - `notifications add --name <name> --type <type> [--set k=v]... [--config-file <json>] [--default] [--apply-existing]`
-    - the notification object is `{ name, type, isDefault, applyExisting, ...config-file, ...sets }`; secrets go through `--config-file` so they stay out of argv
+    - the notification object is `{ isDefault: false, applyExisting: false, ...config-file, ...sets, name, type }`, then `--default` / `--apply-existing` set their field to true when given; secrets go through `--config-file` so they stay out of argv
     - prints `{ id, name, type }`
-- `notifications edit <id> [--set k=v]... [--config-file <json>]`: merges into the stored config and sends `addNotification (merged, id)` with `applyExisting: false` (a stored `true` would re-attach the notification to every monitor on each edit); at least one of `--set` / `--config-file`; prints `{ id, name, type }`
-- In `notifications add`, explicit `--name`, `--type`, `--default`, `--apply-existing` win over `--config-file` and `--set`
+- `notifications edit <id> [--set k=v]... [--config-file <json>]`: merges into the stored config and sends `addNotification (merged, id)` with `applyExisting: false` (a stored `true` would re-attach the notification to every monitor on each edit, so `--set applyExisting=...` exits 2); at least one of `--set` / `--config-file`; prints `{ id, name, type }`
 - `notifications test <id>`: sends the stored config to `testNotification`; prints `{ id, ok: true, msg }`, Kuma's failure exits 1
 
 ### proxies
 
 - `proxies list`: `[{ id, protocol, host, port, auth, username, active, default }]`
 - `proxies add --protocol <http|https|socks|socks5|socks5h|socks4> --host <h> --port <p> [--username <u> --password-file <f>] [--default] [--apply-existing]`: prints `{ id }`
-- `proxies edit <id> [--set k=v]... [--password-file <f>]`: merges into the listed proxy (password kept as stored unless `--password-file` is given) and sends `addProxy (merged, id)`; prints `{ id }`
+- `proxies edit <id> [--set k=v]... [--password-file <f>]`: merges into the listed proxy (password kept as stored unless `--password-file` is given, which also turns `auth` on) and sends `addProxy (merged, id)`; prints `{ id }`
 
 ## Not in scope
 

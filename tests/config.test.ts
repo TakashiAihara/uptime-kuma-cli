@@ -138,6 +138,25 @@ describe("credentials and url", () => {
     expect(Date.now() - t).toBeLessThan(10_000);
   });
 
+  test("a drop while waiting for the pushed lists exits 2 without waiting for the timeout", async () => {
+    kuma.state.dropInsteadOfLists = true;
+    const t = Date.now();
+    const r = await run(sb, list, { ...creds(kuma.url), UPTIME_KUMA_TIMEOUT: "20" });
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("disconnect");
+    expect(Date.now() - t).toBeLessThan(10_000);
+  });
+
+  test("a drop while waiting for heartbeat lists exits 2 without waiting for the timeout", async () => {
+    kuma.state.silentHeartbeat = [1];
+    kuma.state.dropAfterLists = true;
+    const t = Date.now();
+    const r = await run(sb, ["beats", "latest"], { ...creds(kuma.url), UPTIME_KUMA_TIMEOUT: "20" });
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("disconnect");
+    expect(Date.now() - t).toBeLessThan(10_000);
+  });
+
   test("a password_command line keeps surrounding spaces and drops only the line ending", async () => {
     kuma.state.password = " spaced pw ";
     writeConfig(sb, `password_command = "printf ' spaced pw \\\\r\\\\n'"`);

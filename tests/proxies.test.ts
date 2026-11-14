@@ -138,10 +138,12 @@ describe("proxies", () => {
   test("edit --password-file replaces the password without putting it in argv", async () => {
     const f = join(sb.dir, "newpw");
     writeFileSync(f, "replaced-pw\n");
+    kuma.state.proxies[0]!.auth = false;
     const r = await run(sb, ["proxies", "edit", "2", "--password-file", f], creds(kuma.url));
     expect(r.code).toBe(0);
     const call = kuma.calls.find((c) => c.event === "addProxy")!;
     expect((call.args[0] as any).password).toBe("replaced-pw");
+    expect((call.args[0] as any).auth).toBe(true);
     expect(r.stdout).not.toContain("replaced-pw");
   });
 

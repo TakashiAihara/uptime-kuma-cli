@@ -168,10 +168,6 @@ export async function connect(): Promise<KumaSession> {
       clearTimeout(timer);
       reject(new CliError(2, `failed to connect to ${url}: ${err.message}`));
     });
-    socket.once("disconnect", () => {
-      clearTimeout(timer);
-      reject(new CliError(2, `socket disconnected from ${url}`));
-    });
   });
 
   const login = await emitAck(

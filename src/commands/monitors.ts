@@ -4,8 +4,9 @@ import {
   notificationIdArray,
   notificationIdObject,
   parseId,
-  parseNumber,
+  parseNonNegativeInteger,
   parsePort,
+  parsePositiveNumber,
   parseSets,
   printJson,
 } from "../lib.ts";
@@ -69,13 +70,27 @@ const SECRET_KEYS = new Set([
   "radiusPassword",
   "radiusSecret",
   "databaseConnectionString",
+  "grpcBody",
+  "grpcMetadata",
 ]);
+
+// kafkaProducerSaslOptions is an object holding the SASL password or AWS secret keys;
+// only the fields that name the method and the identity stay readable.
+const SASL_VISIBLE_KEYS = new Set(["mechanism", "username", "awsRegion", "accessKeyId"]);
 
 function redactSecrets(monitor: Record<string, unknown>): Record<string, unknown> {
   const out = { ...monitor };
   for (const key of SECRET_KEYS) {
     const value = out[key];
     if (typeof value === "string" && value !== "") out[key] = "***";
+  }
+  const sasl = out.kafkaProducerSaslOptions;
+  if (sasl !== null && typeof sasl === "object" && !Array.isArray(sasl)) {
+    const copy: Record<string, unknown> = { ...(sasl as Record<string, unknown>) };
+    for (const [k, v] of Object.entries(copy)) {
+      if (!SASL_VISIBLE_KEYS.has(k) && typeof v === "string" && v !== "") copy[k] = "***";
+    }
+    out.kafkaProducerSaslOptions = copy;
   }
   return out;
 }
@@ -183,17 +198,22 @@ export function registerMonitors(program: Command): void {
         if (opts.port === undefined) fail(2, "--type port requires --port");
       }
       if (opts.pushToken === "") fail(2, "--push-token must not be empty");
-      const interval = parseNumber(opts.interval ?? "60", "--interval");
+      const interval = parsePositiveNumber(opts.interval ?? "60", "--interval");
       const retryInterval =
         opts.retryInterval === undefined
           ? interval
-          : parseNumber(opts.retryInterval, "--retry-interval");
-      const maxRetries = parseNumber(opts.maxRetries ?? "0", "--max-retries");
-      const resendInterval = parseNumber(opts.resendInterval ?? "0", "--resend-interval");
-      const timeout =
-        opts.timeout === undefined
-          ? Math.min(48, Math.trunc(interval * 8) / 10)
-          : parseNumber(opts.timeout, "--timeout");
+          : parsePositiveNumber(opts.retryInterval, "--retry-interval");
+      const maxRetries = parseNonNegativeInteger(opts.maxRetries ?? "0", "--max-retries");
+      const resendInterval = parseNonNegativeInteger(
+        opts.resendInterval ?? "0",
+        "--resend-interval",
+      );
+      // The UI's clampTimeout keeps every timeout within 80% of the interval
+      const maxTimeout = Math.trunc(interval * 8) / 10;
+      const timeout = Math.min(
+        opts.timeout === undefined ? 48 : parsePositiveNumber(opts.timeout, "--timeout"),
+        maxTimeout,
+      );
       const proxyIdOption =
         opts.proxyId === undefined ? undefined : parseId(opts.proxyId, "--proxy-id");
       const port = type === "port" ? parsePort(opts.port, "--port") : undefined;

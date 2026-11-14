@@ -147,6 +147,52 @@ describe("notifications", () => {
     expect(sent.isDefault).toBe(true);
   });
 
+  test("add: without the flags, isDefault and applyExisting from --config-file are kept", async () => {
+    const f = join(sb.dir, "cfg3.json");
+    writeFileSync(f, JSON.stringify({ isDefault: true, applyExisting: true }));
+    const r = await run(
+      sb,
+      ["notifications", "add", "--name", "n", "--type", "ntfy", "--config-file", f],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "addNotification")!.args[0] as any;
+    expect(sent.isDefault).toBe(true);
+    expect(sent.applyExisting).toBe(true);
+  });
+
+  test("add: without flags or config, isDefault and applyExisting are false", async () => {
+    const r = await run(
+      sb,
+      ["notifications", "add", "--name", "n0", "--type", "ntfy"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "addNotification")!.args[0] as any;
+    expect(sent.isDefault).toBe(false);
+    expect(sent.applyExisting).toBe(false);
+  });
+
+  test("edit refuses applyExisting in --config-file before connecting", async () => {
+    const f = join(sb.dir, "cfg-apply.json");
+    writeFileSync(f, JSON.stringify({ applyExisting: true }));
+    const r = await run(sb, ["notifications", "edit", "3", "--config-file", f], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("applyExisting");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("edit refuses --set applyExisting before connecting", async () => {
+    const r = await run(
+      sb,
+      ["notifications", "edit", "3", "--set", "applyExisting=true"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("applyExisting");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
   test("edit does not re-send a stored applyExisting", async () => {
     const row = kuma.state.notifications.find((n) => n.id === 1)!;
     row.config = JSON.stringify({ ...JSON.parse(row.config), applyExisting: true });
