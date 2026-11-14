@@ -94,3 +94,9 @@ uptime-kuma-cli proxies delete 2 --yes
 | 2 | Configuration, usage, connection, login or timeout failure |
 | 3 | `monitors add` skipped: same name exists |
 | 70 | Unexpected error |
+
+## Integration tests
+
+- `bun run test:integration` runs `tests/integration` — the same CLI — against a real `louislam/uptime-kuma:1.23.17` container started with Docker Compose; it needs Docker
+- Kuma is published on `127.0.0.1:3901` only; set `UPTIME_KUMA_IT_PORT` to use another port
+- `UPTIME_KUMA_IT_KEEP=1` leaves the container up afterwards for debugging; a later run on the same `UPTIME_KUMA_IT_PORT` removes it before starting

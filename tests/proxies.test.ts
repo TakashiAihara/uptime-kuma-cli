@@ -44,11 +44,11 @@ beforeEach(async () => {
         protocol: "socks5",
         host: "10.0.0.9",
         port: 1080,
-        auth: true,
+        auth: 1,
         username: "u1",
         password: SECRET,
-        active: true,
-        default: false,
+        active: 1,
+        default: 0,
         created_date: "2026-10-29 00:00:00",
       },
     ],
@@ -76,6 +76,38 @@ describe("proxies", () => {
       },
     ]);
     expect(r.stdout).not.toContain(SECRET);
+  });
+
+  test("list prints Kuma's 0/1 flag columns as booleans", async () => {
+    kuma.state.proxies = [
+      {
+        id: 7,
+        user_id: 1,
+        protocol: "http",
+        host: "10.0.0.7",
+        port: 8080,
+        auth: 1,
+        username: null,
+        password: null,
+        active: 0,
+        default: 1,
+        created_date: "2026-10-29 00:00:00",
+      },
+    ];
+    const r = await run(sb, ["proxies", "list"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json()).toEqual([
+      {
+        id: 7,
+        protocol: "http",
+        host: "10.0.0.7",
+        port: 8080,
+        auth: true,
+        username: null,
+        active: false,
+        default: true,
+      },
+    ]);
   });
 
   test("add reads the password from a file", async () => {
@@ -125,6 +157,16 @@ describe("proxies", () => {
     expect((kuma.calls.find((c) => c.event === "addProxy")!.args[0] as any).auth).toBe(false);
   });
 
+  test("add --default sends default true", async () => {
+    const r = await run(
+      sb,
+      ["proxies", "add", "--protocol", "http", "--host", "h", "--port", "1", "--default"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((kuma.calls.find((c) => c.event === "addProxy")!.args[0] as any).default).toBe(true);
+  });
+
   test("add with an unknown protocol exits 2 before connecting", async () => {
     const r = await run(
       sb,
@@ -138,7 +180,7 @@ describe("proxies", () => {
   test("edit --password-file replaces the password without putting it in argv", async () => {
     const f = join(sb.dir, "newpw");
     writeFileSync(f, "replaced-pw\n");
-    kuma.state.proxies[0]!.auth = false;
+    kuma.state.proxies[0]!.auth = 0;
     const r = await run(sb, ["proxies", "edit", "2", "--password-file", f], creds(kuma.url));
     expect(r.code).toBe(0);
     const call = kuma.calls.find((c) => c.event === "addProxy")!;

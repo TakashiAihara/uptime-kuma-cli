@@ -14,7 +14,8 @@
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
     "build": "bun scripts/build.ts",
-    "check": "bun run typecheck && bun run lint && bun run format:check && bun test"
+    "check": "bun run typecheck && bun run lint && bun run format:check && bun test",
+    "test:integration": "bun scripts/integration.ts"
   },
   "dependencies": {
     "commander": "^12.1.0",

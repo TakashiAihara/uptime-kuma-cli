@@ -44,11 +44,11 @@ const defaultProxy = () => ({
   protocol: "http",
   host: "p",
   port: 1,
-  auth: false,
+  auth: 0,
   username: null,
   password: null,
-  active: true,
-  default: true,
+  active: 1,
+  default: 1,
   created_date: "",
 });
 
@@ -549,7 +549,7 @@ describe("monitors add", () => {
   });
 
   test("--proxy-id wins over the default proxy", async () => {
-    kuma.state.proxies = [defaultProxy(), { ...defaultProxy(), id: 5, default: false }];
+    kuma.state.proxies = [defaultProxy(), { ...defaultProxy(), id: 5, default: 0 }];
     const r = await run(
       sb,
       [
