@@ -21,6 +21,9 @@ function readPasswordFile(path: string | undefined): string | undefined {
   return password;
 }
 
+// Kuma 1.23's sendProxyList emits raw bean rows, so the flag columns arrive as 0/1
+const toBool = (v: unknown): boolean | null => (v === null || v === undefined ? null : Boolean(v));
+
 export function registerProxies(program: Command): void {
   const proxies = program.command("proxies").description("Manage proxies");
 
@@ -35,10 +38,10 @@ export function registerProxies(program: Command): void {
           protocol: p.protocol ?? null,
           host: p.host ?? null,
           port: p.port ?? null,
-          auth: p.auth ?? null,
+          auth: toBool(p.auth),
           username: p.username ?? null,
-          active: p.active ?? null,
-          default: p.default ?? null,
+          active: toBool(p.active),
+          default: toBool(p.default),
         })),
       );
     });

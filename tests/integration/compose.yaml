@@ -1,0 +1,8 @@
+# Throwaway instance for tests/integration. The image declares /app/data as a
+# VOLUME, so Docker gives it an anonymous volume that `down -v` removes: every
+# run starts from an empty database. The port is bound to loopback only.
+services:
+  kuma:
+    image: louislam/uptime-kuma:1.23.17
+    ports:
+      - "127.0.0.1:${UPTIME_KUMA_IT_PORT:-3901}:3001"

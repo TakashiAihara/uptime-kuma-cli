@@ -25,17 +25,18 @@ export type NotificationRow = {
   userId: number;
   config: string;
 };
+// Kuma 1.23's sendProxyList emits the raw bean, so auth/active/default are 0/1
 export type ProxyRow = {
   id: number;
   user_id: number;
   protocol: string;
   host: string;
   port: number;
-  auth: boolean;
+  auth: number;
   username: string | null;
   password: string | null;
-  active: boolean;
-  default: boolean;
+  active: number;
+  default: number;
   created_date: string;
 };
 export type Call = { event: string; args: unknown[] };
@@ -325,11 +326,11 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
           protocol: "",
           host: "",
           port: 0,
-          auth: false,
+          auth: 0,
           username: null,
           password: null,
-          active: true,
-          default: false,
+          active: 1,
+          default: 0,
           created_date: now(),
         };
         state.proxies.push(row);
@@ -338,11 +339,11 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
         protocol: p.protocol,
         host: p.host,
         port: p.port,
-        auth: Boolean(p.auth),
+        auth: p.auth ? 1 : 0,
         username: (p.username as string) ?? null,
         password: (p.password as string) ?? null,
-        active: p.active !== false,
-        default: Boolean(p.default),
+        active: p.active === false || p.active === 0 ? 0 : 1,
+        default: p.default ? 1 : 0,
       });
       return { ok: true, msg: "Saved", id: row.id };
     });

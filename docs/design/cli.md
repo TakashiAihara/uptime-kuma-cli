@@ -111,10 +111,15 @@
 
 ### proxies
 
-- `proxies list`: `[{ id, protocol, host, port, auth, username, active, default }]`
+- `proxies list`: `[{ id, protocol, host, port, auth, username, active, default }]`; `auth` / `active` / `default` print as booleans although Kuma 1.23 sends them as 0/1
 - `proxies add --protocol <http|https|socks|socks5|socks5h|socks4> --host <h> --port <p> [--username <u> --password-file <f>] [--default] [--apply-existing]`: prints `{ id }`
 - `proxies edit <id> [--set k=v]... [--password-file <f>]`: merges into the listed proxy (password kept as stored unless `--password-file` is given, which also turns `auth` on) and sends `addProxy (merged, id)`; prints `{ id }`
 - `proxies delete <id> --yes`: sends `deleteProxy` and prints `{ id, deleted: true }`; without `--yes` exits 2 before connecting. Kuma sets `proxy_id` to null on the monitors that used the proxy, so they stop using any proxy
+
+## Tests
+
+- `bun test` runs the unit tests in `tests/` against `tests/helpers/fake-kuma.ts`, an in-process Socket.IO server that mimics Kuma 1.23.17
+- `bun run test:integration` (`scripts/integration.ts`) runs `tests/integration/` — the same CLI — against a real `louislam/uptime-kuma:1.23.17` container from `tests/integration/compose.yaml`; it needs Docker
 
 ## Not in scope
 
