@@ -320,8 +320,8 @@ function validateHatchValues(fields: Record<string, unknown>): void {
 // retryInterval follows the interval and the timeout stays within 80% of
 // it; both derive from the final interval after the hatch had its say.
 // Explicit values from any source are kept; the cap applies to them exactly
-// like it did to the typed flags. A timeout of 0 is kept: Kuma reads it as
-// "80% of the interval" itself.
+// like it did to the typed flags. validateFinalMonitor refuses the inputs
+// that could derive a timeout of 0.
 function deriveMonitorTiming(monitor: Record<string, unknown>): void {
   if (typeof monitor.interval !== "number") return;
   monitor.retryInterval = monitor.retryInterval ?? monitor.interval;
@@ -329,6 +329,81 @@ function deriveMonitorTiming(monitor: Record<string, unknown>): void {
     typeof monitor.timeout === "number" ? monitor.timeout : 48,
     Math.trunc(monitor.interval * 8) / 10,
   );
+}
+
+// The merged monitor is validated once on its final values, right before it is
+// sent: per-type required fields, parent / docker_host / proxyId against the
+// pushed lists, and the timing fields. Typed flags, --config-file and --set
+// all feed the same monitor, so a hatch can override a flag's value — this is
+// the backstop that makes the per-source checks above only early exits.
+function validateFinalMonitor(s: KumaSession, monitor: Record<string, unknown>): void {
+  const type = typeof monitor.type === "string" ? monitor.type : "";
+  const needString = (field: string) => {
+    const v = monitor[field];
+    if (typeof v !== "string" || v === "") fail(2, `${field} must be a non-empty string`);
+  };
+  if (type === "http" || type === "keyword" || type === "json-query") needString("url");
+  if (type === "keyword") needString("keyword");
+  if (type === "json-query") {
+    needString("jsonPath");
+    needString("expectedValue");
+  }
+  if (
+    type === "port" ||
+    type === "steam" ||
+    type === "gamedig" ||
+    type === "ping" ||
+    type === "dns" ||
+    type === "tailscale-ping"
+  ) {
+    needString("hostname");
+  }
+  if (type === "port" || type === "steam" || type === "gamedig") {
+    const port = monitor.port;
+    if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535) {
+      fail(2, "port must be a port number");
+    }
+  }
+  if (type === "gamedig") needString("game");
+  if (type === "docker") {
+    needString("docker_container");
+    if (typeof monitor.docker_host !== "number") {
+      fail(2, "docker_host must be a docker host id");
+    }
+  }
+  if (type === "push") {
+    const token = monitor.pushToken;
+    if (typeof token !== "string" || token === "") {
+      fail(2, "pushToken must be a non-empty string");
+    }
+  }
+
+  // parent reaches Kuma as a number or null; the final value is normalized
+  // here so a numeric string can never slip past the descendant check.
+  const parent = normalizeParent(monitor.parent ?? null);
+  monitor.parent = parent;
+  checkParentGroup(s, parent);
+  checkDockerHost(s, monitor.docker_host);
+  const proxyId = monitor.proxyId;
+  if (proxyId !== null && proxyId !== undefined) {
+    if (typeof proxyId !== "number" || !s.proxies().some((p) => p.id === proxyId)) {
+      fail(1, `proxy ${proxyId} not found`);
+    }
+  }
+
+  const interval = monitor.interval;
+  if (typeof interval !== "number" || !Number.isFinite(interval) || interval <= 0) {
+    fail(2, "interval must be a positive number");
+  }
+  // The timeout cap is 80% of the interval truncated to a tenth of a second;
+  // below 0.125 it becomes 0, which Kuma 1.23 turns into interval × 800 seconds.
+  if (interval < 0.125) {
+    fail(2, `interval ${interval} is too small: 80% of it truncates to a timeout of 0`);
+  }
+  const timeout = monitor.timeout;
+  if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0) {
+    fail(2, "timeout must be a positive number");
+  }
 }
 
 const summarize = (m: Monitor) => ({
@@ -631,8 +706,7 @@ export function registerMonitors(program: Command): void {
       if (normalizedParent !== undefined) monitor.parent = normalizedParent;
       monitor.notificationIDList = notificationIdObject(monitor.notificationIDList);
       deriveMonitorTiming(monitor);
-      if (normalizedParent !== undefined) checkParentGroup(s, normalizedParent);
-      checkDockerHost(s, monitor.docker_host);
+      validateFinalMonitor(s, monitor);
 
       const res = await s.request("add", [monitor]);
       const out: Record<string, unknown> = {
@@ -700,12 +774,6 @@ export function registerMonitors(program: Command): void {
         checkNotificationIdList(fileConfig.notificationIDList);
       }
       const s = await connect();
-      if (normalizedParent !== undefined) checkParentGroup(s, normalizedParent);
-      // Only a hatch-supplied docker_host is re-checked: the stored one already
-      // passed this check when the monitor was created or last edited.
-      const dockerHostInput =
-        sets.docker_host !== undefined ? sets.docker_host : fileConfig.docker_host;
-      if (dockerHostInput !== undefined) checkDockerHost(s, dockerHostInput);
       const fetched = await fetchMonitor(s, id);
       const monitor: Record<string, unknown> = { ...fetched };
       for (const [k, v] of Object.entries(fileConfig)) monitor[k] = v;
@@ -715,12 +783,7 @@ export function registerMonitors(program: Command): void {
       // stored under its indexes; always send the object shape.
       monitor.notificationIDList = notificationIdObject(monitor.notificationIDList);
       deriveMonitorTiming(monitor);
-      if (monitor.type === "push") {
-        const token = monitor.pushToken;
-        if (typeof token !== "string" || token === "") {
-          fail(2, "pushToken must be a non-empty string");
-        }
-      }
+      validateFinalMonitor(s, monitor);
       await s.request("editMonitor", [monitor]);
       // editMonitor ignores fields like `active`, so print what Kuma saved.
       const saved = await fetchMonitor(s, id);

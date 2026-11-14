@@ -374,6 +374,7 @@ describe("monitors add", () => {
   });
 
   test("--proxy-id, --max-retries, --retry-interval, --resend-interval and --timeout are sent as numbers", async () => {
+    kuma.state.proxies = [{ ...defaultProxy(), id: 4, default: 0 }];
     const r = await run(
       sb,
       [
@@ -1819,6 +1820,212 @@ describe("monitors add", () => {
       expect(kuma.calls).toHaveLength(0);
     },
   );
+
+  test("ping: --set hostname=null exits 2 before sending add", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "ping",
+        "--name",
+        "x",
+        "--hostname",
+        "h",
+        "--set",
+        "hostname=null",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("hostname");
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test("ping: --config-file hostname null exits 2 before sending add", async () => {
+    const f = join(sb.dir, "hn.json");
+    writeFileSync(f, JSON.stringify({ hostname: null }));
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "ping", "--name", "x", "--hostname", "h", "--config-file", f],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("hostname");
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test("docker: --set docker_container empty exits 2 before sending add", async () => {
+    kuma.state.dockerHosts = [{ id: 2 }];
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "docker",
+        "--name",
+        "x",
+        "--docker-container",
+        "c",
+        "--docker-host",
+        "2",
+        "--set",
+        'docker_container=""',
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("docker_container");
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test("docker: --config-file docker_container empty exits 2 before sending add", async () => {
+    kuma.state.dockerHosts = [{ id: 2 }];
+    const f = join(sb.dir, "dc.json");
+    writeFileSync(f, JSON.stringify({ docker_container: "" }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "docker",
+        "--name",
+        "x",
+        "--docker-container",
+        "c",
+        "--docker-host",
+        "2",
+        "--config-file",
+        f,
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("docker_container");
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test("--set proxyId naming an unknown proxy exits 1 before sending add", async () => {
+    kuma.state.proxies = [defaultProxy()];
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        "--set",
+        "proxyId=9",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("proxy 9 not found");
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test("http: --set url=null exits 2 before sending add", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        "--set",
+        "url=null",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("url must be a non-empty string");
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test("http: --config-file url empty exits 2 before sending add", async () => {
+    const f = join(sb.dir, "ue.json");
+    writeFileSync(f, JSON.stringify({ url: "" }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        "--config-file",
+        f,
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("url must be a non-empty string");
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test("port: --set port=null exits 2 before sending add", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "port",
+        "--name",
+        "x",
+        "--hostname",
+        "h",
+        "--port",
+        "80",
+        "--set",
+        "port=null",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("port must");
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test("gamedig: --set game empty exits 2 before sending add", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "gamedig",
+        "--name",
+        "x",
+        "--hostname",
+        "h",
+        "--port",
+        "1",
+        "--game",
+        "minecraft",
+        "--set",
+        'game=""',
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("game must be a non-empty string");
+    expect(addCalls()).toHaveLength(0);
+  });
 });
 
 describe("monitors edit", () => {
@@ -2292,6 +2499,52 @@ describe("monitors edit", () => {
     expect(sent.interval).toBe(30);
     expect(sent.retryInterval).toBe(60);
     expect(sent.timeout).toBe(24);
+  });
+
+  test("edit a docker monitor: --config-file docker_host null exits 2", async () => {
+    kuma.state.dockerHosts = [{ id: 2 }];
+    kuma.state.monitors.push({
+      id: 30,
+      name: "dkr",
+      type: "docker",
+      active: true,
+      docker_container: "c",
+      docker_host: 2,
+      interval: 60,
+      parent: null,
+      notificationIDList: {},
+    });
+    const f = join(sb.dir, "edit-dh.json");
+    writeFileSync(f, JSON.stringify({ docker_host: null }));
+    const r = await run(sb, ["monitors", "edit", "30", "--config-file", f], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("docker_host");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit --set interval=0.1 exits 2 naming interval", async () => {
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "interval=0.1"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("interval");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit --set type=dns on a monitor without hostname exits 2", async () => {
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "type=dns"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("hostname");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit --set type=port on a monitor without a stored port exits 2", async () => {
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=port", "--set", "hostname=h"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("port must be a port number");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
   });
 });
 
