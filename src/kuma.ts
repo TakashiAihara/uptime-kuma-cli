@@ -182,6 +182,8 @@ export class KumaSession {
     readonly statusPageList: Record<string, StatusPageRow> | undefined,
     readonly heartbeats: Map<number, BeatRow[]>,
     private readonly statsEvents: Map<number, MonitorStatEvents>,
+    readonly serverVersion: string | undefined,
+    readonly majorVersion: number,
     // setSettings takes the login password again as currentPassword when the
     // request would disable auth; it is the same secret resolveCredentials
     // already produced for the login, kept here so no command re-resolves it.
@@ -338,6 +340,14 @@ export class KumaSession {
   }
 }
 
+// info.version is package.json's semver on both Kuma versions; a missing or
+// unparsable value keeps major 1 so 1.23 stays the default target.
+export function parseMajorVersion(version: unknown): number {
+  if (typeof version !== "string") return 1;
+  const match = /^(\d+)\.\d+\.\d+/.exec(version);
+  return match === null ? 1 : Number(match[1]);
+}
+
 // monitorList, notificationList, proxyList and dockerHostList are pushed in
 // the same tick right after login, so every command waits for them. The
 // maintenance commands additionally name the lists they read: maintenanceList
@@ -394,6 +404,12 @@ export async function connect(
     }
     return rec;
   };
+  // The versioned `info` lands inside the lists wait below (after monitorList in 1.23, before the login answer in 2.x).
+  let serverVersion: string | undefined;
+  socket.on("info", (data: unknown) => {
+    const version = (data as { version?: unknown } | null | undefined)?.version;
+    if (typeof version === "string") serverVersion = version;
+  });
   // The server pushes these right after the login callback, so the listeners
   // must be in place before login is emitted.
   socket.on("monitorList", (data: Record<string, Monitor>) => {
@@ -520,6 +536,8 @@ export async function connect(
     wanted.has("statusPageList") ? present("statusPageList") : undefined,
     heartbeats,
     statsEvents,
+    serverVersion,
+    parseMajorVersion(serverVersion),
     password,
     disconnected,
   );

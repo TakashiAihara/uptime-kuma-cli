@@ -20,7 +20,7 @@
 
 | CLI behaviour / event / field | 1.23.17 | 2.5.11 | impact on the CLI |
 |---|---|---|---|
-| Version source: `info.version` after login (not read today; src/kuma.ts has no `info` listener) | emitted after `monitorList`, hidden pre-login (1.23.17/server/client.js:147-165, server/server.js:279, 1717-1718) | emitted inside `afterLogin` before the login ack, hidden pre-login (2.5.11/server/client.js:145-163, server/server.js:390, 1839, 474) | branch needed — add a listener and expose the major on `KumaSession` |
+| Version source: `info.version` after login (read by the `info` listener in src/kuma.ts since #35; exposed as `KumaSession.serverVersion` / `majorVersion`) | emitted after `monitorList`, hidden pre-login (1.23.17/server/client.js:147-165, server/server.js:279, 1717-1718) | emitted inside `afterLogin` before the login ack, hidden pre-login (2.5.11/server/client.js:145-163, server/server.js:390, 1839, 474) | branch needed — add a listener and expose the major on `KumaSession` |
 
 ## monitors
 
