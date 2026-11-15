@@ -63,8 +63,9 @@ export type FakeState = {
   tags: TagRow[];
   // rows pushed as dockerHostList after login; the CLI checks docker_host ids against them
   dockerHosts: { id: number }[];
-  // event name -> msg; the next call to that event answers { ok: false, msg }
-  fail: Record<string, string>;
+  // event name -> msg; the next call to that event answers { ok: false, msg }.
+  // an array arms one outcome per call in order; a null entry lets that call through
+  fail: Record<string, string | (string | null)[]>;
   // monitor ids whose heartbeatList is never pushed
   silentHeartbeat: number[];
   testNotificationResult: { ok: boolean; msg: string };
@@ -72,6 +73,8 @@ export type FakeState = {
   settings: Record<string, unknown>;
   // login answers { tokenRequired: true } like an account with 2FA enabled
   twoFA: boolean;
+  // addTag answer override; null uses the stored-tag answer
+  addTagResult: Record<string, unknown> | null;
   // event name whose request makes the server drop the connection without answering
   disconnectOn: string | null;
   // after the login answer, drop the connection instead of pushing the lists
@@ -180,6 +183,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     testNotificationResult: { ok: true, msg: "Sent Successfully." },
     settings: {},
     twoFA: false,
+    addTagResult: null,
     disconnectOn: null,
     dropInsteadOfLists: false,
     dropAfterLists: false,
@@ -225,11 +229,19 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
           socket.disconnect(true);
           return;
         }
-        if (state.fail[event]) {
-          const msg = state.fail[event];
+        const armed = state.fail[event];
+        if (typeof armed === "string") {
           delete state.fail[event];
-          cb({ ok: false, msg });
+          cb({ ok: false, msg: armed });
           return;
+        }
+        if (Array.isArray(armed) && armed.length > 0) {
+          const msg = armed.shift();
+          if (armed.length === 0) delete state.fail[event];
+          if (msg != null) {
+            cb({ ok: false, msg });
+            return;
+          }
         }
         if (event !== "login" && !loggedIn) {
           cb({ ok: false, msg: "You are not logged in." });
@@ -437,6 +449,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     handle("getTags", () => ({ ok: true, tags: structuredClone(state.tags) }));
 
     handle("addTag", (tag: { name: string; color: string }) => {
+      if (state.addTagResult !== null) return state.addTagResult;
       const row: TagRow = {
         id: Math.max(0, ...state.tags.map((t) => t.id)) + 1,
         name: tag.name,

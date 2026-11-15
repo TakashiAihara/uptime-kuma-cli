@@ -1,5 +1,6 @@
 import { Option, type Command } from "commander";
 import {
+  CliError,
   fail,
   notificationIdArray,
   notificationIdObject,
@@ -876,6 +877,12 @@ export function registerMonitors(program: Command): void {
           ? undefined
           : parseId(opts.notificationsFrom, "--notifications-from");
       const tagSpecs = ((opts.tag ?? []) as string[]).map(parseMonitorTag);
+      const seenTags = new Set<string>();
+      for (const spec of tagSpecs) {
+        const key = JSON.stringify([spec.tagId, spec.value]);
+        if (seenTags.has(key)) fail(2, `duplicate --tag ${spec.tagId}:${spec.value}`);
+        seenTags.add(key);
+      }
 
       const s = await connect();
       const name = opts.name as string;
@@ -1033,20 +1040,26 @@ export function registerMonitors(program: Command): void {
       }
       if (tagSpecs.length > 0) {
         const attached: Record<string, unknown>[] = [];
-        try {
-          for (const spec of tagSpecs) {
+        for (const spec of tagSpecs) {
+          try {
             await s.request("addMonitorTag", [spec.tagId, out.id, spec.value]);
-            attached.push({
-              tagId: spec.tagId,
-              name: tagNames.get(spec.tagId) ?? null,
-              value: spec.value,
-            });
+          } catch (err) {
+            // The monitor exists; report which tags were attached before failing.
+            out.tags = attached;
+            printJson(out);
+            if (err instanceof CliError && err.exitCode === 1) {
+              fail(
+                1,
+                `monitor ${String(out.id)} was created, but attaching tag ${spec.tagId} failed: ${err.message}`,
+              );
+            }
+            throw err;
           }
-        } catch (err) {
-          // The monitor exists; report which tags were attached before failing.
-          out.tags = attached;
-          printJson(out);
-          throw err;
+          attached.push({
+            tagId: spec.tagId,
+            name: tagNames.get(spec.tagId) ?? null,
+            value: spec.value,
+          });
         }
         out.tags = attached;
       }
@@ -1223,8 +1236,17 @@ export function registerMonitors(program: Command): void {
       const s = await connect();
       const monitor = s.monitorById(id);
       if (!monitor) fail(1, `monitor ${id} not found`);
-      if (!monitorTags(monitor).some((t) => t.tag_id === tagId)) {
+      const rows = monitorTags(monitor).filter((t) => t.tag_id === tagId);
+      if (rows.length === 0) {
         fail(1, `monitor ${id} does not have tag ${tagId}`);
+      }
+      // editMonitorTag rewrites the value on every row of that tag, so a
+      // monitor tagged twice would end up with identical duplicate rows
+      if (rows.length > 1) {
+        fail(
+          2,
+          `monitor ${id} has tag ${tagId} attached ${rows.length} times; use untag + tag instead`,
+        );
       }
       await s.request("editMonitorTag", [tagId, id, value]);
       printJson({ id, tagId, value });

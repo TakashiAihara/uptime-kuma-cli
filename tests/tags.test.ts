@@ -83,7 +83,7 @@ describe("tags", () => {
     expect(kuma.calls.find((c) => c.event === "addTag")).toBeDefined();
   });
 
-  test.each(["red", "#fff", "#12345g", "#1234567", "ff0000", " #ff0000"])(
+  test.each(["red", "#1234", "#12345g", "#1234567", "ff0000", " #ff0000"])(
     "add rejects --color %p with exit 2 before connecting",
     async (color) => {
       const r = await run(sb, ["tags", "add", "--name", "x", "--color", color], creds(kuma.url));
@@ -92,10 +92,37 @@ describe("tags", () => {
     },
   );
 
+  test("add accepts a #rgb color and stores it verbatim", async () => {
+    const r = await run(sb, ["tags", "add", "--name", "edge", "--color", "#aBc"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json()).toEqual({ id: 3, name: "edge", color: "#aBc" });
+    expect(kuma.calls.find((c) => c.event === "addTag")!.args).toEqual([
+      { name: "edge", color: "#aBc" },
+    ]);
+  });
+
   test("add without --name exits 2 before connecting", async () => {
     const r = await run(sb, ["tags", "add", "--color", "#ff0000"], creds(kuma.url));
     expect(r.code).toBe(2);
     expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("add with an empty --name exits 2 before connecting", async () => {
+    const r = await run(sb, ["tags", "add", "--name", "", "--color", "#ff0000"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--name");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("add: an addTag answer without tag.id exits 70", async () => {
+    kuma.state.addTagResult = { ok: true, tag: { name: "ghost", color: "#ff0000" } };
+    const r = await run(
+      sb,
+      ["tags", "add", "--name", "ghost", "--color", "#ff0000"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(70);
+    expect(r.stderr).toContain("unexpected addTag response");
   });
 
   test("add without --color exits 2 before connecting", async () => {
@@ -138,6 +165,36 @@ describe("tags", () => {
     expect(kuma.calls.find((c) => c.event === "editTag")!.args).toEqual([
       { id: 1, name: "stg", color: "#010203" },
     ]);
+  });
+
+  test("edit accepts a #rgb color", async () => {
+    const r = await run(sb, ["tags", "edit", "1", "--color", "#0f0"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json()).toEqual({ id: 1, name: "staging", color: "#0f0" });
+    expect(kuma.calls.find((c) => c.event === "editTag")!.args).toEqual([
+      { id: 1, name: "staging", color: "#0f0" },
+    ]);
+  });
+
+  test("edit --name to a name another tag uses exits 1 naming that tag", async () => {
+    const r = await run(sb, ["tags", "edit", "1", "--name", "prod"], creds(kuma.url));
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain('tag name "prod" is already used by tag 2');
+    expect(kuma.calls.find((c) => c.event === "editTag")).toBeUndefined();
+    expect(kuma.state.tags.find((t) => t.id === 1)!.name).toBe("staging");
+  });
+
+  test("edit --name to the tag's own current name is allowed", async () => {
+    const r = await run(sb, ["tags", "edit", "2", "--name", "prod"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json()).toEqual({ id: 2, name: "prod", color: "#ff0000" });
+  });
+
+  test("edit with an empty --name exits 2 before connecting", async () => {
+    const r = await run(sb, ["tags", "edit", "1", "--name", ""], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--name");
+    expect(kuma.calls).toHaveLength(0);
   });
 
   test("edit without --name or --color exits 2 before connecting", async () => {
