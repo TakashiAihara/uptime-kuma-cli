@@ -16,7 +16,7 @@
 - Kuma 1.23 has no OpenAPI / REST API for management (only badge, push, status page and metrics are REST), so the CLI talks Socket.IO
 - Log in with `login` `{ username, password, token: "" }`; the callback returns `{ ok, msg }`
 - After login the server pushes `monitorList` (object keyed by id), `maintenanceList` (object keyed by id), `notificationList` (array), `proxyList` (array), `dockerHostList` (array), then `statusPageList` (object keyed by id) about 500ms later, then one `heartbeatList (monitorID, beats)` and one `importantHeartbeatList (monitorID, beats)` per monitor. There is no pushed tag list: each monitor's `tags` is the `monitor_tag`⋈`tag` join (`{ id, monitor_id, tag_id, value, name, color }`, ordered by tag name) and the tag table itself is only readable through `getTags`
-- The CLI waits after login only for the lists the command reads: `monitorList`, `notificationList`, `proxyList` and `dockerHostList` for every command, `maintenanceList` for the maintenance commands, and `statusPageList` only for `maintenance status-pages` — waiting for the delayed `statusPageList` unconditionally would add its ~500ms to every command
+- The CLI waits after login only for the lists the command reads: `monitorList`, `notificationList`, `proxyList` and `dockerHostList` for every command, `maintenanceList` for the maintenance commands, and `statusPageList` for `maintenance status-pages` and every `status-pages` command — waiting for the delayed `statusPageList` unconditionally would add its ~500ms to every command
 - Request events used, all with a trailing callback returning `{ ok, msg, ... }`:
     - `add (monitor)` → `monitorID`
     - `editMonitor (monitor)` → `monitorID`
@@ -33,6 +33,7 @@
     - `addMaintenance (maintenance)` → `maintenanceID`; `editMaintenance (maintenance)` runs `jsonToBean`, which overwrites every field it reads, so an edit sends the whole fetched object; `getMaintenance (id)` → `maintenance`; `deleteMaintenance (id)` / `pauseMaintenance (id)` / `resumeMaintenance (id)` answer `{ ok, msg }`
     - `getMonitorMaintenance (id)` → `monitors` (`{ id }` rows); `addMonitorMaintenance (id, [{ id }])` DELETEs the maintenance's `monitor_maintenance` rows and INSERTs the sent ids — it replaces the whole set, it does not add
     - `getMaintenanceStatusPage (id)` → `statusPages` (`{ id, title }` rows); `addMaintenanceStatusPage (id, [{ id }])` replaces the `maintenance_status_page` set the same way
+    - `getStatusPage (slug)` → `config` (`StatusPage.toJSON`); `addStatusPage (title, slug)` → `{ ok, msg }` only; `deleteStatusPage (slug)` → `{ ok }`; `postIncident (slug, { title, content, style })` → `incident` (`Incident.toPublicJSON`); `unpinIncident (slug)` → `{ ok }`. None of them re-pushes `statusPageList` — `sendStatusPageList` only runs in `afterLogin`
 - A request whose callback has `ok: false` exits 1 with `msg` on stderr
 
 ## Configuration
@@ -62,7 +63,7 @@
 | 0 | done |
 | 1 | Kuma answered no (`ok: false`, unknown id) |
 | 2 | configuration, usage (including a missing subcommand), connection, login, disconnect, or timeout failure |
-| 3 | a create or attach was skipped because it already exists (`monitors add` / `tags add` / `maintenance add` same name or title, `monitors tag` same tag+value) |
+| 3 | a create or attach was skipped because it already exists (`monitors add` / `tags add` / `maintenance add` same name or title, `status-pages add` same slug, `monitors tag` same tag+value) |
 | 70 | unexpected error |
 
 ## Commands
@@ -175,6 +176,16 @@
     - `--add <id>` / `--remove <id>` (repeatable) read the current set (`getMonitorMaintenance` / `getMaintenanceStatusPage`), apply the change locally and send the full set; `--set-ids <id,...>` replaces it exactly (`--set-ids ""` clears it) and cannot be combined with `--add` / `--remove` (exit 2). Reading then sending back means a change made in the UI between the read and the write is overwritten — Kuma 1.23 has no compare-and-swap for these sets, so there is no way to prevent it
     - every supplied id must exist in the pushed `monitorList` / `statusPageList` — exit 1 — and the maintenance id is checked against `maintenanceList` first
     - the `add*` events DELETE every row the maintenance has and INSERT the sent ids: they replace the whole set, they do not add. That is why `--add` reads the current set first — sending only the new id would wipe the rest. After a successful write an id that is no longer in the pushed list prints with a `null` name / title instead of failing the command
+
+### status-pages
+
+- status pages come from the pushed `statusPageList` (`StatusPage.toJSON` values keyed by id); every command checks the slug against it before requesting. `unpinIncident` answers ok even for an unknown slug (the UPDATE runs with a NULL page id), while `getStatusPage` / `deleteStatusPage` / `postIncident` answer ok:false — the pre-check gives the CLI's own `status page <slug> not found` either way
+- `status-pages list`: the pushed pages as an array sorted by title like Kuma's `ORDER BY title` (the pushed object's numeric keys would enumerate by id, so the title order is restored client-side)
+- `status-pages get <slug>`: `getStatusPage`'s `config` merged with `publicGroupList` and the pinned `incident` from `GET <url>/api/status-page/<slug>` — no auth — printed as `{ ...config, publicGroupList, incident }`, `incident` null when none. The route is cached 5 minutes by Kuma (apicache), so a just-posted incident or unpin can be missing from the answer. A failed fetch exits 1 naming the URL
+- `status-pages add --slug <s> --title <t>`: validates like Kuma before connecting — title trimmed non-empty, slug trimmed, lower-cased and matching `^[a-z0-9]+(?:-[a-z0-9]+)*$` (exit 2). A slug already in `statusPageList` prints `{ id, slug, title, skipped: true }` and exits 3 without sending — `status_page.slug` also has a UNIQUE index. `addStatusPage` answers only `{ ok, msg }` and does not re-push the list, so the new page's `toJSON` is read back with `getStatusPage`
+- `status-pages delete <slug> --yes`: without `--yes` exits 2 before connecting; unknown slug exits 1 (Kuma's own answer is ok:false "Status Page is not found"). The page's incidents and groups are deleted with it. Prints `{ slug, deleted: true }`
+- `status-pages incident <slug> --title <t> --content <c> [--style <s>]`: `--style` is one of `info`, `warning`, `danger`, `primary`, `light`, `dark`, default `primary` (the StatusPage.vue `createIncident` default); title and content must be non-empty (exit 2). `postIncident` unpins every previous incident of the page before pinning the new one. Prints the returned `incident` (`Incident.toPublicJSON`)
+- `status-pages unpin <slug>`: prints `{ slug, unpinned: true }`
 
 ## Tests
 

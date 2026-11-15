@@ -47,6 +47,22 @@ export type StatusPageRow = {
   slug?: string;
 } & Record<string, unknown>;
 
+// Incident rows behind postIncident/unpinIncident and the public
+// /api/status-page/:slug route: the Incident.toPublicJSON shape plus the
+// owning status page id. Every field but id/statusPageId is optional so
+// fixtures can stay small; missing ones fall back to the column defaults.
+export type IncidentRow = {
+  id: number;
+  statusPageId: number;
+  title?: string;
+  content?: string;
+  style?: string;
+  pin?: boolean;
+  active?: boolean;
+  createdDate?: string | null;
+  lastUpdatedDate?: string | null;
+};
+
 export type Call = { event: string; args: unknown[] };
 export type TagRow = { id: number; name: string; color: string };
 // monitor.toJSON sends monitor.tags as the monitor_tag⋈tag join:
@@ -94,6 +110,15 @@ export type FakeState = {
   dockerHosts: { id: number }[];
   // rows pushed as statusPageList after login (StatusPage.toJSON values)
   statusPages: StatusPageRow[];
+  // incident rows; the public route shows the pinned+active one per page
+  incidents: IncidentRow[];
+  // publicGroupList rows the /api/status-page/:slug route returns,
+  // keyed by status page id (the fake has no group model)
+  statusPageGroups: Record<number, Record<string, unknown>[]>;
+  // non-200 status the /api/status-page/:slug route answers with
+  statusPageApiStatus: number;
+  // verbatim body the route answers with; undefined computes it from state
+  statusPageApiBody: unknown;
   // rows pushed as maintenanceList after login and returned by getMaintenance
   maintenances: MaintenanceRow[];
   // maintenance_id -> attached monitor ids / status page ids (the
@@ -131,6 +156,16 @@ export type FakeState = {
 export type FakeKuma = { url: string; calls: Call[]; state: FakeState; close: () => Promise<void> };
 
 const now = () => new Date().toISOString().replace("T", " ").slice(0, 19);
+
+// checkSlug of server/socket-handlers/status-page-socket-handler.js (1.23.17):
+// addStatusPage lower-cases the slug first, so the accepted set is lowercase
+// words joined by single hyphens
+const checkStatusPageSlug = (slug: string): void => {
+  if (typeof slug !== "string") throw new Error("Slug must be string");
+  const s = slug.trim();
+  if (!s) throw new Error("Slug cannot be empty");
+  if (!/^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$/.test(s)) throw new Error("Invalid Slug");
+};
 
 // Kuma 1.23 runs redbean frozen, so `add` with a key that is not a monitor column fails.
 // The set is the monitor columns: monitorDefaults of src/pages/EditMonitor.vue (1.23.17)
@@ -224,6 +259,10 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     tags: [],
     dockerHosts: [],
     statusPages: [],
+    incidents: [],
+    statusPageGroups: {},
+    statusPageApiStatus: 200,
+    statusPageApiBody: undefined,
     maintenances: [],
     maintenanceMonitors: {},
     maintenanceStatusPages: {},
@@ -343,6 +382,18 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
 
   const maintenanceListJSON = () =>
     Object.fromEntries(state.maintenances.map((m) => [String(m.id), maintenanceJSON(m)]));
+
+  // Incident.toPublicJSON of Kuma 1.23.17; fields a fixture leaves out fall
+  // back to the column defaults (style 'warning', pin/active 1)
+  const incidentJSON = (i: IncidentRow): Record<string, unknown> => ({
+    id: i.id,
+    style: i.style ?? "warning",
+    title: i.title ?? "",
+    content: i.content ?? "",
+    pin: i.pin ?? true,
+    createdDate: i.createdDate ?? null,
+    lastUpdatedDate: i.lastUpdatedDate ?? null,
+  });
 
   // Maintenance.jsonToBean of Kuma 1.23.17: assigns the listed fields
   // unconditionally, dateRange into start/end dates, and the schedule fields
@@ -832,6 +883,148 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
       }
       return { ok: true, msg: "Deleted Successfully." };
     });
+
+    // status-page-socket-handler.js of Kuma 1.23.17. None of these events
+    // re-pushes statusPageList — sendStatusPageList only runs in afterLogin.
+    handle("getStatusPage", (slug: string) => {
+      const page = state.statusPages.find((p) => p.slug === slug);
+      // R.findOne returns null and the handler throws "No slug?"
+      if (page === undefined) throw new Error("No slug?");
+      return { ok: true, config: structuredClone(page) };
+    });
+
+    handle("addStatusPage", (title: string, slug: string) => {
+      const t = title?.trim();
+      const s = slug?.trim();
+      if (!t || !s) throw new Error("Please input all fields");
+      if (typeof s !== "string") throw new Error("Slug -Accept string only");
+      const normalized = s.toLowerCase();
+      checkStatusPageSlug(normalized);
+      // status_page.slug has a UNIQUE index (patch-status-page.sql)
+      if (state.statusPages.some((p) => p.slug === normalized)) {
+        throw new Error("UNIQUE constraint failed: status_page.slug");
+      }
+      const id = Math.max(0, ...state.statusPages.map((p) => p.id)) + 1;
+      state.statusPages.push({
+        id,
+        slug: normalized,
+        title: t,
+        description: null,
+        // getIcon() maps the empty stored icon to /icon.svg
+        icon: "/icon.svg",
+        theme: "auto",
+        published: true,
+        showTags: false,
+        domainNameList: [],
+        customCSS: null,
+        footerText: null,
+        showPoweredBy: true,
+        googleAnalyticsId: null,
+        showCertificateExpiry: false,
+      });
+      return { ok: true, msg: "OK!" };
+    });
+
+    handle("deleteStatusPage", (slug: string) => {
+      const page = state.statusPages.find((p) => p.slug === slug);
+      // slugToID finds nothing and the handler throws "Status Page is not found"
+      if (page === undefined) throw new Error("Status Page is not found");
+      // incidents and groups are deleted by hand (no cascade FK); cnames cascade
+      state.incidents = state.incidents.filter((i) => i.statusPageId !== page.id);
+      state.statusPages = state.statusPages.filter((p) => p.id !== page.id);
+      return { ok: true };
+    });
+
+    handle(
+      "postIncident",
+      (
+        slug: string,
+        incident: { id?: number; title?: string; content?: string; style?: string },
+      ) => {
+        const page = state.statusPages.find((p) => p.slug === slug);
+        const statusPageID = page?.id;
+        if (!statusPageID) throw new Error("slug is not found");
+        // every incident of the page is unpinned before the new one is stored
+        for (const i of state.incidents) {
+          if (i.statusPageId === statusPageID) i.pin = false;
+        }
+        // an incident.id that does not belong to the page falls through to a
+        // fresh bean, but the date branch still follows incident.id
+        const isEdit = Boolean(incident.id);
+        let row = isEdit
+          ? state.incidents.find(
+              (i) => i.id === Number(incident.id) && i.statusPageId === statusPageID,
+            )
+          : undefined;
+        if (row === undefined) {
+          row = {
+            id: Math.max(0, ...state.incidents.map((i) => i.id)) + 1,
+            statusPageId: statusPageID,
+            active: true,
+          };
+          state.incidents.push(row);
+        }
+        row.title = incident.title;
+        row.content = incident.content;
+        row.style = incident.style;
+        row.pin = true;
+        if (isEdit) {
+          row.lastUpdatedDate = now();
+        } else {
+          row.createdDate = now();
+        }
+        return { ok: true, incident: incidentJSON(row) };
+      },
+    );
+
+    handle("unpinIncident", (slug: string) => {
+      const page = state.statusPages.find((p) => p.slug === slug);
+      // slugToID returns null for an unknown slug and the UPDATE with a NULL
+      // status_page_id matches nothing — the event still answers ok
+      if (page !== undefined) {
+        for (const i of state.incidents) {
+          if (i.statusPageId === page.id) i.pin = false;
+        }
+      }
+      return { ok: true };
+    });
+  });
+
+  // GET /api/status-page/:slug of status-page-router.js: the public status
+  // page data ({ config: toPublicJSON, incident, publicGroupList,
+  // maintenanceList }). The real route is apicache'd for 5 minutes and hangs
+  // on an unknown slug; the fake answers 404 instead. Requests outside this
+  // path are left alone so the socket.io handshake is untouched.
+  http.on("request", (req, res) => {
+    const match = req.method === "GET" ? /^\/api\/status-page\/([^/]+)$/.exec(req.url ?? "") : null;
+    if (match === null) return;
+    res.setHeader("content-type", "application/json");
+    const slug = decodeURIComponent(match[1] ?? "");
+    const page = state.statusPages.find((p) => p.slug === slug);
+    if (page === undefined || state.statusPageApiStatus !== 200) {
+      res.statusCode = page === undefined ? 404 : state.statusPageApiStatus;
+      res.end(JSON.stringify({ status: "fail", msg: "Not Found" }));
+      return;
+    }
+    if (state.statusPageApiBody !== undefined) {
+      res.end(JSON.stringify(state.statusPageApiBody));
+      return;
+    }
+    const incident = state.incidents.find(
+      (i) => i.statusPageId === page.id && i.pin !== false && i.active !== false,
+    );
+    // toPublicJSON drops id and domainNameList
+    const config = structuredClone(page) as Record<string, unknown>;
+    delete config.id;
+    delete config.domainNameList;
+    res.end(
+      JSON.stringify({
+        config,
+        incident: incident === undefined ? null : incidentJSON(incident),
+        publicGroupList: state.statusPageGroups[page.id] ?? [],
+        maintenanceList: [],
+      }),
+    );
   });
 
   await new Promise<void>((r) => http.listen(0, "127.0.0.1", r));
