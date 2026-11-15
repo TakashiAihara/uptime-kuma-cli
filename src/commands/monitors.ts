@@ -115,6 +115,9 @@ const MONITOR_DEFAULTS: Record<string, unknown> = {
 const MONITOR_2X_DEFAULTS: Record<string, unknown> = {
   conditions: [],
   rabbitmqNodes: [],
+  // the 2.x UI sends it for every type, so a monitor later turned into
+  // json-query still has an operator (null fails every beat)
+  jsonPathOperator: "==",
 };
 
 const PUSH_TOKEN_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -265,7 +268,9 @@ function checkKuma2xFields(s: KumaSession, keys: Iterable<string>): void {
     if (MONITOR_2X_FIELDS.has(key)) {
       fail(
         2,
-        `"${key}" needs Uptime Kuma 2.x; the server reports ${s.serverVersion ?? "an unknown version"}`,
+        s.serverVersion === undefined
+          ? `"${key}" needs Uptime Kuma 2.x; the server sent no version, so 1.x was assumed`
+          : `"${key}" needs Uptime Kuma 2.x; the server reports ${s.serverVersion}`,
       );
     }
   }
@@ -424,6 +429,14 @@ const HATCH_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unknow
     if (!(KAFKA_SASL_MECHANISMS as readonly string[]).includes(mechanism as string)) {
       fail(2, `${k}.mechanism must be one of ${KAFKA_SASL_MECHANISMS.join(", ")}`);
     }
+    return v;
+  },
+  conditions: (v, k) => {
+    if (!Array.isArray(v)) fail(2, `${k} must be an array`);
+    return v;
+  },
+  rabbitmqNodes: (v, k) => {
+    if (!Array.isArray(v)) fail(2, `${k} must be an array`);
     return v;
   },
   jsonPathOperator: (v, k) => {
@@ -1007,7 +1020,10 @@ export function registerMonitors(program: Command): void {
 
       const s = await connect();
       const twoXFieldCandidates = [...Object.keys(sets), ...Object.keys(fileConfig)];
-      if (opts.jsonPathOperator !== undefined) twoXFieldCandidates.push("jsonPathOperator");
+      // add ignores the flag on other types, so only json-query counts here
+      if (opts.jsonPathOperator !== undefined && type === "json-query") {
+        twoXFieldCandidates.push("jsonPathOperator");
+      }
       checkKuma2xFields(s, twoXFieldCandidates);
       const name = opts.name as string;
       const existing = s.monitors().find((m) => m.name === name);
@@ -1261,16 +1277,25 @@ export function registerMonitors(program: Command): void {
       checkKuma2xFields(s, twoXFieldCandidates);
       const fetched = await fetchMonitor(s, id);
       const monitor: Record<string, unknown> = { ...fetched };
-      // Like add's typed flags, the flag sits below --config-file and --set.
-      if (opts.jsonPathOperator !== undefined) monitor.jsonPathOperator = opts.jsonPathOperator;
       for (const [k, v] of Object.entries(fileConfig)) monitor[k] = v;
       for (const [k, v] of Object.entries(sets)) monitor[k] = v;
+      if (monitor.type === "json-query" && s.majorVersion >= 2) {
+        // Like add's typed flags, the flag sits below --config-file and --set;
+        // a monitor turned into json-query needs an operator like a new one.
+        if (
+          opts.jsonPathOperator !== undefined &&
+          !("jsonPathOperator" in fileConfig) &&
+          !("jsonPathOperator" in sets)
+        ) {
+          monitor.jsonPathOperator = opts.jsonPathOperator;
+        }
+        monitor.jsonPathOperator ??= "==";
+      }
       if (normalizedParent !== undefined) monitor.parent = normalizedParent;
       // Kuma iterates notificationIDList with for...in, so an array would be
       // stored under its indexes; always send the object shape.
       monitor.notificationIDList = notificationIdObject(monitor.notificationIDList);
       const touched = new Set([...Object.keys(fileConfig), ...Object.keys(sets)]);
-
       if (parentOpt !== undefined) touched.add("parent");
       const timingTouched =
         sets.interval !== undefined ||

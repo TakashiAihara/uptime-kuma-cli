@@ -181,7 +181,19 @@ describe("monitors add on Kuma 2.x", () => {
       creds(k.url),
     );
     expect(r.code).toBe(0);
-    expect(stored(k, "http-x").jsonPathOperator).toBeUndefined();
+    // the flag is ignored; the 2.x default every type gets stays
+    expect(stored(k, "http-x").jsonPathOperator).toBe("==");
+  });
+
+  test("an http add on 2.x stores the == operator default like the 2.x UI", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "http", "--name", "h2", "--url", "https://h.example.com"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "h2").jsonPathOperator).toBe("==");
   });
 
   test("--set jsonPathOperator with an unknown operator exits 2 before connecting", async () => {
@@ -266,6 +278,71 @@ describe("monitors edit on Kuma 2.x", () => {
     expect(r.code).toBe(0);
     expect(editCalls(k)).toHaveLength(1);
     expect(stored(k, "jq").jsonPathOperator).toBe("contains");
+  });
+
+  test("edit turning an http monitor into json-query defaults the operator to ==", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [http(7, "h")] });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "type=json-query",
+        "--set",
+        "jsonPath=$.status",
+        "--set",
+        "expectedValue=ok",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "h").jsonPathOperator).toBe("==");
+  });
+
+  test("edit keeps a fetched json-query operator", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [jsonQuery(7, "jq", { jsonPathOperator: "!=" })],
+    });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "description=x"], creds(k.url));
+    expect(r.code).toBe(0);
+    expect(stored(k, "jq").jsonPathOperator).toBe("!=");
+  });
+
+  test("edit --set jsonPathOperator wins over --json-path-operator", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [jsonQuery(7, "jq")] });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--json-path-operator", "<", "--set", "jsonPathOperator=>"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "jq").jsonPathOperator).toBe(">");
+  });
+
+  test("edit --json-path-operator is ignored on a non-json-query monitor", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [http(7, "h")] });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--json-path-operator", "!=", "--set", "description=x"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = editCalls(k)[0]!.args[0] as Record<string, unknown>;
+    expect(sent).not.toHaveProperty("jsonPathOperator");
+  });
+
+  test.each([
+    ["--set", "conditions=x"],
+    ["--set", "rabbitmqNodes=5"],
+  ])("edit %s %s exits 2 before connecting (not an array)", async (flag, value) => {
+    const k = await useFake({ profile: "2.x", monitors: [jsonQuery(7, "jq")] });
+    const r = await run(sb, ["monitors", "edit", "7", flag, value], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("must be an array");
+    expect(k.calls).toHaveLength(0);
   });
 
   test("edit keeps the fetched conditions and rabbitmqNodes", async () => {
@@ -409,6 +486,74 @@ describe("2.x-only fields on Kuma 1.x", () => {
     expect(r.stderr).toContain('"sshPassword" needs Uptime Kuma 2.x');
     expect(r.stderr).toContain("1.23.17");
     expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("edit of a json-query monitor on a 1.x server sends no jsonPathOperator", async () => {
+    const { conditions: _c, rabbitmqNodes: _r, ...m } = jsonQuery(7, "jq");
+    const k = await useFake({ monitors: [m] });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "description=x"], creds(k.url));
+    expect(r.code).toBe(0);
+    const sent = editCalls(k)[0]!.args[0] as Record<string, unknown>;
+    expect(sent).not.toHaveProperty("jsonPathOperator");
+  });
+
+  test("--json-path-operator on a non-json-query add is ignored on a 1.x server too", async () => {
+    const k = await useFake({});
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "h1",
+        "--url",
+        "https://h.example.com",
+        "--json-path-operator",
+        "!=",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "h1")).not.toHaveProperty("jsonPathOperator");
+  });
+
+  test("add --set with a non-secret 2.x key exits 2 on a 1.x server before add", async () => {
+    const k = await useFake({});
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "push", "--name", "p", "--set", "saveResponse=true"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('"saveResponse" needs Uptime Kuma 2.x; the server reports 1.23.17');
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set with a non-secret 2.x key exits 2 on a 1.x server before editMonitor", async () => {
+    const k = await useFake({ monitors: [http(7, "Taba")] });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "saveResponse=true"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('"saveResponse" needs Uptime Kuma 2.x');
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --config-file with a 2.x key exits 2 on a 1.x server before editMonitor", async () => {
+    const k = await useFake({ monitors: [http(7, "Taba")] });
+    const f = join(sb.dir, "e.json");
+    writeFileSync(f, JSON.stringify({ responseMaxLength: 100 }));
+    const r = await run(sb, ["monitors", "edit", "7", "--config-file", f], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('"responseMaxLength" needs Uptime Kuma 2.x');
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("with no version from the server the refusal says 1.x was assumed", async () => {
+    const k = await useFake({ info: null, monitors: [http(7, "Taba")] });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "saveResponse=true"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("the server sent no version, so 1.x was assumed");
   });
 
   test("edit --json-path-operator exits 2 on a 1.x server before editMonitor", async () => {
