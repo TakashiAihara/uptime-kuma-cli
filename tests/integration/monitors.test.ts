@@ -281,4 +281,45 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
       }
     }, 180_000);
   });
+
+  describe("postgres", () => {
+    let pgId = 0;
+
+    test("add a paused postgres monitor with databaseConnectionString via --config-file", async () => {
+      const f = join(sb.dir, "postgres.json");
+      writeFileSync(
+        f,
+        JSON.stringify({ databaseConnectionString: "postgres://u:p@127.0.0.1:5432/x" }),
+      );
+      const r = await cliRun(sb, [
+        "monitors",
+        "add",
+        "--type",
+        "postgres",
+        "--name",
+        "it-postgres",
+        "--config-file",
+        f,
+        "--paused",
+      ]);
+      expect(r.code).toBe(0);
+      expect(r.json()).toMatchObject({ name: "it-postgres", type: "postgres", active: false });
+      pgId = r.json().id;
+    }, 120_000);
+
+    test("get shows type postgres and the connection string redacted", async () => {
+      const r = await cliRun(sb, ["monitors", "get", String(pgId)]);
+      expect(r.code).toBe(0);
+      const m = r.json();
+      expect(m.type).toBe("postgres");
+      expect(m.databaseConnectionString).toBe("***");
+      expect(r.stdout).not.toContain("postgres://u:p@127.0.0.1:5432/x");
+    }, 120_000);
+
+    test("delete the postgres monitor", async () => {
+      const r = await cliRun(sb, ["monitors", "delete", String(pgId), "--yes"]);
+      expect(r.code).toBe(0);
+      expect(r.json()).toEqual({ id: pgId, deleted: true });
+    }, 120_000);
+  });
 });

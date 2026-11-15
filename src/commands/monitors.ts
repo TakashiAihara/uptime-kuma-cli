@@ -15,32 +15,8 @@ import {
 } from "../lib.ts";
 import { connect, MONITOR_ADD_FIELDS, type KumaSession, type Monitor } from "../kuma.ts";
 
-// Order follows the type picker of EditMonitor.vue in Kuma 1.23.17; the
-// monitor types not listed here come in later parts.
+// Order follows the type picker of EditMonitor.vue in Kuma 1.23.17.
 const MONITOR_TYPES = [
-  "group",
-  "http",
-  "port",
-  "ping",
-  "keyword",
-  "json-query",
-  "grpc-keyword",
-  "dns",
-  "docker",
-  "real-browser",
-  "push",
-  "steam",
-  "gamedig",
-  "mqtt",
-  "kafka-producer",
-  "radius",
-  "tailscale-ping",
-] as const;
-
-// Every type the 1.23.17 EditMonitor.vue picker offers, in its order. `add`
-// only supports MONITOR_TYPES, but `edit --set type=` may switch a monitor to
-// any of these — the CLI just cannot create them from scratch yet.
-const KUMA_MONITOR_TYPES = [
   "group",
   "http",
   "port",
@@ -64,6 +40,15 @@ const KUMA_MONITOR_TYPES = [
   "redis",
   "tailscale-ping",
 ] as const;
+
+// The five database types of EditMonitor.vue all show a required
+// databaseConnectionString. The UI's type watcher prefills it with a template
+// (connectionStringTemplates); the CLI sends no default, so a missing one is
+// only caught on the merged monitor in validateFinalMonitor.
+const DATABASE_TYPES = ["sqlserver", "postgres", "mysql", "mongodb", "redis"] as const;
+
+// sqlserver / postgres / mysql also show the optional databaseQuery textarea.
+const DATABASE_QUERY_TYPES = ["sqlserver", "postgres", "mysql"] as const;
 
 // kafkaSaslMechanismOptions of EditMonitor.vue
 const KAFKA_SASL_MECHANISMS = ["None", "plain", "scram-sha-256", "scram-sha-512", "aws"] as const;
@@ -361,11 +346,11 @@ const HATCH_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unknow
     }
     return v;
   },
-  // edit may switch to any type the 1.23.17 picker offers, including the ones
-  // `add` cannot create yet; anything else is not a monitor type at all.
+  // edit may switch the type to any the 1.23.17 picker offers; anything else
+  // is not a monitor type at all.
   type: (v, k) => {
-    if (typeof v !== "string" || !(KUMA_MONITOR_TYPES as readonly string[]).includes(v)) {
-      fail(2, `${k} must be one of ${KUMA_MONITOR_TYPES.join(", ")}`);
+    if (typeof v !== "string" || !(MONITOR_TYPES as readonly string[]).includes(v)) {
+      fail(2, `${k} must be one of ${MONITOR_TYPES.join(", ")}`);
     }
     return v;
   },
@@ -517,6 +502,16 @@ function validateFinalMonitor(
     needString("radiusCalledStationId");
     needString("radiusCallingStationId");
   }
+  // databaseConnectionString is a secret, so it can only arrive through
+  // --config-file (--set refuses it) and there is no typed flag to check
+  // early: the merged monitor is judged here.
+  const isDatabaseType = (DATABASE_TYPES as readonly string[]).includes(type);
+  if (isDatabaseType && inScope("databaseConnectionString")) {
+    const conn = monitor.databaseConnectionString;
+    if (typeof conn !== "string" || conn === "") {
+      fail(2, "databaseConnectionString must be a non-empty string; pass it in --config-file");
+    }
+  }
   if (type === "gamedig") needString("game");
   if (type === "docker") {
     needString("docker_container");
@@ -652,6 +647,7 @@ export function registerMonitors(program: Command): void {
     .option("--radius-username <username>", "radius username (radius type)")
     .option("--radius-called-station-id <id>", "radius called station id (radius type)")
     .option("--radius-calling-station-id <id>", "radius calling station id (radius type)")
+    .option("--database-query <sql>", "SQL query (sqlserver, postgres, mysql types)")
     .option("--interval <seconds>", "heartbeat interval")
     .option("--retry-interval <seconds>", "retry interval")
     .option("--max-retries <n>", "maximum retries")
@@ -926,6 +922,11 @@ export function registerMonitors(program: Command): void {
         typed.radiusUsername = opts.radiusUsername;
         typed.radiusCalledStationId = opts.radiusCalledStationId;
         typed.radiusCallingStationId = opts.radiusCallingStationId;
+      }
+      // Like the other type-specific flags, --database-query is ignored on
+      // types that do not read it (redis, mongodb, and everything else).
+      if ((DATABASE_QUERY_TYPES as readonly string[]).includes(type)) {
+        if (opts.databaseQuery !== undefined) typed.databaseQuery = opts.databaseQuery;
       }
       if (type === "json-query") {
         typed.jsonPath = opts.jsonPath;
