@@ -882,8 +882,8 @@ export function registerMonitors(program: Command): void {
         typed.grpcUrl = opts.grpcUrl;
         typed.grpcServiceName = opts.grpcServiceName;
         typed.grpcMethod = opts.grpcMethod;
-        // Kuma 1.23 always JSON.parses grpcBody at check time; "{}" is the
-        // empty request the UI's blank textarea produces.
+        // grpcBody absent parses to null, which protobufjs rejects as "request
+        // must be specified"; "{}" is the empty request message.
         typed.grpcBody = "{}";
         if (grpcProtobuf !== undefined) typed.grpcProtobuf = grpcProtobuf;
         if (opts.grpcEnableTls) typed.grpcEnableTls = true;
