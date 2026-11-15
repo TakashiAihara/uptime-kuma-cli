@@ -1,11 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { sandbox, type Sandbox } from "../helpers/run";
-import { cliRun, on2x } from "./helpers";
+import { cliRun } from "./helpers";
 
 // Runs only when scripts/integration.ts provides UPTIME_KUMA_IT_*; a plain
 // `bun test` skips the whole file.
-// Kuma 2.x: #37
-describe.skipIf(!process.env.UPTIME_KUMA_IT_URL || on2x)("tags (real Kuma)", () => {
+describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("tags (real Kuma)", () => {
   let sb: Sandbox;
   let tagId = 0;
   let monitorId = 0;

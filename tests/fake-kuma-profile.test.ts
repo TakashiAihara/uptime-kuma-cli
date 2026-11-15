@@ -44,15 +44,18 @@ describe("fake kuma 2.x profile", () => {
     expect(s.majorVersion).toBe(2);
   });
 
-  test("monitors add fails on the NOT NULL conditions column", async () => {
-    kuma = await startFakeKuma({ profile: "2.x" });
+  test("monitors add sends the 2.x conditions and rabbitmqNodes defaults", async () => {
+    const k = await startFakeKuma({ profile: "2.x" });
+    kuma = k;
     const r = await run(
       sb,
       ["monitors", "add", "--type", "push", "--name", "x", "--paused"],
-      creds(kuma.url),
+      creds(k.url),
     );
-    expect(r.code).toBe(1);
-    expect(r.stderr).toContain("SQLITE_CONSTRAINT: NOT NULL constraint failed: monitor.conditions");
+    expect(r.code).toBe(0);
+    const stored = k.state.monitors.find((m) => m.name === "x")!;
+    expect(stored.conditions).toEqual([]);
+    expect(stored.rabbitmqNodes).toEqual([]);
   });
 
   test("the default profile accepts the same add", async () => {

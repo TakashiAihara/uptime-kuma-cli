@@ -6,8 +6,7 @@ import { cliRun, on2x } from "./helpers";
 
 // Runs only when scripts/integration.ts provides UPTIME_KUMA_IT_*; a plain
 // `bun test` skips the whole file.
-// Kuma 2.x: #37
-describe.skipIf(!process.env.UPTIME_KUMA_IT_URL || on2x)("monitors (real Kuma)", () => {
+describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
   let sb: Sandbox;
   let pushId = 0;
   let pushToken = "";
@@ -115,6 +114,42 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL || on2x)("monitors (real Kuma)",
     expect(r.code).toBe(0);
     expect(r.json()).toEqual({ id: pushId, deleted: true });
   }, 120_000);
+
+  test("json-query: 2.x stores the operator, 1.23 refuses --json-path-operator", async () => {
+    const args = [
+      "monitors",
+      "add",
+      "--type",
+      "json-query",
+      "--name",
+      "it-jq",
+      "--url",
+      "http://localhost:3001",
+      "--json-path",
+      "$.ok",
+      "--expected-value",
+      "true",
+      "--paused",
+    ];
+    if (!on2x) {
+      const refused = await cliRun(sb, [...args, "--json-path-operator", "!="]);
+      expect(refused.code).toBe(2);
+      expect(refused.stderr).toContain('"jsonPathOperator" needs Uptime Kuma 2.x');
+    }
+    const r = await cliRun(sb, on2x ? [...args, "--json-path-operator", "!="] : args);
+    expect(r.code).toBe(0);
+    const id = r.json().id;
+    const g = await cliRun(sb, ["monitors", "get", String(id)]);
+    expect(g.code).toBe(0);
+    if (on2x) {
+      expect(g.json().jsonPathOperator).toBe("!=");
+      expect(g.json().conditions).toEqual([]);
+    } else {
+      expect(g.json()).not.toHaveProperty("jsonPathOperator");
+    }
+    const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
+    expect(del.code).toBe(0);
+  }, 240_000);
 
   describe("group / ping / dns", () => {
     let groupId = 0;

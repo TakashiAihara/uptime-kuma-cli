@@ -14,7 +14,13 @@ import {
   readJsonFile,
   readTextFile,
 } from "../lib.ts";
-import { connect, MONITOR_ADD_FIELDS, type KumaSession, type Monitor } from "../kuma.ts";
+import {
+  connect,
+  MONITOR_ADD_FIELDS,
+  MONITOR_2X_FIELDS,
+  type KumaSession,
+  type Monitor,
+} from "../kuma.ts";
 
 // Order follows the type picker of EditMonitor.vue in Kuma 1.23.17.
 const MONITOR_TYPES = [
@@ -68,8 +74,13 @@ const DNS_RESOLVE_TYPES = [
   "TXT",
 ] as const;
 
+// evaluateJsonQuery operators of 2.5.11/src/util.ts; jsonPathOperator is a
+// 2.x-only monitor field and the 2.x UI defaults it to "==".
+const JSON_PATH_OPERATORS = ["==", "!=", "<", "<=", ">", ">=", "contains"] as const;
+
 // monitorDefaults of src/pages/EditMonitor.vue in Kuma 1.23.17, minus the fields the CLI always
-// sets. Fields from Kuma 2.x must not be added: 1.23 stores the object as-is and fails on unknown columns.
+// sets. Fields from Kuma 2.x must not be added: 1.23 stores the object as-is and fails on unknown
+// columns; the 2.x-only add defaults live in MONITOR_2X_DEFAULTS below.
 const MONITOR_DEFAULTS: Record<string, unknown> = {
   parent: null,
   method: "GET",
@@ -95,6 +106,15 @@ const MONITOR_DEFAULTS: Record<string, unknown> = {
   kafkaProducerSsl: false,
   kafkaProducerAllowAutoTopicCreation: false,
   gamedigGivenPortOnly: true,
+};
+
+// The defaults a 2.x `add` needs on top of MONITOR_DEFAULTS: 2.5.11's add
+// handler JSON.stringifies both unconditionally and monitor.conditions is
+// NOT NULL, while 1.23 has no such columns. They sit at the defaults layer
+// so --config-file / --set still win, and they are never sent to 1.23.
+const MONITOR_2X_DEFAULTS: Record<string, unknown> = {
+  conditions: [],
+  rabbitmqNodes: [],
 };
 
 const PUSH_TOKEN_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -206,6 +226,11 @@ function checkNotificationIdList(value: unknown): void {
   validateNotificationIdEntries(value);
 }
 
+// The allowlist is the union of both versions: the 2.x-only keys pass this
+// pre-connect check and are refused after connect() on a 1.x server.
+const isMonitorField = (key: string): boolean =>
+  MONITOR_ADD_FIELDS.has(key) || MONITOR_2X_FIELDS.has(key);
+
 // `monitors add --set/--config-file`: every key must be a field the `add`
 // event accepts; id/type/name are set by the dedicated flags instead.
 function checkAddFields(fields: Record<string, unknown>, source: string): void {
@@ -214,7 +239,7 @@ function checkAddFields(fields: Record<string, unknown>, source: string): void {
     if (key === "type" || key === "name") {
       fail(2, `${source} cannot set "${key}"; use --type/--name instead`);
     }
-    if (!MONITOR_ADD_FIELDS.has(key)) {
+    if (!isMonitorField(key)) {
       fail(2, `${source} key "${key}" is not a monitor field`);
     }
   }
@@ -225,8 +250,23 @@ function checkAddFields(fields: Record<string, unknown>, source: string): void {
 function checkEditFields(fields: Record<string, unknown>, source: string): void {
   for (const key of Object.keys(fields)) {
     if (key === "id") fail(2, `${source} cannot set "id"; the id selects the monitor`);
-    if (!MONITOR_ADD_FIELDS.has(key)) {
+    if (!isMonitorField(key)) {
       fail(2, `${source} key "${key}" is not a monitor field`);
+    }
+  }
+}
+
+// A 2.x-only field can only be refused once the version is known: on 1.23
+// `add` would fail on the unknown column and `editMonitor` would silently
+// drop the value while answering ok.
+function checkKuma2xFields(s: KumaSession, keys: Iterable<string>): void {
+  if (s.majorVersion >= 2) return;
+  for (const key of keys) {
+    if (MONITOR_2X_FIELDS.has(key)) {
+      fail(
+        2,
+        `"${key}" needs Uptime Kuma 2.x; the server reports ${s.serverVersion ?? "an unknown version"}`,
+      );
     }
   }
 }
@@ -383,6 +423,12 @@ const HATCH_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unknow
     const mechanism = (v as Record<string, unknown>).mechanism;
     if (!(KAFKA_SASL_MECHANISMS as readonly string[]).includes(mechanism as string)) {
       fail(2, `${k}.mechanism must be one of ${KAFKA_SASL_MECHANISMS.join(", ")}`);
+    }
+    return v;
+  },
+  jsonPathOperator: (v, k) => {
+    if (typeof v !== "string" || !(JSON_PATH_OPERATORS as readonly string[]).includes(v)) {
+      fail(2, `${k} must be one of ${JSON_PATH_OPERATORS.join(", ")}`);
     }
     return v;
   },
@@ -719,6 +765,11 @@ export function registerMonitors(program: Command): void {
     .option("--port <port>", "port (port, dns, steam, gamedig, mqtt, radius)")
     .option("--keyword <keyword>", "keyword (keyword, grpc-keyword types)")
     .option("--json-path <path>", "json path (json-query type)")
+    .addOption(
+      new Option("--json-path-operator <op>", "json query operator (json-query type)").choices([
+        ...JSON_PATH_OPERATORS,
+      ]),
+    )
     .option("--expected-value <value>", "expected value (json-query type)")
     .option("--packet-size <bytes>", "ping packet size")
     .option("--dns-resolve-server <server>", "DNS resolver server")
@@ -955,6 +1006,9 @@ export function registerMonitors(program: Command): void {
       }
 
       const s = await connect();
+      const twoXFieldCandidates = [...Object.keys(sets), ...Object.keys(fileConfig)];
+      if (opts.jsonPathOperator !== undefined) twoXFieldCandidates.push("jsonPathOperator");
+      checkKuma2xFields(s, twoXFieldCandidates);
       const name = opts.name as string;
       const existing = s.monitors().find((m) => m.name === name);
       if (existing) {
@@ -1056,6 +1110,10 @@ export function registerMonitors(program: Command): void {
       if (type === "json-query") {
         typed.jsonPath = opts.jsonPath;
         typed.expectedValue = opts.expectedValue;
+        // 2.x's evaluateJsonQuery needs an operator and the column has no
+        // default; the UI sends "==". 1.23 never receives the field — the
+        // flag and the hatch keys were refused after connect().
+        if (s.majorVersion >= 2) typed.jsonPathOperator = opts.jsonPathOperator ?? "==";
       }
       if (port !== undefined) {
         typed.hostname = opts.hostname;
@@ -1088,6 +1146,7 @@ export function registerMonitors(program: Command): void {
 
       const monitor: Record<string, unknown> = {
         ...MONITOR_DEFAULTS,
+        ...(s.majorVersion >= 2 ? MONITOR_2X_DEFAULTS : {}),
         ...typed,
         ...fileConfig,
         ...sets,
@@ -1140,6 +1199,11 @@ export function registerMonitors(program: Command): void {
     .command("edit <id>")
     .description("Edit a monitor")
     .option("--set <key=value>", "set a field (repeatable)", collect, [])
+    .addOption(
+      new Option("--json-path-operator <op>", "json query operator (json-query type)").choices([
+        ...JSON_PATH_OPERATORS,
+      ]),
+    )
     .option("--parent <groupId>", "parent group monitor id ('none' clears it)")
     .option("--config-file <path>", "JSON file of monitor fields")
     .action(async (rawId, opts) => {
@@ -1157,9 +1221,13 @@ export function registerMonitors(program: Command): void {
       if (
         (opts.set as string[]).length === 0 &&
         Object.keys(fileConfig).length === 0 &&
-        parentOpt === undefined
+        parentOpt === undefined &&
+        opts.jsonPathOperator === undefined
       ) {
-        fail(2, "monitors edit requires at least one --set key=value, --config-file or --parent");
+        fail(
+          2,
+          "monitors edit requires at least one --set key=value, --config-file, --parent or --json-path-operator",
+        );
       }
       checkEditFields(sets, "--set");
       checkEditFields(fileConfig, "--config-file");
@@ -1188,8 +1256,13 @@ export function registerMonitors(program: Command): void {
         checkNotificationIdList(fileConfig.notificationIDList);
       }
       const s = await connect();
+      const twoXFieldCandidates = [...Object.keys(sets), ...Object.keys(fileConfig)];
+      if (opts.jsonPathOperator !== undefined) twoXFieldCandidates.push("jsonPathOperator");
+      checkKuma2xFields(s, twoXFieldCandidates);
       const fetched = await fetchMonitor(s, id);
       const monitor: Record<string, unknown> = { ...fetched };
+      // Like add's typed flags, the flag sits below --config-file and --set.
+      if (opts.jsonPathOperator !== undefined) monitor.jsonPathOperator = opts.jsonPathOperator;
       for (const [k, v] of Object.entries(fileConfig)) monitor[k] = v;
       for (const [k, v] of Object.entries(sets)) monitor[k] = v;
       if (normalizedParent !== undefined) monitor.parent = normalizedParent;
@@ -1197,6 +1270,7 @@ export function registerMonitors(program: Command): void {
       // stored under its indexes; always send the object shape.
       monitor.notificationIDList = notificationIdObject(monitor.notificationIDList);
       const touched = new Set([...Object.keys(fileConfig), ...Object.keys(sets)]);
+
       if (parentOpt !== undefined) touched.add("parent");
       const timingTouched =
         sets.interval !== undefined ||
