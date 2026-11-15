@@ -598,6 +598,37 @@ const summarize = (m: Monitor) => ({
   tags: monitorTags(m).map(tagJson),
 });
 
+// monitor_tls_info.info_json is the JSON.stringify of checkCertificate's
+// result: { valid, certInfo }, where certInfo.validTo is the leaf
+// certificate's notAfter (a Date on the wire, ISO 8601) and daysRemaining
+// the rounded days left. A missing or malformed payload gives nulls.
+function certInfoFields(infoJson: string | undefined): {
+  certExpiresAt: string | null;
+  certDaysRemaining: number | null;
+} {
+  const none = { certExpiresAt: null, certDaysRemaining: null };
+  if (infoJson === undefined) return none;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(infoJson);
+  } catch {
+    return none;
+  }
+  const certInfo = (parsed as { certInfo?: unknown } | null)?.certInfo;
+  if (certInfo === null || typeof certInfo !== "object") return none;
+  const { validTo, daysRemaining } = certInfo as Record<string, unknown>;
+  let certExpiresAt: string | null = null;
+  if (typeof validTo === "string") {
+    const date = new Date(validTo);
+    if (!Number.isNaN(date.getTime())) certExpiresAt = date.toISOString();
+  }
+  return {
+    certExpiresAt,
+    certDaysRemaining:
+      typeof daysRemaining === "number" && Number.isFinite(daysRemaining) ? daysRemaining : null,
+  };
+}
+
 export function registerMonitors(program: Command): void {
   const monitors = program.command("monitors").description("Manage monitors");
 
@@ -633,6 +664,37 @@ export function registerMonitors(program: Command): void {
         notificationIDList: notificationIdArray(m.notificationIDList),
         tags: monitorTags(m).map(tagJson),
       });
+    });
+
+  monitors
+    .command("stats [id]")
+    .description("Uptime, ping and certificate stats of monitors")
+    .action(async (rawId) => {
+      const id = rawId === undefined ? undefined : parseId(rawId, "monitor id");
+      const s = await connect();
+      const all = s.monitors();
+      const targets = id === undefined ? all : all.filter((m) => m.id === id);
+      if (id !== undefined && targets.length === 0) fail(1, `monitor ${id} not found`);
+      const names = new Map(all.map((m) => [m.id, m.name] as [number, string]));
+      const stats = await s.monitorStats(
+        targets.map((m) => m.id),
+        names,
+      );
+      const rows = targets.map((m) => {
+        const st = stats.get(m.id);
+        if (st === undefined) fail(70, `stats of monitor ${m.id} missing after the wait`);
+        const cert = certInfoFields(st.certInfo);
+        return {
+          id: m.id,
+          name: m.name,
+          uptime24h: st.uptime24h,
+          uptime30d: st.uptime30d,
+          avgPing: st.avgPing,
+          certExpiresAt: cert.certExpiresAt,
+          certDaysRemaining: cert.certDaysRemaining,
+        };
+      });
+      printJson(id === undefined ? rows : rows[0]);
     });
 
   monitors
