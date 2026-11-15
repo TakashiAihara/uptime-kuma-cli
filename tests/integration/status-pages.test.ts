@@ -61,8 +61,6 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("status-pages (real Kuma)", () 
     expect(j.title).toBe(title);
     expect(j.publicGroupList).toEqual([]);
     expect(j.incident).toMatchObject({ title: "it incident", style: "warning" });
-    // Kuma caches /api/status-page/:slug for 5 minutes; unpin is not verified
-    // through get because the cached body would still show the incident
   }, 120_000);
 
   test("save renames the title and attaches a group with one monitor", async () => {
@@ -92,11 +90,12 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("status-pages (real Kuma)", () 
     const j = r.json();
     expect(j.title).toBe("it status page renamed");
     expect(j.slug).toBe(slug);
-    // the save response's groups carry the id Kuma assigned
+    // printed like `get`: the fresh public route's group carries the new id
     expect(j.publicGroupList).toHaveLength(1);
     expect(j.publicGroupList[0].name).toBe("Core");
     expect(j.publicGroupList[0].id).toBeGreaterThan(0);
-    expect(j.publicGroupList[0].monitorList).toEqual([{ id: monitorId, sendUrl: true }]);
+    expect(j.publicGroupList[0].monitorList[0].id).toBe(monitorId);
+    expect(j.publicGroupList[0].monitorList[0].sendUrl).toBeTruthy();
     // the incident pinned by the earlier test is still shown
     expect(j.incident).toMatchObject({ title: "it incident" });
 
@@ -115,6 +114,11 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("status-pages (real Kuma)", () 
     const r = await cliRun(sb, ["status-pages", "unpin", slug]);
     expect(r.code).toBe(0);
     expect(r.json()).toEqual({ slug, unpinned: true });
+    // unpinIncident does not clear Kuma's apicache, but the cache-busting
+    // query still shows the incident gone
+    const g = await cliRun(sb, ["status-pages", "get", slug]);
+    expect(g.code).toBe(0);
+    expect(g.json().incident).toBeNull();
   }, 120_000);
 
   test("delete the status page", async () => {
@@ -125,4 +129,52 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("status-pages (real Kuma)", () 
     expect(list.code).toBe(0);
     expect(list.json()).not.toContainEqual(expect.objectContaining({ slug }));
   }, 240_000);
+
+  test("save after delete and re-add of the same slug", async () => {
+    // deleteStatusPage does not clear Kuma's 5-minute apicache on
+    // /api/status-page/:slug; the cache-busting query must keep the second
+    // save from reading the deleted page's groups
+    const add = await cliRun(sb, ["status-pages", "add", "--slug", slug, "--title", title]);
+    expect(add.code).toBe(0);
+
+    const mon = await cliRun(sb, [
+      "monitors",
+      "add",
+      "--type",
+      "push",
+      "--name",
+      "it-sp-mon2",
+      "--paused",
+    ]);
+    expect(mon.code).toBe(0);
+    const monitorId = mon.json().id;
+
+    const f1 = join(sb.dir, "page-groups.json");
+    writeFileSync(
+      f1,
+      JSON.stringify({
+        publicGroupList: [{ name: "Core", monitorList: [{ id: monitorId }] }],
+      }),
+    );
+    const s1 = await cliRun(sb, ["status-pages", "save", slug, "--config-file", f1]);
+    expect(s1.code).toBe(0);
+    expect(s1.json().publicGroupList).toHaveLength(1);
+
+    const del = await cliRun(sb, ["status-pages", "delete", slug, "--yes"]);
+    expect(del.code).toBe(0);
+    const add2 = await cliRun(sb, ["status-pages", "add", "--slug", slug, "--title", title]);
+    expect(add2.code).toBe(0);
+
+    const f2 = join(sb.dir, "page-title.json");
+    writeFileSync(f2, JSON.stringify({ title: "it status page re-added" }));
+    const s2 = await cliRun(sb, ["status-pages", "save", slug, "--config-file", f2]);
+    expect(s2.code).toBe(0);
+    expect(s2.json().title).toBe("it status page re-added");
+    expect(s2.json().publicGroupList).toEqual([]);
+
+    const monDel = await cliRun(sb, ["monitors", "delete", String(monitorId), "--yes"]);
+    expect(monDel.code).toBe(0);
+    const del2 = await cliRun(sb, ["status-pages", "delete", slug, "--yes"]);
+    expect(del2.code).toBe(0);
+  }, 300_000);
 });

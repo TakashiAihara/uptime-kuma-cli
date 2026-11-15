@@ -115,8 +115,8 @@ uptime-kuma-cli status-pages delete status --yes
 
 - `monitors add` and `tags add` exit 3 and send nothing when the same name exists; `maintenance add` does the same for a title, `status-pages add` for a slug, `status-pages save` when the file's slug belongs to another page; `monitors tag` exits 3 when the same tag+value is already attached. `monitors add --tag <id[:value]>` attaches tags at creation
 - `maintenance add` / `edit` take `--config-file` for the schedule fields of the `cron` and `recurring-*` strategies; `maintenance monitors` / `status-pages` replace the whole attached set — Kuma's attach events delete every existing row first, they do not add
-- `status-pages get` also fetches the unauthenticated `GET /api/status-page/<slug>` for the public groups and pinned incident; Kuma caches that route for 5 minutes, and `status-pages incident` unpins the page's previous incident
-- `status-pages save` merges the JSON file over the fetched page config and replaces the whole public group set — groups not listed are deleted; a `get` output's `publicGroupList` can be fed back as the file's `publicGroupList`
+- `status-pages get` also fetches the unauthenticated `GET /api/status-page/<slug>` for the public groups and pinned incident; Kuma caches that route for 5 minutes but the CLI adds a cache-busting query so reads are never stale, and `status-pages incident` unpins the page's previous incident
+- `status-pages save` merges the JSON file over the fetched page config and replaces the whole public group set — groups not listed are deleted; a `get` output's `publicGroupList` can be fed back as the file's `publicGroupList`. If the read-back after a successful save fails, the sent config is printed with a stderr warning and exit code 0
 - Push monitors get their token in the same `add` call; the output carries `pushToken` and `pushUrl`
 - `--paused` creates the monitor without starting it (push to a paused monitor returns HTTP 404, so resume before the pusher starts)
 - Kuma only notifies on status changes; with `resendInterval` 0 a monitor that stays down does not notify again

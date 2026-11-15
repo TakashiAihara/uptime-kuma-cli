@@ -119,6 +119,13 @@ export type FakeState = {
   statusPageApiStatus: number;
   // verbatim body the route answers with; undefined computes it from state
   statusPageApiBody: unknown;
+  // the route caches per req.url for 5 minutes like apicache; requests after
+  // the first N answer 500 (0 disables) so tests can fail a later read
+  statusPageApiFailAfter: number;
+  // req.url values the route saw, in order
+  apiRequests: string[];
+  // postIncident answer override; null uses the stored-incident answer
+  postIncidentResult: Record<string, unknown> | null;
   // rows pushed as maintenanceList after login and returned by getMaintenance
   maintenances: MaintenanceRow[];
   // maintenance_id -> attached monitor ids / status page ids (the
@@ -263,6 +270,9 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     statusPageGroups: {},
     statusPageApiStatus: 200,
     statusPageApiBody: undefined,
+    statusPageApiFailAfter: 0,
+    apiRequests: [],
+    postIncidentResult: null,
     maintenances: [],
     maintenanceMonitors: {},
     maintenanceStatusPages: {},
@@ -283,6 +293,12 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
   const calls: Call[] = [];
   const http = createServer();
   const io = new Server(http);
+  // apicache of the /api/status-page/:slug route: keyed by req.url (path +
+  // query); in Kuma several events call apicache.clear() and the fake models
+  // the two relevant here — saveStatusPage and deleteMonitor
+  const apiCache = new Map<string, { status: number; body: string }>();
+  // status_page.id is AUTOINCREMENT: deleted ids are never reused
+  let nextStatusPageId = Math.max(0, ...state.statusPages.map((p) => p.id));
 
   // monitor.toJSON always carries tags (the monitor_tag⋈tag join, [] when none)
   const tagsOf = (m: Monitor): MonitorTagRow[] =>
@@ -605,6 +621,8 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     // Kuma 1.23 does not check that the id exists: the DELETE affects 0 rows and still answers ok
     handle("deleteMonitor", (id: number) => {
       state.monitors = state.monitors.filter((m) => m.id !== Number(id));
+      // deleteMonitor calls apicache.clear() so cached public pages drop the monitor
+      apiCache.clear();
       socket.emit("monitorList", monitorList());
       return { ok: true, msg: "Deleted Successfully." };
     });
@@ -904,7 +922,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
       if (state.statusPages.some((p) => p.slug === normalized)) {
         throw new Error("UNIQUE constraint failed: status_page.slug");
       }
-      const id = Math.max(0, ...state.statusPages.map((p) => p.id)) + 1;
+      const id = ++nextStatusPageId;
       state.statusPages.push({
         id,
         slug: normalized,
@@ -931,6 +949,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
       if (page === undefined) throw new Error("Status Page is not found");
       // incidents and groups are deleted by hand (no cascade FK); cnames cascade
       state.incidents = state.incidents.filter((i) => i.statusPageId !== page.id);
+      delete state.statusPageGroups[page.id];
       state.statusPages = state.statusPages.filter((p) => p.id !== page.id);
       return { ok: true };
     });
@@ -941,6 +960,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
         slug: string,
         incident: { id?: number; title?: string; content?: string; style?: string },
       ) => {
+        if (state.postIncidentResult !== null) return state.postIncidentResult;
         const page = state.statusPages.find((p) => p.slug === slug);
         const statusPageID = page?.id;
         if (!statusPageID) throw new Error("slug is not found");
@@ -1096,6 +1116,9 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
         }
         // groups of this page that are not in the list are deleted
         state.statusPageGroups[page.id] = kept;
+        // saveStatusPage calls apicache.clear(), as does deleteMonitor; the
+        // fake clears its simulated cache on both
+        apiCache.clear();
         return { ok: true, publicGroupList };
       },
     );
@@ -1103,39 +1126,60 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
 
   // GET /api/status-page/:slug of status-page-router.js: the public status
   // page data ({ config: toPublicJSON, incident, publicGroupList,
-  // maintenanceList }). The real route is apicache'd for 5 minutes and hangs
-  // on an unknown slug; the fake answers 404 instead. Requests outside this
-  // path are left alone so the socket.io handshake is untouched.
+  // maintenanceList }). The real route is apicache'd for 5 minutes keyed on
+  // req.originalUrl including the query string, and hangs on an unknown
+  // slug; the fake answers 404 instead and caches per req.url, cleared by
+  // the events the fake models that clear it (saveStatusPage, deleteMonitor).
+  // Requests outside this path are left alone so the socket.io handshake is
+  // untouched.
   http.on("request", (req, res) => {
-    const match = req.method === "GET" ? /^\/api\/status-page\/([^/]+)$/.exec(req.url ?? "") : null;
+    const url = req.url ?? "";
+    const path = url.split("?")[0] ?? "";
+    const match = req.method === "GET" ? /^\/api\/status-page\/([^/]+)$/.exec(path) : null;
     if (match === null) return;
     res.setHeader("content-type", "application/json");
+    state.apiRequests.push(url);
+    const hit = apiCache.get(url);
+    if (hit !== undefined) {
+      res.statusCode = hit.status;
+      res.end(hit.body);
+      return;
+    }
     const slug = decodeURIComponent(match[1] ?? "");
     const page = state.statusPages.find((p) => p.slug === slug);
-    if (page === undefined || state.statusPageApiStatus !== 200) {
-      res.statusCode = page === undefined ? 404 : state.statusPageApiStatus;
-      res.end(JSON.stringify({ status: "fail", msg: "Not Found" }));
-      return;
+    let status = state.statusPageApiStatus;
+    // statusPageApiFailAfter fails the requests after the first N
+    if (
+      status === 200 &&
+      state.statusPageApiFailAfter > 0 &&
+      state.apiRequests.length > state.statusPageApiFailAfter
+    ) {
+      status = 500;
     }
-    if (state.statusPageApiBody !== undefined) {
-      res.end(JSON.stringify(state.statusPageApiBody));
-      return;
-    }
-    const incident = state.incidents.find(
-      (i) => i.statusPageId === page.id && i.pin !== false && i.active !== false,
-    );
-    // toPublicJSON drops id and domainNameList
-    const config = structuredClone(page) as Record<string, unknown>;
-    delete config.id;
-    delete config.domainNameList;
-    res.end(
-      JSON.stringify({
+    let body: string;
+    if (page === undefined || status !== 200) {
+      status = page === undefined ? 404 : status;
+      body = JSON.stringify({ status: "fail", msg: "Not Found" });
+    } else if (state.statusPageApiBody !== undefined) {
+      body = JSON.stringify(state.statusPageApiBody);
+    } else {
+      const incident = state.incidents.find(
+        (i) => i.statusPageId === page.id && i.pin !== false && i.active !== false,
+      );
+      // toPublicJSON drops id and domainNameList
+      const config = structuredClone(page) as Record<string, unknown>;
+      delete config.id;
+      delete config.domainNameList;
+      body = JSON.stringify({
         config,
         incident: incident === undefined ? null : incidentJSON(incident),
         publicGroupList: state.statusPageGroups[page.id] ?? [],
         maintenanceList: [],
-      }),
-    );
+      });
+    }
+    apiCache.set(url, { status, body });
+    res.statusCode = status;
+    res.end(body);
   });
 
   await new Promise<void>((r) => http.listen(0, "127.0.0.1", r));

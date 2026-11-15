@@ -1,5 +1,5 @@
 import { Option, type Command } from "commander";
-import { fail, printJson, readJsonFile, socketTimeoutMs } from "../lib.ts";
+import { CliError, fail, printJson, readJsonFile, socketTimeoutMs } from "../lib.ts";
 import { connect, type KumaSession, type StatusPageRow } from "../kuma.ts";
 
 // The six styles the StatusPage.vue incident picker offers; createIncident
@@ -59,7 +59,6 @@ function statusPageBySlug(s: KumaSession, slug: string): StatusPageRow | undefin
 
 function parseAddSlug(value: string): string {
   const slug = value.trim().toLowerCase();
-  if (slug === "") fail(2, "--slug must not be empty");
   if (!SLUG_PATTERN.test(slug)) {
     fail(2, `--slug must match ^[a-z0-9]+(?:-[a-z0-9]+)*$, got "${value}"`);
   }
@@ -93,14 +92,18 @@ function redactUrl(url: string): string {
 // GET /api/status-page/:slug is the unauthenticated public route; it answers
 // { config, incident, publicGroupList, maintenanceList } and the CLI merges
 // the socket config with the public groups and the pinned incident. Kuma
-// caches the route for 5 minutes (apicache), so a just-posted incident can
-// be missing from the answer.
+// caches the route for 5 minutes (apicache) keyed on the full URL including
+// the query string; saveStatusPage and deleteMonitor clear it, but
+// deleteStatusPage, addStatusPage, postIncident and unpinIncident do not —
+// so a bare URL can still serve a body cached before a delete/re-add. The
+// unique query makes every read a cache miss.
 async function fetchPublicStatusPage(
   s: KumaSession,
   slug: string,
 ): Promise<{ publicGroupList: unknown[]; incident: unknown }> {
   // slug is one from statusPageList, so Kuma's checkSlug charset needs no encoding
-  const url = `${s.url}/api/status-page/${slug}`;
+  const cacheBust = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+  const url = `${s.url}/api/status-page/${slug}?_=${cacheBust}`;
   const shown = redactUrl(url);
   let res: Response;
   try {
@@ -189,14 +192,14 @@ function parseSaveFile(file: Record<string, unknown>): SaveFile {
     // addStatusPage lower-cases too, so stored slugs are always lowercase;
     // checkSlug's A-Z acceptance is covered by lower-casing first
     const slug = file.slug.trim().toLowerCase();
-    if (slug === "") fail(2, '"slug" must not be empty');
     if (!SLUG_PATTERN.test(slug)) {
       fail(2, `"slug" must match ^[a-z0-9]+(?:-[a-z0-9]+)*$, got "${file.slug}"`);
     }
     overrides.slug = slug;
   }
   if (file.title !== undefined) {
-    if (typeof file.title !== "string" || file.title === "") {
+    // same rule as add: non-empty after trim; the value itself is kept as given
+    if (typeof file.title !== "string" || file.title.trim() === "") {
       fail(2, '"title" must be a non-empty string');
     }
     overrides.title = file.title;
@@ -372,11 +375,21 @@ export function registerStatusPages(program: Command): void {
       const res = await s.request("saveStatusPage", [slug, merged, file.logo ?? icon, groups]);
       const savedGroups = res?.publicGroupList;
       if (!Array.isArray(savedGroups)) fail(70, "unexpected saveStatusPage response");
-      // printed like `get`, under the new slug when it changed; the save
-      // response carries the groups with their (new) ids
-      const config = await fetchStatusPageConfig(s, newSlug);
-      const { incident } = await fetchPublicStatusPage(s, newSlug);
-      printJson({ ...config, publicGroupList: savedGroups, incident });
+      // printed like `get`, under the new slug when it changed. The save
+      // already happened, so a failed read-back degrades to the sent config
+      // and the response's groups (which carry the new ids) plus a warning
+      // on stderr, rather than a nonzero exit
+      try {
+        const config = await fetchStatusPageConfig(s, newSlug);
+        const { publicGroupList, incident } = await fetchPublicStatusPage(s, newSlug);
+        printJson({ ...config, publicGroupList, incident });
+      } catch (e) {
+        if (!(e instanceof CliError)) throw e;
+        printJson({ ...merged, publicGroupList: savedGroups, incident: null });
+        console.error(
+          `warning: status page ${newSlug} was saved, but reading it back failed: ${e.message}`,
+        );
+      }
     });
 
   statusPages

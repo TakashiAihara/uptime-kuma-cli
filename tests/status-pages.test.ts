@@ -140,6 +140,13 @@ describe("status-pages", () => {
       expect(callsOf("getStatusPage")).toHaveLength(1);
     });
 
+    test("the error body's msg appears in the HTTP failure", async () => {
+      kuma.state.statusPageApiStatus = 500;
+      const r = await run(sb, ["status-pages", "get", "status"], creds(kuma.url));
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("Not Found");
+    });
+
     test("the URL in the error carries no userinfo", async () => {
       kuma.state.statusPageApiStatus = 500;
       const withUser = kuma.url.replace("://", "://proxyuser:proxy-secret@");
@@ -393,6 +400,17 @@ describe("status-pages", () => {
       expect(r.stderr).toContain("slug is not found");
     });
 
+    test("postIncident ok:true without an incident exits 70", async () => {
+      kuma.state.postIncidentResult = { ok: true };
+      const r = await run(
+        sb,
+        ["status-pages", "incident", "status", "--title", "t", "--content", "c"],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(70);
+      expect(r.stderr).toContain("unexpected postIncident response");
+    });
+
     test("posting unpins the page's previous incidents only", async () => {
       kuma.state.incidents = [
         { id: 1, statusPageId: 7, title: "Old", pin: true, active: true },
@@ -486,10 +504,18 @@ describe("status-pages", () => {
       expect(j.title).toBe("Renamed page");
       expect(j.slug).toBe("status");
       expect(j.incident).toBeNull();
-      // the save response's groups carry the new ids
+      // printed like `get`: the fresh public route's groups carry the new ids
       expect(j.publicGroupList).toEqual([
-        { name: "Core", monitorList: [{ id: 5, sendUrl: true }, { id: 6 }], id: 1 },
-        { name: "Edge", monitorList: [], id: 2 },
+        {
+          id: 1,
+          name: "Core",
+          weight: 1,
+          monitorList: [
+            { id: 5, name: "web", sendUrl: true, type: "http", url: "https://example.com" },
+            { id: 6, name: "api", sendUrl: 0, type: "http" },
+          ],
+        },
+        { id: 2, name: "Edge", weight: 2, monitorList: [] },
       ]);
       expect(kuma.state.statusPages.find((p) => p.id === 7)!.title).toBe("Renamed page");
     });
@@ -571,6 +597,11 @@ describe("status-pages", () => {
         creds(kuma.url),
       );
       expect(r.code).toBe(0);
+      // the wire carries only what saveStatusPage reads
+      const sent = callsOf("saveStatusPage")[0]!.args;
+      expect(sent[0]).toBe("status");
+      expect(sent[2]).toBe("/icon.svg");
+      expect(sent[3]).toEqual([{ id: 3, name: "Core", monitorList: [{ id: 6, sendUrl: true }] }]);
       expect(kuma.state.statusPageGroups[7]).toEqual([
         {
           id: 3,
@@ -587,6 +618,7 @@ describe("status-pages", () => {
           ],
         },
       ]);
+      expect(r.json().publicGroupList).toEqual(kuma.state.statusPageGroups[7]);
     });
 
     test("a monitor id that does not exist exits 1", async () => {
@@ -709,6 +741,7 @@ describe("status-pages", () => {
       ["a bad slug", { slug: "a_b" }],
       ["a blank slug", { slug: "   " }],
       ["an empty title", { title: "" }],
+      ["a blank title", { title: "   " }],
       ["a numeric title", { title: 5 }],
       ["a bad theme", { theme: "neon" }],
       ["a numeric theme", { theme: 1 }],
@@ -748,6 +781,94 @@ describe("status-pages", () => {
       );
       expect(r.code).toBe(2);
       expect(kuma.calls).toHaveLength(0);
+    });
+
+    test.each(["description", "footerText", "customCSS", "googleAnalyticsId"])(
+      "%s null in the file is sent as null",
+      async (key) => {
+        // the fetched value is non-null so the null override is observable
+        kuma.state.statusPages.find((p) => p.id === 7)![key] = "old-value";
+        const f = writeJson("page.json", { [key]: null });
+        const r = await run(
+          sb,
+          ["status-pages", "save", "status", "--config-file", f],
+          creds(kuma.url),
+        );
+        expect(r.code).toBe(0);
+        const config = callsOf("saveStatusPage")[0]!.args[1] as Record<string, unknown>;
+        expect(config[key]).toBeNull();
+      },
+    );
+
+    test("delete and re-add of the same slug reads fresh groups", async () => {
+      // the first save caches the page's groups on the public route; delete
+      // and re-add do not clear Kuma's apicache, so only the cache-busting
+      // query keeps the second save from seeing the deleted page's groups
+      const f1 = writeJson("page1.json", {
+        publicGroupList: [{ name: "Core", monitorList: [{ id: 5 }] }],
+      });
+      const s1 = await run(
+        sb,
+        ["status-pages", "save", "status", "--config-file", f1],
+        creds(kuma.url),
+      );
+      expect(s1.code).toBe(0);
+      const del = await run(sb, ["status-pages", "delete", "status", "--yes"], creds(kuma.url));
+      expect(del.code).toBe(0);
+      const add = await run(
+        sb,
+        ["status-pages", "add", "--slug", "status", "--title", "Status page"],
+        creds(kuma.url),
+      );
+      expect(add.code).toBe(0);
+      // AUTOINCREMENT: the re-added page does not reuse the deleted id
+      expect(kuma.state.statusPages.find((p) => p.slug === "status")!.id).not.toBe(7);
+
+      const f2 = writeJson("page2.json", { title: "Renamed again" });
+      const s2 = await run(
+        sb,
+        ["status-pages", "save", "status", "--config-file", f2],
+        creds(kuma.url),
+      );
+      expect(s2.code).toBe(0);
+      expect(s2.json().title).toBe("Renamed again");
+      expect(s2.json().publicGroupList).toEqual([]);
+      // every public-route read carried the cache-busting query
+      expect(kuma.state.apiRequests.length).toBeGreaterThan(0);
+      expect(kuma.state.apiRequests.every((u) => u.includes("?_="))).toBe(true);
+    });
+
+    test("a failed getStatusPage read-back exits 0 with a warning", async () => {
+      // the first getStatusPage (pre-save) passes, the read-back fails
+      kuma.state.fail.getStatusPage = [null, "Read-back failed"];
+      const f = writeJson("page.json", { title: "x" });
+      const r = await run(
+        sb,
+        ["status-pages", "save", "status", "--config-file", f],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(0);
+      const j = r.json();
+      expect(j.title).toBe("x");
+      expect(j.slug).toBe("status");
+      expect(j.publicGroupList).toEqual([]);
+      expect(j.incident).toBeNull();
+      expect(r.stderr).toContain("Read-back failed");
+    });
+
+    test("a failed public-route read-back exits 0 with a warning", async () => {
+      // the first /api/status-page request (pre-save) passes, the read-back fails
+      kuma.state.statusPageApiFailAfter = 1;
+      const f = writeJson("page.json", { title: "x" });
+      const r = await run(
+        sb,
+        ["status-pages", "save", "status", "--config-file", f],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(0);
+      expect(r.json().title).toBe("x");
+      expect(r.stderr).toContain("/api/status-page/status");
+      expect(r.stderr).toContain("500");
     });
   });
 
