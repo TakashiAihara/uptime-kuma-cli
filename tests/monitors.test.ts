@@ -85,6 +85,7 @@ describe("monitors list", () => {
       interval: 60,
       parent: null,
       notificationIDList: [4],
+      tags: [],
     });
     expect(out[1].notificationIDList).toEqual([3, 5]);
   });
@@ -4624,5 +4625,524 @@ describe("monitors delete", () => {
     expect(r.code).toBe(1);
     expect(r.stderr).toContain("cannot delete");
     expect(kuma.state.monitors.map((m) => m.id).sort((a, b) => a - b)).toEqual([2, 7, 9]);
+  });
+});
+
+describe("monitor tags", () => {
+  // monitor_tag⋈tag join rows as monitor.toJSON sends them
+  const mt = (
+    id: number,
+    monitor_id: number,
+    tag_id: number,
+    value: string | null,
+    name: string,
+  ) => ({ id, monitor_id, tag_id, value, name, color: "#ff0000" });
+
+  beforeEach(() => {
+    kuma.state.tags = [
+      { id: 5, name: "prod", color: "#ff0000" },
+      { id: 6, name: "staging", color: "#00ff00" },
+      { id: 7, name: "edge", color: "#0000ff" },
+    ];
+    kuma.state.monitors.find((m) => m.id === 7)!.tags = [
+      mt(1, 7, 5, "", "prod"),
+      mt(2, 7, 6, null, "staging"),
+    ];
+    kuma.state.monitors.find((m) => m.id === 9)!.tags = [
+      mt(3, 9, 5, "prod", "prod"),
+      mt(4, 9, 5, "old", "prod"),
+      mt(5, 9, 7, "eu", "edge"),
+    ];
+  });
+
+  const tagsOf = (id: number) =>
+    (kuma.state.monitors.find((m) => m.id === id)!.tags ?? []) as any[];
+
+  describe("monitors tag", () => {
+    test("attaches a tag with the default empty value", async () => {
+      const r = await run(sb, ["monitors", "tag", "2", "--tag", "5"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      expect(r.json()).toEqual({ id: 2, tagId: 5, value: "" });
+      expect(kuma.calls.find((c) => c.event === "addMonitorTag")!.args).toEqual([5, 2, ""]);
+      expect(tagsOf(2)).toHaveLength(1);
+      expect(tagsOf(2)[0]).toMatchObject({ tag_id: 5, value: "", name: "prod" });
+    });
+
+    test("attaches a tag with --value", async () => {
+      const r = await run(
+        sb,
+        ["monitors", "tag", "2", "--tag", "5", "--value", "prod"],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(0);
+      expect(r.json()).toEqual({ id: 2, tagId: 5, value: "prod" });
+      expect(kuma.calls.find((c) => c.event === "addMonitorTag")!.args).toEqual([5, 2, "prod"]);
+    });
+
+    test("the same tag+value exits 3 without sending addMonitorTag", async () => {
+      const r = await run(
+        sb,
+        ["monitors", "tag", "9", "--tag", "5", "--value", "prod"],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(3);
+      expect(r.json()).toEqual({ id: 9, tagId: 5, value: "prod", skipped: true });
+      expect(kuma.calls.find((c) => c.event === "addMonitorTag")).toBeUndefined();
+    });
+
+    test("the same tag with a different value is attached", async () => {
+      const r = await run(
+        sb,
+        ["monitors", "tag", "9", "--tag", "5", "--value", "new"],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(0);
+      expect(kuma.calls.find((c) => c.event === "addMonitorTag")).toBeDefined();
+    });
+
+    test("a stored null value does not match the default empty value", async () => {
+      const r = await run(sb, ["monitors", "tag", "7", "--tag", "6"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      expect(kuma.calls.find((c) => c.event === "addMonitorTag")!.args).toEqual([6, 7, ""]);
+    });
+
+    test("an unknown monitor exits 1", async () => {
+      const r = await run(sb, ["monitors", "tag", "404", "--tag", "5"], creds(kuma.url));
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("monitor 404 not found");
+      expect(kuma.calls.find((c) => c.event === "addMonitorTag")).toBeUndefined();
+    });
+
+    test("an unknown tag exits 1 without sending addMonitorTag", async () => {
+      const r = await run(sb, ["monitors", "tag", "2", "--tag", "99"], creds(kuma.url));
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("tag 99 not found");
+      expect(kuma.calls.find((c) => c.event === "addMonitorTag")).toBeUndefined();
+    });
+
+    test("Kuma's ok:false exits 1 with its message", async () => {
+      kuma.state.fail.addMonitorTag = "FOREIGN KEY constraint failed";
+      const r = await run(sb, ["monitors", "tag", "2", "--tag", "5"], creds(kuma.url));
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("FOREIGN KEY constraint failed");
+      expect(tagsOf(2)).toHaveLength(0);
+    });
+
+    test("an invalid --tag exits 2 before connecting", async () => {
+      const r = await run(sb, ["monitors", "tag", "2", "--tag", "abc"], creds(kuma.url));
+      expect(r.code).toBe(2);
+      expect(kuma.calls).toHaveLength(0);
+    });
+
+    test("an invalid monitor id exits 2 before connecting", async () => {
+      const r = await run(sb, ["monitors", "tag", "abc", "--tag", "5"], creds(kuma.url));
+      expect(r.code).toBe(2);
+      expect(kuma.calls).toHaveLength(0);
+    });
+  });
+
+  describe("monitors untag", () => {
+    test("removes the matching tag+value", async () => {
+      const r = await run(sb, ["monitors", "untag", "7", "--tag", "5"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      expect(r.json()).toEqual({ id: 7, tagId: 5, value: "", removed: true });
+      expect(kuma.calls.find((c) => c.event === "deleteMonitorTag")!.args).toEqual([5, 7, ""]);
+      expect(tagsOf(7).map((t) => t.tag_id)).toEqual([6]);
+    });
+
+    test("removes only the row with the given value", async () => {
+      const r = await run(
+        sb,
+        ["monitors", "untag", "9", "--tag", "5", "--value", "prod"],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(0);
+      expect(r.json()).toEqual({ id: 9, tagId: 5, value: "prod", removed: true });
+      expect(
+        tagsOf(9)
+          .filter((t) => t.tag_id === 5)
+          .map((t) => t.value),
+      ).toEqual(["old"]);
+    });
+
+    test("a tag+value that is not attached exits 1", async () => {
+      const r = await run(
+        sb,
+        ["monitors", "untag", "9", "--tag", "5", "--value", "missing"],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(1);
+      expect(kuma.calls.find((c) => c.event === "deleteMonitorTag")).toBeUndefined();
+    });
+
+    test("a monitor without the tag exits 1", async () => {
+      const r = await run(sb, ["monitors", "untag", "2", "--tag", "5"], creds(kuma.url));
+      expect(r.code).toBe(1);
+      expect(kuma.calls.find((c) => c.event === "deleteMonitorTag")).toBeUndefined();
+    });
+
+    test("a stored null value exits 1 because deleteMonitorTag cannot match it", async () => {
+      const r = await run(sb, ["monitors", "untag", "7", "--tag", "6"], creds(kuma.url));
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("null");
+      expect(kuma.calls.find((c) => c.event === "deleteMonitorTag")).toBeUndefined();
+    });
+
+    test("an explicit non-empty --value against a null row gets the generic message", async () => {
+      const r = await run(
+        sb,
+        ["monitors", "untag", "7", "--tag", "6", "--value", "prod"],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain('does not have tag 6 with value "prod"');
+      expect(r.stderr).not.toContain("null value");
+      expect(kuma.calls.find((c) => c.event === "deleteMonitorTag")).toBeUndefined();
+    });
+
+    test("an unknown monitor exits 1", async () => {
+      const r = await run(sb, ["monitors", "untag", "404", "--tag", "5"], creds(kuma.url));
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("monitor 404 not found");
+      expect(kuma.calls.find((c) => c.event === "deleteMonitorTag")).toBeUndefined();
+    });
+
+    test("an invalid id exits 2 before connecting", async () => {
+      const r = await run(sb, ["monitors", "untag", "abc", "--tag", "5"], creds(kuma.url));
+      expect(r.code).toBe(2);
+      expect(kuma.calls).toHaveLength(0);
+    });
+  });
+
+  describe("monitors retag", () => {
+    test("sets the value on the tag's row and leaves other tags alone", async () => {
+      const r = await run(
+        sb,
+        ["monitors", "retag", "7", "--tag", "5", "--value", "z"],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(0);
+      expect(r.json()).toEqual({ id: 7, tagId: 5, value: "z" });
+      expect(kuma.calls.find((c) => c.event === "editMonitorTag")!.args).toEqual([5, 7, "z"]);
+      const rows = tagsOf(7);
+      expect(rows.find((t) => t.tag_id === 5)!.value).toBe("z");
+      expect(rows.find((t) => t.tag_id === 6)!.value).toBeNull();
+    });
+
+    test("a tag attached more than once exits 1 and points at untag + tag", async () => {
+      const r = await run(
+        sb,
+        ["monitors", "retag", "9", "--tag", "5", "--value", "z"],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("untag + tag");
+      expect(kuma.calls.find((c) => c.event === "editMonitorTag")).toBeUndefined();
+      expect(
+        tagsOf(9)
+          .filter((t) => t.tag_id === 5)
+          .map((t) => t.value),
+      ).toEqual(["prod", "old"]);
+    });
+
+    test("a monitor without the tag exits 1 without sending editMonitorTag", async () => {
+      const r = await run(
+        sb,
+        ["monitors", "retag", "2", "--tag", "5", "--value", "x"],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("does not have tag 5");
+      expect(kuma.calls.find((c) => c.event === "editMonitorTag")).toBeUndefined();
+    });
+
+    test("an unknown monitor exits 1", async () => {
+      const r = await run(
+        sb,
+        ["monitors", "retag", "404", "--tag", "5", "--value", "x"],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(1);
+      expect(kuma.calls.find((c) => c.event === "editMonitorTag")).toBeUndefined();
+    });
+
+    test("without --value exits 2 before connecting", async () => {
+      const r = await run(sb, ["monitors", "retag", "9", "--tag", "5"], creds(kuma.url));
+      expect(r.code).toBe(2);
+      expect(kuma.calls).toHaveLength(0);
+    });
+  });
+
+  describe("monitors list --tag / get tags", () => {
+    test("list --tag keeps only monitors with that exact tag name", async () => {
+      const r = await run(sb, ["monitors", "list", "--tag", "prod"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      expect(r.json().map((m: any) => m.id)).toEqual([7, 9]);
+    });
+
+    test("list --tag is case-sensitive and matches no partial names", async () => {
+      for (const name of ["Prod", "pro"]) {
+        const r = await run(sb, ["monitors", "list", "--tag", name], creds(kuma.url));
+        expect(r.code).toBe(0);
+        expect(r.json()).toEqual([]);
+      }
+    });
+
+    test("list --tag combines with --name", async () => {
+      const both = await run(
+        sb,
+        ["monitors", "list", "--name", "TAB", "--tag", "prod"],
+        creds(kuma.url),
+      );
+      expect(both.json().map((m: any) => m.id)).toEqual([7]);
+      const none = await run(
+        sb,
+        ["monitors", "list", "--name", "dav", "--tag", "prod"],
+        creds(kuma.url),
+      );
+      expect(none.json()).toEqual([]);
+    });
+
+    test("list rows carry tags as { tagId, name, value }", async () => {
+      const r = await run(sb, ["monitors", "list", "--tag", "staging"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      expect(r.json()).toEqual([
+        {
+          id: 7,
+          name: "Taba",
+          type: "http",
+          active: true,
+          url: "https://Taba.example.com",
+          hostname: null,
+          port: null,
+          interval: 60,
+          parent: null,
+          notificationIDList: [3, 5],
+          tags: [
+            { tagId: 5, name: "prod", value: "" },
+            { tagId: 6, name: "staging", value: null },
+          ],
+        },
+      ]);
+    });
+
+    test("get prints the normalized tags in Kuma's tag-name order", async () => {
+      const r = await run(sb, ["monitors", "get", "9"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      expect(r.json().tags).toEqual([
+        { tagId: 7, name: "edge", value: "eu" },
+        { tagId: 5, name: "prod", value: "prod" },
+        { tagId: 5, name: "prod", value: "old" },
+      ]);
+    });
+
+    test("get on a monitor without tags prints an empty array", async () => {
+      const r = await run(sb, ["monitors", "get", "2"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      expect(r.json().tags).toEqual([]);
+    });
+
+    test("edit prints the normalized tags like get", async () => {
+      const r = await run(sb, ["monitors", "edit", "7", "--set", "maxretries=1"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      expect(r.json().tags).toEqual([
+        { tagId: 5, name: "prod", value: "" },
+        { tagId: 6, name: "staging", value: null },
+      ]);
+    });
+  });
+
+  describe("monitors add --tag", () => {
+    test("attaches each --tag after add and prints them", async () => {
+      const r = await run(
+        sb,
+        [
+          "monitors",
+          "add",
+          "--type",
+          "push",
+          "--name",
+          "tagged",
+          "--paused",
+          "--tag",
+          "5:prod",
+          "--tag",
+          "6",
+        ],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(0);
+      const out = r.json();
+      const id = out.id as number;
+      expect(out.tags).toEqual([
+        { tagId: 5, name: "prod", value: "prod" },
+        { tagId: 6, name: "staging", value: "" },
+      ]);
+      const calls = kuma.calls.filter((c) => c.event === "addMonitorTag");
+      expect(calls.map((c) => c.args)).toEqual([
+        [5, id, "prod"],
+        [6, id, ""],
+      ]);
+      const stored = kuma.state.monitors.find((m) => m.id === id)!;
+      expect((stored.tags as any[]).map((t) => [t.tag_id, t.value])).toEqual([
+        [5, "prod"],
+        [6, ""],
+      ]);
+    });
+
+    test("an unknown tag id exits 1 before add is sent", async () => {
+      const r = await run(
+        sb,
+        ["monitors", "add", "--type", "push", "--name", "tagged2", "--tag", "99:x"],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("tag 99 not found");
+      expect(addCalls()).toHaveLength(0);
+      expect(kuma.calls.find((c) => c.event === "addMonitorTag")).toBeUndefined();
+    });
+
+    test.each(["abc", ":prod", "x:1"])(
+      "a malformed --tag %p exits 2 before connecting",
+      async (spec) => {
+        const r = await run(
+          sb,
+          ["monitors", "add", "--type", "push", "--name", "tagged3", "--tag", spec],
+          creds(kuma.url),
+        );
+        expect(r.code).toBe(2);
+        expect(kuma.calls).toHaveLength(0);
+      },
+    );
+
+    test("a failed addMonitorTag exits 1 and prints the tags attached so far", async () => {
+      kuma.state.fail.addMonitorTag = "FOREIGN KEY constraint failed";
+      const r = await run(
+        sb,
+        [
+          "monitors",
+          "add",
+          "--type",
+          "push",
+          "--name",
+          "tagged4",
+          "--paused",
+          "--tag",
+          "5:a",
+          "--tag",
+          "6:b",
+        ],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(1);
+      const out = r.json();
+      expect(out.name).toBe("tagged4");
+      expect(out.tags).toEqual([]);
+      // the monitor was created even though tagging failed
+      expect(kuma.state.monitors.find((m) => m.id === out.id)).toBeDefined();
+    });
+
+    test("the same-name skip wins over --tag", async () => {
+      const r = await run(
+        sb,
+        ["monitors", "add", "--type", "push", "--name", "Taba", "--tag", "5:x"],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(3);
+      expect(r.json()).toEqual({ id: 7, name: "Taba", skipped: true });
+      expect(addCalls()).toHaveLength(0);
+      expect(kuma.calls.find((c) => c.event === "addMonitorTag")).toBeUndefined();
+    });
+
+    test("a --tag value may contain colons", async () => {
+      const r = await run(
+        sb,
+        ["monitors", "add", "--type", "push", "--name", "colon", "--paused", "--tag", "5:a:b"],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(0);
+      const out = r.json();
+      expect(out.tags).toEqual([{ tagId: 5, name: "prod", value: "a:b" }]);
+      expect(kuma.calls.find((c) => c.event === "addMonitorTag")!.args).toEqual([5, out.id, "a:b"]);
+    });
+
+    test("the same tag id and value twice exits 2 before connecting", async () => {
+      const r = await run(
+        sb,
+        ["monitors", "add", "--type", "push", "--name", "dup", "--tag", "5:a", "--tag", "5:a"],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("duplicate --tag 5:a");
+      expect(kuma.calls).toHaveLength(0);
+    });
+
+    test("the same tag id with different values is allowed", async () => {
+      const r = await run(
+        sb,
+        [
+          "monitors",
+          "add",
+          "--type",
+          "push",
+          "--name",
+          "twice",
+          "--paused",
+          "--tag",
+          "5:a",
+          "--tag",
+          "5:b",
+        ],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(0);
+      expect(kuma.calls.filter((c) => c.event === "addMonitorTag")).toHaveLength(2);
+    });
+
+    test("a failed second attach exits 1, prints the first tag and names the failure", async () => {
+      kuma.state.fail.addMonitorTag = [null, "FOREIGN KEY constraint failed"];
+      const r = await run(
+        sb,
+        [
+          "monitors",
+          "add",
+          "--type",
+          "push",
+          "--name",
+          "partial",
+          "--paused",
+          "--tag",
+          "5:a",
+          "--tag",
+          "6:b",
+          "--tag",
+          "7:c",
+        ],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(1);
+      const out = r.json();
+      expect(out.tags).toEqual([{ tagId: 5, name: "prod", value: "a" }]);
+      const calls = kuma.calls.filter((c) => c.event === "addMonitorTag");
+      expect(calls).toHaveLength(2);
+      expect(calls[1]!.args).toEqual([6, out.id, "b"]);
+      expect(r.stderr).toContain("tag 6");
+      expect(r.stderr).toContain("FOREIGN KEY constraint failed");
+      expect(r.stderr).toContain("created");
+      // the monitor exists even though the third tag was never sent
+      expect(kuma.state.monitors.find((m) => m.id === out.id)).toBeDefined();
+    });
+
+    test("a disconnect during attach exits 2 like every other timeout", async () => {
+      kuma.state.disconnectOn = "addMonitorTag";
+      const r = await run(
+        sb,
+        ["monitors", "add", "--type", "push", "--name", "dc", "--paused", "--tag", "5:a"],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.json().name).toBe("dc");
+      expect(kuma.state.monitors.find((m) => m.name === "dc")).toBeDefined();
+    });
   });
 });
