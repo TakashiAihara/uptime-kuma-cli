@@ -47,6 +47,22 @@ export type StatusPageRow = {
   slug?: string;
 } & Record<string, unknown>;
 
+// Incident rows behind postIncident/unpinIncident and the public
+// /api/status-page/:slug route: the Incident.toPublicJSON shape plus the
+// owning status page id. Every field but id/statusPageId is optional so
+// fixtures can stay small; missing ones fall back to the column defaults.
+export type IncidentRow = {
+  id: number;
+  statusPageId: number;
+  title?: string;
+  content?: string;
+  style?: string;
+  pin?: boolean;
+  active?: boolean;
+  createdDate?: string | null;
+  lastUpdatedDate?: string | null;
+};
+
 export type Call = { event: string; args: unknown[] };
 export type TagRow = { id: number; name: string; color: string };
 // monitor.toJSON sends monitor.tags as the monitor_tag⋈tag join:
@@ -94,6 +110,26 @@ export type FakeState = {
   dockerHosts: { id: number }[];
   // rows pushed as statusPageList after login (StatusPage.toJSON values)
   statusPages: StatusPageRow[];
+  // incident rows; the public route shows the pinned+active one per page
+  incidents: IncidentRow[];
+  // publicGroupList rows the /api/status-page/:slug route returns,
+  // keyed by status page id (the fake has no group model)
+  statusPageGroups: Record<number, Record<string, unknown>[]>;
+  // non-200 status the /api/status-page/:slug route answers with
+  statusPageApiStatus: number;
+  // drops the TCP connection instead of answering, like a network failure
+  statusPageApiDrop: boolean;
+  // verbatim body the route answers with; undefined computes it from state
+  statusPageApiBody: unknown;
+  // the route caches per req.url for 5 minutes like apicache; requests after
+  // the first N answer 500 (0 disables) so tests can fail a later read
+  statusPageApiFailAfter: number;
+  // answers the requests after the first N with a body missing publicGroupList
+  statusPageApiMalformedAfter: number;
+  // req.url values the route saw, in order
+  apiRequests: string[];
+  // postIncident answer override; null uses the stored-incident answer
+  postIncidentResult: Record<string, unknown> | null;
   // rows pushed as maintenanceList after login and returned by getMaintenance
   maintenances: MaintenanceRow[];
   // maintenance_id -> attached monitor ids / status page ids (the
@@ -131,6 +167,16 @@ export type FakeState = {
 export type FakeKuma = { url: string; calls: Call[]; state: FakeState; close: () => Promise<void> };
 
 const now = () => new Date().toISOString().replace("T", " ").slice(0, 19);
+
+// checkSlug of server/socket-handlers/status-page-socket-handler.js (1.23.17):
+// addStatusPage lower-cases the slug first, so the accepted set is lowercase
+// words joined by single hyphens
+const checkStatusPageSlug = (slug: string): void => {
+  if (typeof slug !== "string") throw new Error("Slug must be string");
+  const s = slug.trim();
+  if (!s) throw new Error("Slug cannot be empty");
+  if (!/^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$/.test(s)) throw new Error("Invalid Slug");
+};
 
 // Kuma 1.23 runs redbean frozen, so `add` with a key that is not a monitor column fails.
 // The set is the monitor columns: monitorDefaults of src/pages/EditMonitor.vue (1.23.17)
@@ -224,6 +270,15 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     tags: [],
     dockerHosts: [],
     statusPages: [],
+    incidents: [],
+    statusPageGroups: {},
+    statusPageApiStatus: 200,
+    statusPageApiDrop: false,
+    statusPageApiBody: undefined,
+    statusPageApiFailAfter: 0,
+    statusPageApiMalformedAfter: 0,
+    apiRequests: [],
+    postIncidentResult: null,
     maintenances: [],
     maintenanceMonitors: {},
     maintenanceStatusPages: {},
@@ -244,6 +299,12 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
   const calls: Call[] = [];
   const http = createServer();
   const io = new Server(http);
+  // apicache of the /api/status-page/:slug route: keyed by req.url (path +
+  // query); in Kuma several events call apicache.clear() and the fake models
+  // the two relevant here — saveStatusPage and deleteMonitor
+  const apiCache = new Map<string, { status: number; body: string }>();
+  // status_page.id is AUTOINCREMENT: deleted ids are never reused
+  let nextStatusPageId = Math.max(0, ...state.statusPages.map((p) => p.id));
 
   // monitor.toJSON always carries tags (the monitor_tag⋈tag join, [] when none)
   const tagsOf = (m: Monitor): MonitorTagRow[] =>
@@ -343,6 +404,18 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
 
   const maintenanceListJSON = () =>
     Object.fromEntries(state.maintenances.map((m) => [String(m.id), maintenanceJSON(m)]));
+
+  // Incident.toPublicJSON of Kuma 1.23.17; fields a fixture leaves out fall
+  // back to the column defaults (style 'warning', pin/active 1)
+  const incidentJSON = (i: IncidentRow): Record<string, unknown> => ({
+    id: i.id,
+    style: i.style ?? "warning",
+    title: i.title ?? "",
+    content: i.content ?? "",
+    pin: i.pin ?? true,
+    createdDate: i.createdDate ?? null,
+    lastUpdatedDate: i.lastUpdatedDate ?? null,
+  });
 
   // Maintenance.jsonToBean of Kuma 1.23.17: assigns the listed fields
   // unconditionally, dateRange into start/end dates, and the schedule fields
@@ -554,6 +627,8 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     // Kuma 1.23 does not check that the id exists: the DELETE affects 0 rows and still answers ok
     handle("deleteMonitor", (id: number) => {
       state.monitors = state.monitors.filter((m) => m.id !== Number(id));
+      // deleteMonitor calls apicache.clear() so cached public pages drop the monitor
+      apiCache.clear();
       socket.emit("monitorList", monitorList());
       return { ok: true, msg: "Deleted Successfully." };
     });
@@ -832,6 +907,294 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
       }
       return { ok: true, msg: "Deleted Successfully." };
     });
+
+    // status-page-socket-handler.js of Kuma 1.23.17. None of these events
+    // re-pushes statusPageList — sendStatusPageList only runs in afterLogin.
+    handle("getStatusPage", (slug: string) => {
+      const page = state.statusPages.find((p) => p.slug === slug);
+      // R.findOne returns null and the handler throws "No slug?"
+      if (page === undefined) throw new Error("No slug?");
+      return { ok: true, config: structuredClone(page) };
+    });
+
+    handle("addStatusPage", (title: string, slug: string) => {
+      const t = title?.trim();
+      const s = slug?.trim();
+      if (!t || !s) throw new Error("Please input all fields");
+      if (typeof s !== "string") throw new Error("Slug -Accept string only");
+      const normalized = s.toLowerCase();
+      checkStatusPageSlug(normalized);
+      // status_page.slug has a UNIQUE index (patch-status-page.sql)
+      if (state.statusPages.some((p) => p.slug === normalized)) {
+        throw new Error("UNIQUE constraint failed: status_page.slug");
+      }
+      const id = ++nextStatusPageId;
+      state.statusPages.push({
+        id,
+        slug: normalized,
+        title: t,
+        description: null,
+        // getIcon() maps the empty stored icon to /icon.svg
+        icon: "/icon.svg",
+        theme: "auto",
+        published: true,
+        showTags: false,
+        domainNameList: [],
+        customCSS: null,
+        footerText: null,
+        showPoweredBy: true,
+        googleAnalyticsId: null,
+        showCertificateExpiry: false,
+      });
+      return { ok: true, msg: "OK!" };
+    });
+
+    handle("deleteStatusPage", (slug: string) => {
+      const page = state.statusPages.find((p) => p.slug === slug);
+      // slugToID finds nothing and the handler throws "Status Page is not found"
+      if (page === undefined) throw new Error("Status Page is not found");
+      // incidents and groups are deleted by hand (no cascade FK); cnames cascade
+      state.incidents = state.incidents.filter((i) => i.statusPageId !== page.id);
+      delete state.statusPageGroups[page.id];
+      state.statusPages = state.statusPages.filter((p) => p.id !== page.id);
+      return { ok: true };
+    });
+
+    handle(
+      "postIncident",
+      (
+        slug: string,
+        incident: { id?: number; title?: string; content?: string; style?: string },
+      ) => {
+        if (state.postIncidentResult !== null) return state.postIncidentResult;
+        const page = state.statusPages.find((p) => p.slug === slug);
+        const statusPageID = page?.id;
+        if (!statusPageID) throw new Error("slug is not found");
+        // every incident of the page is unpinned before the new one is stored
+        for (const i of state.incidents) {
+          if (i.statusPageId === statusPageID) i.pin = false;
+        }
+        // an incident.id that does not belong to the page falls through to a
+        // fresh bean, but the date branch still follows incident.id
+        const isEdit = Boolean(incident.id);
+        let row = isEdit
+          ? state.incidents.find(
+              (i) => i.id === Number(incident.id) && i.statusPageId === statusPageID,
+            )
+          : undefined;
+        if (row === undefined) {
+          row = {
+            id: Math.max(0, ...state.incidents.map((i) => i.id)) + 1,
+            statusPageId: statusPageID,
+            active: true,
+          };
+          state.incidents.push(row);
+        }
+        row.title = incident.title;
+        row.content = incident.content;
+        row.style = incident.style;
+        row.pin = true;
+        if (isEdit) {
+          row.lastUpdatedDate = now();
+        } else {
+          row.createdDate = now();
+        }
+        return { ok: true, incident: incidentJSON(row) };
+      },
+    );
+
+    handle("unpinIncident", (slug: string) => {
+      const page = state.statusPages.find((p) => p.slug === slug);
+      // slugToID returns null for an unknown slug and the UPDATE with a NULL
+      // status_page_id matches nothing — the event still answers ok
+      if (page !== undefined) {
+        for (const i of state.incidents) {
+          if (i.statusPageId === page.id) i.pin = false;
+        }
+      }
+      return { ok: true };
+    });
+
+    // saveStatusPage of Kuma 1.23.17: finds the page by the first slug arg,
+    // overwrites every config column it reads (a missing key becomes null),
+    // rewrites the domain names, then replaces the whole public group set —
+    // groups not in the list are deleted. It answers { ok, publicGroupList }
+    // with the sent groups mutated to carry their (new) ids.
+    handle(
+      "saveStatusPage",
+      (
+        slug: string,
+        config: Record<string, any>,
+        imgDataUrl: string,
+        publicGroupList: Record<string, any>[],
+      ) => {
+        const page = state.statusPages.find((p) => p.slug === slug);
+        // R.findOne returns null and the handler throws "No slug?"
+        if (page === undefined) throw new Error("No slug?");
+        checkStatusPageSlug(config?.slug);
+        // imgDataUrl.startsWith crashes on a missing value like the real one;
+        // a data: URL must be PNG, anything else becomes the icon verbatim
+        if (imgDataUrl.startsWith("data:")) {
+          if (!imgDataUrl.startsWith("data:image/png;base64,")) {
+            throw new Error("Only allowed PNG logo.");
+          }
+          // ImageDataURI.outputFile is not faked; only the stored icon matters
+          page.icon = `/upload/logo${page.id}.png?t=${Date.now()}`;
+        } else {
+          // getIcon() reports /icon.svg for a falsy stored icon
+          page.icon = imgDataUrl || "/icon.svg";
+        }
+        // the handler stores config.slug verbatim: checkSlug trims only its
+        // own copy, so surrounding spaces would be stored too
+        page.slug = config.slug;
+        page.title = config.title;
+        page.description = config.description;
+        page.theme = config.theme;
+        page.showTags = config.showTags;
+        page.footerText = config.footerText;
+        page.customCSS = config.customCSS;
+        page.showPoweredBy = config.showPoweredBy;
+        page.showCertificateExpiry = config.showCertificateExpiry;
+        page.googleAnalyticsId = config.googleAnalyticsId;
+        // updateDomainNameList: not an array throws "Invalid array", a
+        // non-string entry "Invalid domain"; blanks are skipped and a domain
+        // moves off the page that had it
+        if (!Array.isArray(config.domainNameList)) throw new Error("Invalid array");
+        for (const d of config.domainNameList) {
+          if (typeof d !== "string") throw new Error("Invalid domain");
+        }
+        const domains = (config.domainNameList as string[]).filter((d) => d.trim() !== "");
+        for (const p of state.statusPages) {
+          if (p.id !== page.id && Array.isArray(p.domainNameList)) {
+            p.domainNameList = p.domainNameList.filter((d) => !domains.includes(d));
+          }
+        }
+        page.domainNameList = domains;
+
+        const kept: Record<string, unknown>[] = [];
+        const existing = state.statusPageGroups[page.id] ?? [];
+        const nextGroupId = () =>
+          Math.max(
+            0,
+            ...Object.values(state.statusPageGroups)
+              .flat()
+              .map((g) => Number(g.id)),
+            ...kept.map((g) => Number(g.id)),
+          ) + 1;
+        let groupOrder = 1;
+        for (const g of publicGroupList) {
+          // findOne hits the DB, which already holds the groups stored earlier
+          // in this same loop, so the lookup pool is old plus just-written
+          const wantedId = g.id ? Number(g.id) : undefined;
+          const found =
+            wantedId === undefined
+              ? undefined
+              : [...existing, ...kept].find((x) => x.id === wantedId);
+          // findOne("id = ? AND public = 1 AND status_page_id = ?") returns
+          // null for another page's group and the handler throws on it
+          if (wantedId !== undefined && found === undefined) {
+            throw new TypeError("Cannot set properties of null (setting 'status_page_id')");
+          }
+          const id = found === undefined ? nextGroupId() : Number(found.id);
+          const monitorList: Record<string, unknown>[] = [];
+          for (const m of g.monitorList) {
+            const mon = state.monitors.find((x) => x.id === Number(m?.id));
+            // monitor_group.monitor_id references monitor(id)
+            if (mon === undefined) throw new Error("FOREIGN KEY constraint failed");
+            // send_url is only written when the key is present; the column
+            // defaults to 0
+            const sendUrl = m?.sendUrl === undefined ? 0 : m.sendUrl;
+            const row: Record<string, unknown> = {
+              id: mon.id,
+              name: mon.name,
+              sendUrl,
+              type: mon.type,
+            };
+            if (sendUrl) row.url = mon.url;
+            monitorList.push(row);
+          }
+          const row = { id, name: g.name, weight: groupOrder++, monitorList };
+          const at = kept.findIndex((x) => x.id === id);
+          if (at >= 0) kept[at] = row;
+          else kept.push(row);
+          // the handler mutates the sent object so the callback carries ids
+          g.id = id;
+        }
+        // groups of this page that are not in the list are deleted
+        state.statusPageGroups[page.id] = kept;
+        // saveStatusPage calls apicache.clear(), as does deleteMonitor; the
+        // fake clears its simulated cache on both
+        apiCache.clear();
+        return { ok: true, publicGroupList };
+      },
+    );
+  });
+
+  // GET /api/status-page/:slug of status-page-router.js: the public status
+  // page data ({ config: toPublicJSON, incident, publicGroupList,
+  // maintenanceList }). The real route is apicache'd for 5 minutes keyed on
+  // req.originalUrl including the query string, and hangs on an unknown
+  // slug; the fake answers 404 instead and caches per req.url, cleared by
+  // the events the fake models that clear it (saveStatusPage, deleteMonitor).
+  // Requests outside this path are left alone so the socket.io handshake is
+  // untouched.
+  http.on("request", (req, res) => {
+    const url = req.url ?? "";
+    const path = url.split("?")[0] ?? "";
+    const match = req.method === "GET" ? /^\/api\/status-page\/([^/]+)$/.exec(path) : null;
+    if (match === null) return;
+    res.setHeader("content-type", "application/json");
+    state.apiRequests.push(url);
+    if (state.statusPageApiDrop) {
+      res.socket?.destroy();
+      return;
+    }
+    const hit = apiCache.get(url);
+    if (hit !== undefined) {
+      res.statusCode = hit.status;
+      res.end(hit.body);
+      return;
+    }
+    const slug = decodeURIComponent(match[1] ?? "");
+    const page = state.statusPages.find((p) => p.slug === slug);
+    let status = state.statusPageApiStatus;
+    // statusPageApiFailAfter fails the requests after the first N
+    if (
+      status === 200 &&
+      state.statusPageApiFailAfter > 0 &&
+      state.apiRequests.length > state.statusPageApiFailAfter
+    ) {
+      status = 500;
+    }
+    let body: string;
+    if (page === undefined || status !== 200) {
+      status = page === undefined ? 404 : status;
+      body = JSON.stringify({ status: "fail", msg: "Not Found" });
+    } else if (
+      state.statusPageApiMalformedAfter > 0 &&
+      state.apiRequests.length > state.statusPageApiMalformedAfter
+    ) {
+      body = JSON.stringify({ config: {}, incident: null });
+    } else if (state.statusPageApiBody !== undefined) {
+      body = JSON.stringify(state.statusPageApiBody);
+    } else {
+      const incident = state.incidents.find(
+        (i) => i.statusPageId === page.id && i.pin !== false && i.active !== false,
+      );
+      // toPublicJSON drops id and domainNameList
+      const config = structuredClone(page) as Record<string, unknown>;
+      delete config.id;
+      delete config.domainNameList;
+      body = JSON.stringify({
+        config,
+        incident: incident === undefined ? null : incidentJSON(incident),
+        publicGroupList: state.statusPageGroups[page.id] ?? [],
+        maintenanceList: [],
+      });
+    }
+    apiCache.set(url, { status, body });
+    res.statusCode = status;
+    res.end(body);
   });
 
   await new Promise<void>((r) => http.listen(0, "127.0.0.1", r));

@@ -1,6 +1,6 @@
 # uptime-kuma-cli
 
-CLI for Uptime Kuma 1.23 over its Socket.IO API: monitors, beats, status changes, notifications, proxies, maintenance windows and tags.
+CLI for Uptime Kuma 1.23 over its Socket.IO API: monitors, beats, status changes, notifications, proxies, maintenance windows, tags and status pages.
 
 Existing CLIs cover monitors but not proxies, notification tests, or status changes; see `docs/design/cli.md` for the comparison and the full specification.
 
@@ -103,10 +103,20 @@ uptime-kuma-cli maintenance status-pages 4 --set-ids 2
 uptime-kuma-cli maintenance pause 4
 uptime-kuma-cli maintenance resume 4
 uptime-kuma-cli maintenance delete 4 --yes
+
+uptime-kuma-cli status-pages list
+uptime-kuma-cli status-pages get status
+uptime-kuma-cli status-pages add --slug status --title "Status"
+uptime-kuma-cli status-pages save status --config-file page.json
+uptime-kuma-cli status-pages incident status --title "Degraded" --content "Investigating" --style warning
+uptime-kuma-cli status-pages unpin status
+uptime-kuma-cli status-pages delete status --yes
 ```
 
-- `monitors add` and `tags add` exit 3 and send nothing when the same name exists; `maintenance add` does the same for a title; `monitors tag` exits 3 when the same tag+value is already attached. `monitors add --tag <id[:value]>` attaches tags at creation
+- `monitors add` and `tags add` exit 3 and send nothing when the same name exists; `maintenance add` does the same for a title, `status-pages add` for a slug, `status-pages save` when the file's slug belongs to another page; `monitors tag` exits 3 when the same tag+value is already attached. `monitors add --tag <id[:value]>` attaches tags at creation
 - `maintenance add` / `edit` take `--config-file` for the schedule fields of the `cron` and `recurring-*` strategies; `maintenance monitors` / `status-pages` replace the whole attached set — Kuma's attach events delete every existing row first, they do not add
+- `status-pages get` also fetches the unauthenticated `GET /api/status-page/<slug>` for the public groups and pinned incident; Kuma caches that route for 5 minutes but the CLI adds a cache-busting query so Kuma's own cache never answers a read (a reverse proxy in front of Kuma that ignores query strings could still serve a stale body), and `status-pages incident` unpins the page's previous incident
+- `status-pages save` merges the JSON file over the fetched page config and replaces the whole public group set — groups not listed are deleted; a `get` output's `publicGroupList` can be fed back as the file's `publicGroupList`. If the read-back after a successful save fails, the sent config is printed with a stderr warning and exit code 0
 - Push monitors get their token in the same `add` call; the output carries `pushToken` and `pushUrl`
 - `--paused` creates the monitor without starting it (push to a paused monitor returns HTTP 404, so resume before the pusher starts)
 - Kuma only notifies on status changes; with `resendInterval` 0 a monitor that stays down does not notify again
@@ -122,7 +132,7 @@ uptime-kuma-cli maintenance delete 4 --yes
 | 0 | Done |
 | 1 | Kuma answered no (`ok: false`, unknown id) |
 | 2 | Configuration, usage, connection, login or timeout failure |
-| 3 | A create or attach was skipped: same name / same tag+value exists |
+| 3 | A create or attach was skipped: same name / title / slug / tag+value exists |
 | 70 | Unexpected error |
 
 ## Integration tests

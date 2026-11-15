@@ -137,7 +137,7 @@ const SASL_VISIBLE_KEYS = new Set(["mechanism", "username", "awsRegion", "access
 const HATCH_SECRET_KEYS = new Set([...SECRET_KEYS, "kafkaProducerSaslOptions"]);
 
 // A monitor URL may carry credentials as user:pass@; keep the URL readable and hide the password
-function redactUrl(value: unknown): unknown {
+export function redactUrl(value: unknown): unknown {
   if (typeof value !== "string" || value === "") return value;
   let parsed: URL;
   try {
