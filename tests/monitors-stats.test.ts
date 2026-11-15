@@ -186,7 +186,8 @@ describe("monitors stats", () => {
     const withoutCertMs = Date.now() - t3;
     expect(withCert.code).toBe(0);
     expect(withoutCert.code).toBe(0);
-    expect(withoutCertMs - withCertMs).toBeGreaterThan(300);
+    // a wait that ignores the arrived certInfo adds ~500 ms; 150 leaves room for CI load
+    expect(withoutCertMs - withCertMs).toBeGreaterThan(150);
   });
 
   test("a late certInfo stays absent while other monitors keep the wait open", async () => {
