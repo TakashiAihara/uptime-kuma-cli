@@ -11,6 +11,7 @@ import {
   parseSets,
   printJson,
   readJsonFile,
+  readTextFile,
 } from "../lib.ts";
 import { connect, MONITOR_ADD_FIELDS, type KumaSession, type Monitor } from "../kuma.ts";
 
@@ -23,11 +24,16 @@ const MONITOR_TYPES = [
   "ping",
   "keyword",
   "json-query",
+  "grpc-keyword",
   "dns",
   "docker",
+  "real-browser",
   "push",
   "steam",
   "gamedig",
+  "mqtt",
+  "kafka-producer",
+  "radius",
   "tailscale-ping",
 ] as const;
 
@@ -58,6 +64,9 @@ const KUMA_MONITOR_TYPES = [
   "redis",
   "tailscale-ping",
 ] as const;
+
+// kafkaSaslMechanismOptions of EditMonitor.vue
+const KAFKA_SASL_MECHANISMS = ["None", "plain", "scram-sha-256", "scram-sha-512", "aws"] as const;
 
 // dnsresolvetypeOptions of EditMonitor.vue
 const DNS_RESOLVE_TYPES = [
@@ -322,6 +331,18 @@ function parseMonitorInterval(value: string, flag: string): number {
   return n;
 }
 
+// A kafkaProducerBrokers entry is "host:port"; the host may itself contain
+// colons (IPv6), so the port is whatever follows the last colon.
+function isKafkaBroker(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const i = value.lastIndexOf(":");
+  if (i <= 0 || i === value.length - 1) return false;
+  const port = value.slice(i + 1);
+  if (!/^\d+$/.test(port)) return false;
+  const n = Number(port);
+  return n >= 1 && n <= 65535;
+}
+
 const HATCH_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unknown> = {
   interval: (v, k) => hatchNumber(v, k, parseMonitorInterval),
   retryInterval: (v, k) => hatchNumber(v, k, parsePositiveNumber),
@@ -355,6 +376,23 @@ const HATCH_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unknow
   },
   kafkaProducerBrokers: (v, k) => {
     if (!Array.isArray(v)) fail(2, `${k} must be an array`);
+    for (const broker of v) {
+      if (!isKafkaBroker(broker)) fail(2, `${k} entries must be host:port strings`);
+    }
+    return v;
+  },
+  kafkaProducerSaslOptions: (v, k) => {
+    if (v === null || typeof v !== "object" || Array.isArray(v)) {
+      fail(2, `${k} must be an object`);
+    }
+    const mechanism = (v as Record<string, unknown>).mechanism;
+    if (
+      mechanism !== undefined &&
+      (typeof mechanism !== "string" ||
+        !(KAFKA_SASL_MECHANISMS as readonly string[]).includes(mechanism))
+    ) {
+      fail(2, `${k}.mechanism must be one of ${KAFKA_SASL_MECHANISMS.join(", ")}`);
+    }
     return v;
   },
 };
@@ -403,8 +441,15 @@ function validateFinalMonitor(
     const v = monitor[field];
     if (typeof v !== "string" || v === "") fail(2, `${field} must be a non-empty string`);
   };
-  if (type === "http" || type === "keyword" || type === "json-query") needString("url");
-  if (type === "keyword") needString("keyword");
+  if (type === "http" || type === "keyword" || type === "json-query" || type === "real-browser") {
+    needString("url");
+  }
+  if (type === "keyword" || type === "grpc-keyword") needString("keyword");
+  if (type === "grpc-keyword") {
+    needString("grpcUrl");
+    needString("grpcServiceName");
+    needString("grpcMethod");
+  }
   if (type === "json-query") {
     needString("jsonPath");
     needString("expectedValue");
@@ -415,15 +460,42 @@ function validateFinalMonitor(
     type === "gamedig" ||
     type === "ping" ||
     type === "dns" ||
-    type === "tailscale-ping"
+    type === "tailscale-ping" ||
+    type === "mqtt" ||
+    type === "radius"
   ) {
     needString("hostname");
   }
-  if ((type === "port" || type === "steam" || type === "gamedig") && inScope("port")) {
+  if (
+    (type === "port" || type === "steam" || type === "gamedig" || type === "mqtt") &&
+    inScope("port")
+  ) {
     const port = monitor.port;
     if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535) {
       fail(2, "port must be a port number");
     }
+  }
+  if (type === "mqtt") needString("mqttTopic");
+  if (type === "kafka-producer") {
+    needString("kafkaProducerTopic");
+    needString("kafkaProducerMessage");
+    if (inScope("kafkaProducerBrokers")) {
+      const brokers = monitor.kafkaProducerBrokers;
+      if (
+        !Array.isArray(brokers) ||
+        brokers.length === 0 ||
+        brokers.some((b) => !isKafkaBroker(b))
+      ) {
+        fail(2, "kafkaProducerBrokers must be a non-empty array of host:port strings");
+      }
+    }
+  }
+  if (type === "radius") {
+    needString("radiusUsername");
+    needString("radiusPassword");
+    needString("radiusSecret");
+    needString("radiusCalledStationId");
+    needString("radiusCallingStationId");
   }
   if (type === "gamedig") needString("game");
   if (type === "docker") {
@@ -517,9 +589,12 @@ export function registerMonitors(program: Command): void {
     )
     .requiredOption("--name <name>", "monitor name")
     .option("--url <url>", "monitor url")
-    .option("--hostname <hostname>", "hostname (port, ping, dns, steam, gamedig, tailscale-ping)")
-    .option("--port <port>", "port (port, dns, steam, gamedig)")
-    .option("--keyword <keyword>", "keyword (keyword type)")
+    .option(
+      "--hostname <hostname>",
+      "hostname (port, ping, dns, steam, gamedig, mqtt, radius, tailscale-ping)",
+    )
+    .option("--port <port>", "port (port, dns, steam, gamedig, mqtt, radius)")
+    .option("--keyword <keyword>", "keyword (keyword, grpc-keyword types)")
     .option("--json-path <path>", "json path (json-query type)")
     .option("--expected-value <value>", "expected value (json-query type)")
     .option("--packet-size <bytes>", "ping packet size")
@@ -532,6 +607,31 @@ export function registerMonitors(program: Command): void {
     .option("--docker-container <name>", "docker container name or id")
     .option("--docker-host <id>", "docker host id")
     .option("--game <game>", "game (gamedig type)")
+    .option("--grpc-url <url>", "gRPC url (grpc-keyword type)")
+    .option("--grpc-service-name <name>", "gRPC service name (grpc-keyword type)")
+    .option("--grpc-method <method>", "gRPC method (grpc-keyword type)")
+    .option("--grpc-protobuf <path>", "proto file path (grpc-keyword type)")
+    .option("--grpc-enable-tls", "enable TLS for gRPC (grpc-keyword type)")
+    .option("--invert-keyword", "invert the keyword match (keyword, grpc-keyword types)")
+    .option("--mqtt-topic <topic>", "MQTT topic (mqtt type)")
+    .option("--mqtt-username <username>", "MQTT username (mqtt type)")
+    .option("--mqtt-success-message <message>", "MQTT success message (mqtt type)")
+    .option(
+      "--kafka-producer-broker <host:port>",
+      "kafka broker (kafka-producer type, repeatable)",
+      collect,
+      [],
+    )
+    .option("--kafka-producer-topic <topic>", "kafka topic (kafka-producer type)")
+    .option("--kafka-producer-message <message>", "kafka message (kafka-producer type)")
+    .option("--kafka-producer-ssl", "enable SSL for kafka (kafka-producer type)")
+    .option(
+      "--kafka-producer-allow-auto-topic-creation",
+      "allow auto topic creation (kafka-producer type)",
+    )
+    .option("--radius-username <username>", "radius username (radius type)")
+    .option("--radius-called-station-id <id>", "radius called station id (radius type)")
+    .option("--radius-calling-station-id <id>", "radius calling station id (radius type)")
     .option("--interval <seconds>", "heartbeat interval")
     .option("--retry-interval <seconds>", "retry interval")
     .option("--max-retries <n>", "maximum retries")
@@ -547,11 +647,14 @@ export function registerMonitors(program: Command): void {
     .option("--config-file <path>", "JSON file of monitor fields")
     .action(async (opts) => {
       const type = opts.type as string;
-      const urlTypes = type === "http" || type === "keyword" || type === "json-query";
+      const urlTypes =
+        type === "http" || type === "keyword" || type === "json-query" || type === "real-browser";
       if (urlTypes && !opts.url) {
         fail(2, `--type ${type} requires --url`);
       }
-      if (type === "keyword" && !opts.keyword) fail(2, "--type keyword requires --keyword");
+      if ((type === "keyword" || type === "grpc-keyword") && !opts.keyword) {
+        fail(2, `--type ${type} requires --keyword`);
+      }
       if (type === "json-query") {
         if (!opts.jsonPath) fail(2, "--type json-query requires --json-path");
         if (opts.expectedValue === undefined) {
@@ -559,12 +662,46 @@ export function registerMonitors(program: Command): void {
         }
         if (opts.expectedValue === "") fail(2, "expectedValue must be a non-empty string");
       }
-      if (type === "port" || type === "steam" || type === "gamedig") {
+      if (type === "grpc-keyword") {
+        if (!opts.grpcUrl) fail(2, "--type grpc-keyword requires --grpc-url");
+        if (!opts.grpcServiceName) {
+          fail(2, "--type grpc-keyword requires --grpc-service-name");
+        }
+        if (!opts.grpcMethod) fail(2, "--type grpc-keyword requires --grpc-method");
+      }
+      if (type === "port" || type === "steam" || type === "gamedig" || type === "mqtt") {
         if (!opts.hostname) fail(2, `--type ${type} requires --hostname`);
         if (opts.port === undefined) fail(2, `--type ${type} requires --port`);
       }
-      if (type === "ping" || type === "dns" || type === "tailscale-ping") {
+      if (type === "mqtt" && !opts.mqttTopic) fail(2, "--type mqtt requires --mqtt-topic");
+      if (type === "kafka-producer") {
+        const brokers = (opts.kafkaProducerBroker as string[] | undefined) ?? [];
+        if (brokers.length === 0) {
+          fail(2, "--type kafka-producer requires --kafka-producer-broker");
+        }
+        for (const broker of brokers) {
+          if (!isKafkaBroker(broker)) {
+            fail(2, `--kafka-producer-broker must be host:port, got "${broker}"`);
+          }
+        }
+        if (!opts.kafkaProducerTopic) {
+          fail(2, "--type kafka-producer requires --kafka-producer-topic");
+        }
+        if (!opts.kafkaProducerMessage) {
+          fail(2, "--type kafka-producer requires --kafka-producer-message");
+        }
+      }
+      if (type === "ping" || type === "dns" || type === "tailscale-ping" || type === "radius") {
         if (!opts.hostname) fail(2, `--type ${type} requires --hostname`);
+      }
+      if (type === "radius") {
+        if (!opts.radiusUsername) fail(2, "--type radius requires --radius-username");
+        if (!opts.radiusCalledStationId) {
+          fail(2, "--type radius requires --radius-called-station-id");
+        }
+        if (!opts.radiusCallingStationId) {
+          fail(2, "--type radius requires --radius-calling-station-id");
+        }
       }
       if (type === "docker") {
         if (!opts.dockerContainer) fail(2, "--type docker requires --docker-container");
@@ -640,14 +777,20 @@ export function registerMonitors(program: Command): void {
         opts.timeout === undefined ? undefined : parseTimeoutSeconds(opts.timeout, "--timeout");
       const proxyIdOption =
         opts.proxyId === undefined ? undefined : parseId(opts.proxyId, "--proxy-id");
-      // dns defaults to resolver port 53 like the UI's type watcher; the other
-      // port types require --port (checked above).
+      // dns and radius get their well-known ports from the UI's type watcher
+      // (53 / 1812); the other port types require --port (checked above).
       let port: number | undefined;
       if (type === "dns") {
         port = opts.port === undefined ? 53 : parsePort(opts.port, "--port");
-      } else if (type === "port" || type === "steam" || type === "gamedig") {
+      } else if (type === "radius") {
+        port = opts.port === undefined ? 1812 : parsePort(opts.port, "--port");
+      } else if (type === "port" || type === "steam" || type === "gamedig" || type === "mqtt") {
         port = parsePort(opts.port, "--port");
       }
+      const grpcProtobuf =
+        type === "grpc-keyword" && opts.grpcProtobuf !== undefined
+          ? readTextFile(opts.grpcProtobuf, "--grpc-protobuf")
+          : undefined;
       const packetSize =
         type === "ping" && opts.packetSize !== undefined
           ? parsePositiveInteger(opts.packetSize, "--packet-size")
@@ -726,7 +869,38 @@ export function registerMonitors(program: Command): void {
       if (timeout !== undefined) typed.timeout = timeout;
       if (normalizedParent !== undefined) typed.parent = normalizedParent;
       if (urlTypes) typed.url = opts.url;
-      if (type === "keyword") typed.keyword = opts.keyword;
+      if (type === "keyword" || type === "grpc-keyword") {
+        typed.keyword = opts.keyword;
+        if (opts.invertKeyword) typed.invertKeyword = true;
+      }
+      if (type === "grpc-keyword") {
+        typed.grpcUrl = opts.grpcUrl;
+        typed.grpcServiceName = opts.grpcServiceName;
+        typed.grpcMethod = opts.grpcMethod;
+        if (grpcProtobuf !== undefined) typed.grpcProtobuf = grpcProtobuf;
+        if (opts.grpcEnableTls) typed.grpcEnableTls = true;
+      }
+      if (type === "mqtt") {
+        typed.mqttTopic = opts.mqttTopic;
+        if (opts.mqttUsername !== undefined) typed.mqttUsername = opts.mqttUsername;
+        if (opts.mqttSuccessMessage !== undefined) {
+          typed.mqttSuccessMessage = opts.mqttSuccessMessage;
+        }
+      }
+      if (type === "kafka-producer") {
+        typed.kafkaProducerBrokers = opts.kafkaProducerBroker;
+        typed.kafkaProducerTopic = opts.kafkaProducerTopic;
+        typed.kafkaProducerMessage = opts.kafkaProducerMessage;
+        if (opts.kafkaProducerSsl) typed.kafkaProducerSsl = true;
+        if (opts.kafkaProducerAllowAutoTopicCreation) {
+          typed.kafkaProducerAllowAutoTopicCreation = true;
+        }
+      }
+      if (type === "radius") {
+        typed.radiusUsername = opts.radiusUsername;
+        typed.radiusCalledStationId = opts.radiusCalledStationId;
+        typed.radiusCallingStationId = opts.radiusCallingStationId;
+      }
       if (type === "json-query") {
         typed.jsonPath = opts.jsonPath;
         typed.expectedValue = opts.expectedValue;

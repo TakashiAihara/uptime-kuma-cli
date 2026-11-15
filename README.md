@@ -59,6 +59,8 @@ uptime-kuma-cli monitors add --type push --name "nightly job" --paused --notific
 uptime-kuma-cli monitors add --type group --name "edge"
 uptime-kuma-cli monitors add --type ping --name "gw" --hostname 192.0.2.1 --parent 12 --paused
 uptime-kuma-cli monitors add --type dns --name "resolver" --hostname example.com --set 'dns_resolve_type="AAAA"'
+uptime-kuma-cli monitors add --type mqtt --name "broker" --hostname mqtt.example.com --port 1883 \
+  --mqtt-topic "sensors/#" --mqtt-username u1 --config-file mqtt.json
 uptime-kuma-cli monitors add --type http --name "wiki" --url https://wiki.example.com --config-file wiki.json
 uptime-kuma-cli monitors edit 14 --set maxretries=2 --set 'notificationIDList=[3,5]'
 uptime-kuma-cli monitors edit 14 --parent 12
