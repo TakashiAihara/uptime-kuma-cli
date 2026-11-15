@@ -177,18 +177,23 @@ describe("monitors stats", () => {
   });
 
   test("a monitor whose certInfo has arrived does not sit out the 500 ms grace", async () => {
-    // monitor 1 has a cert, monitor 3 has none and waits the full grace
-    const t1 = Date.now();
-    const withCert = await run(sb, ["monitors", "stats", "1"], creds(kuma.url));
-    const withCertMs = Date.now() - t1;
-    const t3 = Date.now();
-    const withoutCert = await run(sb, ["monitors", "stats", "3"], creds(kuma.url));
-    const withoutCertMs = Date.now() - t3;
-    expect(withCert.code).toBe(0);
-    expect(withoutCert.code).toBe(0);
-    // a wait that ignores the arrived certInfo adds ~500 ms; 150 leaves room for CI load
+    // monitor 1 has a cert, monitor 3 has none and waits the full grace. The
+    // fastest of three runs each drops one-off startup or load delays.
+    const fastest = async (id: string): Promise<number> => {
+      let best = Number.POSITIVE_INFINITY;
+      for (let i = 0; i < 3; i++) {
+        const t = Date.now();
+        const r = await run(sb, ["monitors", "stats", id], creds(kuma.url));
+        expect(r.code).toBe(0);
+        best = Math.min(best, Date.now() - t);
+      }
+      return best;
+    };
+    const withCertMs = await fastest("1");
+    const withoutCertMs = await fastest("3");
+    // a wait that ignores the arrived certInfo adds ~500 ms
     expect(withoutCertMs - withCertMs).toBeGreaterThan(150);
-  });
+  }, 30_000);
 
   test("a late certInfo stays absent while other monitors keep the wait open", async () => {
     // monitor 1's certInfo comes 600 ms after its uptime 30d; the later
