@@ -126,6 +126,13 @@ const SECRET_KEYS = new Set([
   "databaseConnectionString",
   "grpcBody",
   "grpcMetadata",
+  // Kuma 2.x fields; 1.23 never sends them
+  "bearer_token",
+  "gamedigToken",
+  "rabbitmqPassword",
+  "sshPassword",
+  "sshPrivateKey",
+  "sshPassphrase",
 ]);
 
 // kafkaProducerSaslOptions is an object holding the SASL password or AWS secret keys;

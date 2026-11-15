@@ -169,15 +169,16 @@ async function fetchSettings(s: KumaSession): Promise<Record<string, unknown>> {
   return data as Record<string, unknown>;
 }
 
-// The general settings hold two secrets: steamAPIKey prints as "***"
-// whenever it holds a value, and a password inside primaryBaseURL is masked
-// like a monitor url.
+// The general settings hold three secrets: steamAPIKey and globalpingApiToken
+// print as "***" whenever they hold a value, and a password inside
+// primaryBaseURL is masked like a monitor url.
 function redactSettings(data: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {
     ...data,
     primaryBaseURL: redactUrl(data.primaryBaseURL),
   };
   if (out.steamAPIKey) out.steamAPIKey = "***";
+  if (out.globalpingApiToken) out.globalpingApiToken = "***";
   return out;
 }
 
