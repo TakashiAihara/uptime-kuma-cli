@@ -42,8 +42,6 @@ describe("fake kuma 2.x profile", () => {
     const s = await connect();
     expect(s.serverVersion).toBe("2.5.11");
     expect(s.majorVersion).toBe(2);
-    // the ordering itself is pinned in kuma-version.test.ts
-    expect(kuma.state.infoBeforeLoginAck).toBe(true);
   });
 
   test("monitors add fails on the NOT NULL conditions column", async () => {

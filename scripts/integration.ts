@@ -31,6 +31,8 @@ const COMPOSE_UP_TIMEOUT_MS = 300_000;
 const COMPOSE_DOWN_TIMEOUT_MS = 60_000;
 const TEST_LIMIT_MS = 8 * 60_000;
 const KEEP = process.env.UPTIME_KUMA_IT_KEEP === "1";
+// The major version an image tag names, or undefined for tags like `latest`.
+const IMAGE_MAJOR = /:(\d+)\.\d+\.\d+/.exec(process.env.UPTIME_KUMA_IT_IMAGE ?? "")?.[1];
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -201,6 +203,11 @@ try {
   } else {
     const version = await setupKuma();
     console.log(`Kuma ${version} ready at ${BASE_URL}`);
+    // A CI job that names 2.5.11 must not go green on 1.23 if the image
+    // variable stops reaching compose.
+    if (IMAGE_MAJOR !== undefined && version.split(".")[0] !== IMAGE_MAJOR) {
+      throw new Error(`UPTIME_KUMA_IT_IMAGE names ${IMAGE_MAJOR}.x but Kuma reports ${version}`);
+    }
     exitCode = await runTests(version);
   }
 } catch (e) {

@@ -128,7 +128,9 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("status-pages (real Kuma)", () 
     // query still shows the incident gone
     const g = await cliRun(sb, ["status-pages", "get", slug]);
     expect(g.code).toBe(0);
-    expect(g.json().incident).toBeNull();
+    // Kuma 2.x: #40 — get shows no incident on 2.x even while one is pinned,
+    // so this check would pass without the unpin there
+    if (!on2x) expect(g.json().incident).toBeNull();
   }, 120_000);
 
   test("delete the status page", async () => {

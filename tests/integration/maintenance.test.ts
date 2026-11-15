@@ -107,17 +107,20 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("maintenance (real Kuma)", () =
     expect(resumed.json()).toEqual({ id: maintenanceId, active: true });
   }, 240_000);
 
+  test("delete the maintenance", async () => {
+    const m = await cliRun(sb, ["maintenance", "delete", String(maintenanceId), "--yes"]);
+    expect(m.code).toBe(0);
+    expect(m.json()).toEqual({ id: maintenanceId, deleted: true });
+  }, 120_000);
+
   // Kuma 2.x: #37
   test.skipIf(on2x)(
-    "delete the maintenance and the monitor",
+    "delete the attached monitor",
     async () => {
-      const m = await cliRun(sb, ["maintenance", "delete", String(maintenanceId), "--yes"]);
-      expect(m.code).toBe(0);
-      expect(m.json()).toEqual({ id: maintenanceId, deleted: true });
       const mon = await cliRun(sb, ["monitors", "delete", String(monitorId), "--yes"]);
       expect(mon.code).toBe(0);
       expect(mon.json()).toEqual({ id: monitorId, deleted: true });
     },
-    240_000,
+    120_000,
   );
 });

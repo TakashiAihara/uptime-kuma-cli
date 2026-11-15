@@ -352,6 +352,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
           primaryBaseURL: null,
           serverTimezone: "UTC",
           serverTimezoneOffset: "+00:00",
+          // the rest mirrors 2.5.11's sendInfo; no test reads these yet
           isContainer: true,
           dbType: "sqlite",
           runtime: { platform: "linux", arch: "x64" },
@@ -777,18 +778,17 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     });
 
     handle("add", (monitor: Monitor) => {
-      // 2.x's monitor.conditions is NOT NULL and the handler stringifies it
-      // before storing, so a missing value fails the insert ahead of the
-      // unknown-column check below
-      if (
-        state.profile === "2.x" &&
-        (monitor.conditions === undefined || monitor.conditions === null)
-      ) {
-        throw new Error("SQLITE_CONSTRAINT: NOT NULL constraint failed: monitor.conditions");
-      }
       const unknown = Object.keys(monitor).filter((k) => !ADD_KEYS.has(k));
       if (unknown.length)
         throw new Error(`SQLITE_ERROR: table monitor has no column named ${unknown[0]}`);
+      // 2.x's monitor.conditions is NOT NULL; the add handler stores
+      // JSON.stringify(conditions), so only a missing key leaves it NULL (an
+      // explicit null becomes the string "null"). SQLite rejects unknown
+      // columns first, at prepare time. ADD_KEYS is still the 1.23 column set,
+      // so a 2.x add that sends conditions fails above until #37 extends it.
+      if (state.profile === "2.x" && monitor.conditions === undefined) {
+        throw new Error("SQLITE_CONSTRAINT: NOT NULL constraint failed: monitor.conditions");
+      }
       if (!(monitor.accepted_statuscodes as unknown[]).every((c) => typeof c === "string"))
         throw new Error("Accepted status codes are not all strings");
       const id = Math.max(0, ...state.monitors.map((m) => m.id)) + 1;
