@@ -193,8 +193,12 @@ describe("settings set", () => {
   });
 
   test.each([
-    ["serverTimezone=Not/AZone", '"serverTimezone" must be an IANA timezone name'],
-    ["serverTimezone=", '"serverTimezone" must be an IANA timezone name'],
+    ["serverTimezone=Not/AZone", '"serverTimezone" must be "UTC" or an IANA timezone name'],
+    ["serverTimezone=", '"serverTimezone" must be "UTC" or an IANA timezone name'],
+    // Intl's DateTimeFormat accepts these, but the UI's fixed list does not
+    ["serverTimezone=asia/tokyo", '"serverTimezone" must be "UTC" or an IANA timezone name'],
+    ["serverTimezone=+09:00", '"serverTimezone" must be "UTC" or an IANA timezone name'],
+    ["serverTimezone=Japan", '"serverTimezone" must be "UTC" or an IANA timezone name'],
     ["searchEngineIndex=yes", '"searchEngineIndex" must be a boolean'],
     ["entryPage=foo", '"entryPage" must be "dashboard" or "statusPage-<slug>"'],
     ["entryPage=statusPage-", '"entryPage" must be "dashboard" or "statusPage-<slug>"'],
@@ -209,6 +213,14 @@ describe("settings set", () => {
       '"primaryBaseURL" must be a URL starting with http:// or https://, or empty',
     ],
     ["primaryBaseURL=123", '"primaryBaseURL" must be a string'],
+    [
+      "primaryBaseURL=https://kuma.example.com/p?x=1",
+      '"primaryBaseURL" must not contain a query string or fragment',
+    ],
+    [
+      "primaryBaseURL=https://kuma.example.com/p#frag",
+      '"primaryBaseURL" must not contain a query string or fragment',
+    ],
     ["nscd=yes", '"nscd" must be a boolean'],
     ["dnsCache=1", '"dnsCache" must be a boolean'],
     ["chromeExecutable=123", '"chromeExecutable" must be a string'],
@@ -238,6 +250,10 @@ describe("settings set", () => {
     [
       { entryPage: "statusPage-Bad_Slug" },
       '"entryPage" must be "dashboard" or "statusPage-<slug>"',
+    ],
+    [
+      { primaryBaseURL: "https://kuma.example.com/?a=b" },
+      '"primaryBaseURL" must not contain a query string or fragment',
     ],
   ];
   test.each(badFileCases)(
@@ -433,6 +449,44 @@ describe("settings set", () => {
     expect(kuma.state.settings.steamAPIKey).toBe("brand-new-steam-key");
   });
 
+  test('steamAPIKey "***" via --config-file exits 2 and stores nothing', async () => {
+    // the placeholder a `settings get` result carries; feeding it back must
+    // not overwrite the stored key
+    kuma.state.settings = { steamAPIKey: "stored-real-key" };
+    const f = writeJson("s.json", { steamAPIKey: "***" });
+    const r = await run(sb, ["settings", "set", "--config-file", f], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("redacted placeholder");
+    expect(r.stderr).toContain("omit the key");
+    expect(kuma.calls).toHaveLength(0);
+    expect(kuma.state.settings.steamAPIKey).toBe("stored-real-key");
+  });
+
+  test("serverTimezone=UTC is accepted like an IANA name", async () => {
+    const r = await run(sb, ["settings", "set", "--set", "serverTimezone=UTC"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(sentSettings().serverTimezone).toBe("UTC");
+  });
+
+  test("a password in primaryBaseURL prints as *** in get and set output", async () => {
+    // built at runtime so no literal user:pass URL sits in the test file
+    const userPass = ["op", "pw-fixture"].join(":");
+    const url = `https://${userPass}@kuma.example.com`;
+    kuma.state.settings = { primaryBaseURL: url };
+    const g = await run(sb, ["settings", "get"], creds(kuma.url));
+    expect(g.code).toBe(0);
+    expect(g.json().primaryBaseURL).toBe("https://op:***@kuma.example.com/");
+    expect(g.stdout).not.toContain("pw-fixture");
+
+    const s = await run(sb, ["settings", "set", "--set", `primaryBaseURL=${url}`], creds(kuma.url));
+    expect(s.code).toBe(0);
+    // the raw value goes on the wire; only the printed output is redacted
+    expect(sentSettings().primaryBaseURL).toBe(url);
+    expect(s.json().primaryBaseURL).toBe("https://op:***@kuma.example.com/");
+    expect(s.stdout).not.toContain("pw-fixture");
+    expect(kuma.state.settings.primaryBaseURL).toBe(url);
+  });
+
   test("entryPage=statusPage-<slug> is sent when the page exists", async () => {
     const r = await run(
       sb,
@@ -505,12 +559,27 @@ describe("settings set", () => {
     expect(callsOf("setSettings")).toHaveLength(0);
   });
 
-  test("a failure on the post-save read exits 1 after the write", async () => {
+  test("a failure on the post-save read prints the sent settings and exits 0", async () => {
     kuma.state.fail.getSettings = [null, "second read failed"];
     const r = await run(sb, ["settings", "set", "--set", "trustProxy=true"], creds(kuma.url));
-    expect(r.code).toBe(1);
+    // the write already happened, so the sent object is printed redacted
+    // with a warning instead of a nonzero exit, like `status-pages save`
+    expect(r.code).toBe(0);
+    expect(r.stderr).toContain("reading them back failed");
     expect(r.stderr).toContain("second read failed");
+    expect(r.json()).toMatchObject({ trustProxy: true, entryPage: "dashboard" });
     expect(kuma.state.settings.trustProxy).toBe(true);
+  });
+
+  test("a malformed post-save getSettings response still exits 70", async () => {
+    kuma.state.getSettingsResult = [
+      { ok: true, data: { primaryBaseURL: "https://kuma.example.com" } },
+      { ok: true },
+    ];
+    const r = await run(sb, ["settings", "set", "--set", "trustProxy=true"], creds(kuma.url));
+    expect(r.code).toBe(70);
+    expect(r.stderr).toContain("unexpected getSettings response");
+    expect(callsOf("setSettings")).toHaveLength(1);
   });
 
   test("disableAuth=true while auth is on verifies the login password", async () => {
@@ -525,6 +594,10 @@ describe("settings set", () => {
     kuma.state.settingsPassword = "rotated-after-login";
     const r = await run(sb, ["settings", "set", "--set", "disableAuth=true"], creds(kuma.url));
     expect(r.code).toBe(0);
+    // the merged object still carries disableAuth and the login password is
+    // sent as currentPassword; the fake just does not check it here
+    expect(sentSettings()).toMatchObject({ disableAuth: true });
+    expect(callsOf("setSettings")[0]!.args[1]).toBe("pw-from-test");
     expect(kuma.state.settings.disableAuth).toBe(true);
   });
 
@@ -533,6 +606,9 @@ describe("settings set", () => {
     const r = await run(sb, ["settings", "set", "--set", "disableAuth=true"], creds(kuma.url));
     expect(r.code).toBe(1);
     expect(r.stderr).toContain("Incorrect current password");
+    // the CLI sent the login password it knew; the stored one had rotated
+    expect(sentSettings()).toMatchObject({ disableAuth: true });
+    expect(callsOf("setSettings")[0]!.args[1]).toBe("pw-from-test");
     expect(kuma.state.settings.disableAuth).toBeUndefined();
   });
 

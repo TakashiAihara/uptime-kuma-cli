@@ -1,6 +1,7 @@
 import { type Command } from "commander";
-import { fail, parseSets, printJson, readJsonFile } from "../lib.ts";
+import { CliError, fail, parseSets, printJson, readJsonFile } from "../lib.ts";
 import { connect, type KumaSession } from "../kuma.ts";
+import { redactUrl } from "./monitors.ts";
 
 const collect = (value: string, previous: string[]): string[] => [...previous, value];
 
@@ -10,14 +11,15 @@ const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 const ENTRY_PAGE_PREFIX = "statusPage-";
 
-const isIanaTimezone = (value: string): boolean => {
-  try {
-    Intl.DateTimeFormat("en-US", { timeZone: value });
-    return true;
-  } catch {
-    return false;
-  }
-};
+// General.vue offers UTC plus the names timezoneList() returns, and that
+// list comes from the timezones-list package (util-frontend.js); the
+// Intl.supportedValuesOf set is the closest available here. The comparison
+// is case-sensitive, so aliases like "Japan" and offset forms like "+09:00"
+// — both of which Intl's DateTimeFormat accepts — are refused like the
+// UI's fixed list refuses them.
+// "UTC" is listed explicitly because the UI offers it explicitly; Bun's ICU
+// list already contains it (Node's does not), so no test can tell it apart.
+const TIMEZONES = new Set(["UTC", ...Intl.supportedValuesOf("timeZone")]);
 
 // The keys the 1.23.17 settings components write through the shared `settings`
 // object that saveSettings posts whole to setSettings: General.vue
@@ -27,10 +29,9 @@ const isIanaTimezone = (value: string): boolean => {
 // Notifications.vue (tlsExpiryNotifyDays) and Security.vue (disableAuth).
 // cloudflaredTunnelToken is not one: it goes through the cloudflared_* events.
 const SETTING_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unknown> = {
-  // General.vue offers UTC plus the IANA names timezoneList() returns
   serverTimezone: (value, key) => {
-    if (typeof value !== "string" || value === "" || !isIanaTimezone(value)) {
-      fail(2, `"${key}" must be an IANA timezone name`);
+    if (typeof value !== "string" || !TIMEZONES.has(value)) {
+      fail(2, `"${key}" must be "UTC" or an IANA timezone name`);
     }
     return value;
   },
@@ -51,24 +52,37 @@ const SETTING_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unkn
     }
     fail(2, `"${key}" must be "dashboard" or "statusPage-<slug>"`);
   },
-  // the input's pattern is https?://.+ and it is not required, so "" is valid
+  // the input's pattern is https?://.+ and it is not required, so "" is
+  // valid; a query or fragment would break the /api/push/<token> URL that
+  // monitors add --type push builds on it
   primaryBaseURL: (value, key) => {
     if (typeof value !== "string") fail(2, `"${key}" must be a string`);
     if (value !== "") {
-      let protocol = "";
+      let url: URL | null = null;
       try {
-        protocol = new URL(value).protocol;
+        url = new URL(value);
       } catch {
         // not a URL at all
       }
-      if (protocol !== "http:" && protocol !== "https:") {
+      if (url === null || (url.protocol !== "http:" && url.protocol !== "https:")) {
         fail(2, `"${key}" must be a URL starting with http:// or https://, or empty`);
+      }
+      if (url.search !== "" || url.hash !== "") {
+        fail(2, `"${key}" must not contain a query string or fragment`);
       }
     }
     return value;
   },
   steamAPIKey: (value, key) => {
     if (typeof value !== "string") fail(2, `"${key}" must be a string`);
+    // get prints a stored key as "***"; feeding that output back through
+    // --config-file would store the placeholder itself
+    if (value === "***") {
+      fail(
+        2,
+        `"${key}" is the redacted placeholder from settings get output; omit the key to keep the stored value`,
+      );
+    }
     return value;
   },
   nscd: (value, key) => {
@@ -147,9 +161,13 @@ async function fetchSettings(s: KumaSession): Promise<Record<string, unknown>> {
 }
 
 // steamAPIKey is the only secret among the general settings; it prints as
-// "***" whenever it holds a value, like the monitor secret fields.
+// "***" whenever it holds a value. primaryBaseURL may embed user:pass@ like
+// a monitor url, so it goes through the same redaction.
 function redactSettings(data: Record<string, unknown>): Record<string, unknown> {
-  const out = { ...data };
+  const out: Record<string, unknown> = {
+    ...data,
+    primaryBaseURL: redactUrl(data.primaryBaseURL),
+  };
   if (out.steamAPIKey) out.steamAPIKey = "***";
   return out;
 }
@@ -166,9 +184,8 @@ function checkSettingKeys(fields: Record<string, unknown>, source: string): void
 // normalized result (tlsExpiryNotifyDays sorted/deduped) is written back.
 function validateSettingValues(fields: Record<string, unknown>): void {
   for (const [key, value] of Object.entries(fields)) {
-    const check = SETTING_VALUE_CHECKS[key];
-    if (check === undefined) fail(70, `no validator for setting "${key}"`);
-    fields[key] = check(value, key);
+    // checkSettingKeys ran on this object first, so the lookup cannot miss
+    fields[key] = SETTING_VALUE_CHECKS[key]!(value, key);
   }
 }
 
@@ -246,6 +263,16 @@ export function registerSettings(program: Command): void {
       // currentPassword is the login password; the server checks it only when
       // the request turns auth off while it is currently on
       await s.request("setSettings", [merged, s.loginPassword]);
-      printJson(redactSettings(await fetchSettings(s)));
+      // the save already happened, so a failed re-read degrades to the sent
+      // object plus a warning on stderr rather than a nonzero exit; exit 70
+      // is an unexpected response shape, not a failed read, and stays loud —
+      // same contract as `status-pages save`
+      try {
+        printJson(redactSettings(await fetchSettings(s)));
+      } catch (e) {
+        if (!(e instanceof CliError) || e.exitCode === 70) throw e;
+        printJson(redactSettings(merged));
+        console.error(`warning: settings were saved, but reading them back failed: ${e.message}`);
+      }
     });
 }

@@ -56,7 +56,7 @@
 - Notification configs and proxy passwords are never printed
 - Monitor fields that hold secrets (`basic_auth_pass`, `oauth_client_secret`, `tlsKey`, `headers`, `body`, `grpcBody`, `grpcMetadata`, `mqttPassword`, `radiusPassword`, `radiusSecret`, `databaseConnectionString`, and every `kafkaProducerSaslOptions` value other than `mechanism` / `username` / `awsRegion` / `accessKeyId`) print as `"***"` when non-empty; `pushToken` stays visible because pushers need it
 - A password inside a monitor `url` (`https://user:pass@host/`) prints as `***` in `monitors list` / `get` / `edit` and in the `publicGroupList` monitors of `status-pages get` / `save` (Kuma adds the url there when `sendUrl` is on)
-- `steamAPIKey` in `settings get` / `settings set` output prints as `"***"` when non-empty — it is the only secret among the general settings
+- `steamAPIKey` in `settings get` / `settings set` output prints as `"***"` when non-empty — it is the only secret among the general settings; a password inside `primaryBaseURL` redacts the same way as a monitor url
 
 ## Exit codes
 
@@ -193,16 +193,19 @@
 
 ### settings
 
-- `settings get`: the `getSettings` `data` object as stored, `steamAPIKey` redacted
+- `settings get`: the `getSettings` `data` object as stored; `steamAPIKey` prints as `"***"` when non-empty and a password inside `primaryBaseURL` (`https://user:pass@host/`) prints as `***` like a monitor url
+- the `get` output is not a valid `--config-file` as is: it carries keys the UI does not edit (rejected by name) and `steamAPIKey` reads `"***"`, the redacted placeholder — `set` refuses that value with exit 2 and the message says to omit the key to keep the stored value. Copy only the keys being changed
 - `settings set [--set <key>=<value>]... [--config-file <json>]`: at least one of the two (exit 2). The allowed keys are the ones the 1.23.17 settings components edit: `serverTimezone`, `searchEngineIndex`, `entryPage`, `primaryBaseURL`, `steamAPIKey`, `nscd`, `dnsCache`, `chromeExecutable`, `checkUpdate`, `checkBeta`, `trustProxy`, `keepDataPeriodDays`, `tlsExpiryNotifyDays`, `disableAuth`; an unknown key exits 2 naming it and its source
-- every value is validated before connecting against the UI's type and bounds: the seven booleans must be booleans; `serverTimezone` an IANA timezone name; `entryPage` `dashboard` or `statusPage-<slug>`; `primaryBaseURL` an http(s) URL or empty; `keepDataPeriodDays` an integer of 0 or more; `tlsExpiryNotifyDays` an array of positive integers (sent sorted and de-duplicated, like the UI keeps the list); `chromeExecutable` and `steamAPIKey` strings
+- every value is validated before connecting against the UI's type and bounds: the seven booleans must be booleans; `serverTimezone` must be `"UTC"` or a name from `Intl.supportedValuesOf("timeZone")`, compared case-sensitively — the UI's list comes from the `timezones-list` package (`timezoneList()` in util-frontend.js) and the Intl set is the closest available, so aliases like `Japan` and offset forms like `+09:00`, which `Intl.DateTimeFormat` itself accepts, are refused; `entryPage` `dashboard` or `statusPage-<slug>`; `primaryBaseURL` an http(s) URL or empty with no query string or fragment — a `?`/`#` part would break the `/api/push/<token>` URL that push monitors build on it; `keepDataPeriodDays` an integer of 0 or more; `tlsExpiryNotifyDays` an array of positive integers (sent sorted and de-duplicated, like the UI keeps the list); `chromeExecutable` and `steamAPIKey` strings
 - `entryPage=statusPage-<slug>` is checked against the pushed `statusPageList` after connecting — an unknown slug exits 1 before `setSettings` is sent, and only then does the command wait for that list
-- `steamAPIKey` is refused in `--set` — exit 2 pointing at `--config-file` — so the secret stays out of argv; `--config-file` accepts it and it prints as `"***"` in the result
+- `steamAPIKey` is refused in `--set` — exit 2 pointing at `--config-file` — so the secret stays out of argv; `--config-file` accepts it and it prints as `"***"` in the result, and the literal `"***"` is refused there too
 - precedence: fetched < `--config-file` < `--set`
 - like the UI's `saveSettings`, the CLI sends the whole object: it fetches `getSettings`, fills the defaults `loadSettings` applies only where the fetched object lacks them (`checkUpdate` true, `searchEngineIndex` / `dnsCache` / `trustProxy` false, `entryPage` "dashboard", `nscd` true, `keepDataPeriodDays` 180, `tlsExpiryNotifyDays` `[7, 14, 21]`), merges the overrides and sends `setSettings (merged, password)`. The whole object is required, not cosmetic: the handler reads `disableAuth`, `entryPage`, `chromeExecutable`, `nscd` and `serverTimezone` unconditionally, so a partial object would reset `entryPage`, restart Chrome, toggle nscd and — with auth currently disabled — disconnect every other client
 - `currentPassword` is the CLI's login password — the same credential `login` used, never an argument and never printed. The server checks it only when the request turns `disableAuth` on while auth is currently enabled; a wrong one answers `ok:false "Incorrect current password"` and exits 1. Turning `disableAuth` back off disconnects every other client of the user (GHSA-23q2-5gf8-gjpp); the requesting socket is excluded, so the command survives and prints the re-read settings
 - `chromeExecutable` and `nscd` changes take effect immediately (Chrome reset / nscd services started or stopped); `serverTimezone` is applied globally on every save
-- prints the settings as `getSettings` returns them after the save, `steamAPIKey` redacted the same way; Kuma's `ok:false` exits 1 with its `msg`
+- after `setSettings` answers ok the CLI re-reads `getSettings` for the printed result; if that read fails with anything but an exit-70 unexpected shape it prints the sent merged object redacted plus a one-line stderr warning and exits 0 — the save already happened, same degraded contract as `status-pages save`
+- a `setSettings` timeout exits 2, but the write may already have been applied and other clients may already have been disconnected by an auth transition — re-run `settings get` to see the stored state before retrying
+- Kuma's `ok:false` exits 1 with its `msg`
 
 ## Tests
 

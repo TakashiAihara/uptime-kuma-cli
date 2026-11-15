@@ -151,8 +151,9 @@ export type FakeState = {
   // getSettings data; primaryBaseURL is what the UI uses for push URLs
   settings: Record<string, unknown>;
   // getSettings answer override; null answers the stored settings with the
-  // serverTimezone fill
-  getSettingsResult: Record<string, unknown> | null;
+  // serverTimezone fill. An array arms one answer per call in order; a null
+  // entry lets that call answer normally, like fail's per-call list
+  getSettingsResult: Record<string, unknown> | (Record<string, unknown> | null)[] | null;
   // the password setSettings' disableAuth check verifies against; null means
   // state.password — set it to simulate the account password having been
   // rotated after this socket logged in
@@ -689,7 +690,16 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     });
 
     handle("getSettings", () => {
-      if (state.getSettingsResult !== null) return state.getSettingsResult;
+      const armed = state.getSettingsResult;
+      if (Array.isArray(armed)) {
+        if (armed.length > 0) {
+          const next = armed.shift();
+          if (armed.length === 0) state.getSettingsResult = null;
+          if (next != null) return next;
+        }
+      } else if (armed !== null) {
+        return armed;
+      }
       const data = structuredClone(state.settings);
       // getSettings fills a missing serverTimezone from server.getTimezone();
       // the fake's server timezone is UTC like maintenanceJSON's

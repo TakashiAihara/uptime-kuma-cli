@@ -1,3 +1,5 @@
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { sandbox, type Sandbox } from "../helpers/run";
 import { cliRun } from "./helpers";
@@ -72,5 +74,39 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("settings (real Kuma)", () => {
     expect(after.code).toBe(0);
     expect(after.json().keepDataPeriodDays ?? 180).toBe(restoreDays);
     expect(after.json().primaryBaseURL ?? "").toBe(restoreUrl);
+  }, 300_000);
+
+  test("steamAPIKey prints as *** and the placeholder is refused", async () => {
+    // a fixture value, not a real Steam key; it only has to be non-empty
+    const key = `it-steam-${Date.now().toString(36)}`;
+    const setFile = join(sb.dir, "steam.json");
+    writeFileSync(setFile, JSON.stringify({ steamAPIKey: key }));
+    const set = await cliRun(sb, ["settings", "set", "--config-file", setFile]);
+    expect(set.code).toBe(0);
+    expect(set.json().steamAPIKey).toBe("***");
+    expect(set.stdout).not.toContain(key);
+
+    const get = await cliRun(sb, ["settings", "get"]);
+    expect(get.code).toBe(0);
+    expect(get.json().steamAPIKey).toBe("***");
+    expect(get.stdout).not.toContain(key);
+
+    // feeding the redacted output back must not store "***" over the key
+    const refusedFile = join(sb.dir, "steam-redacted.json");
+    writeFileSync(refusedFile, JSON.stringify({ steamAPIKey: "***" }));
+    const refused = await cliRun(sb, ["settings", "set", "--config-file", refusedFile]);
+    expect(refused.code).toBe(2);
+    expect(refused.stderr).toContain("redacted placeholder");
+
+    const still = await cliRun(sb, ["settings", "get"]);
+    expect(still.code).toBe(0);
+    expect(still.json().steamAPIKey).toBe("***");
+
+    // restore: an empty key prints as empty again
+    const emptyFile = join(sb.dir, "steam-empty.json");
+    writeFileSync(emptyFile, JSON.stringify({ steamAPIKey: "" }));
+    const restore = await cliRun(sb, ["settings", "set", "--config-file", emptyFile]);
+    expect(restore.code).toBe(0);
+    expect(restore.json().steamAPIKey).toBe("");
   }, 300_000);
 });
