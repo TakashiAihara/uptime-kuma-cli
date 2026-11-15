@@ -150,6 +150,13 @@ export type FakeState = {
   testNotificationResult: { ok: boolean; msg: string };
   // getSettings data; primaryBaseURL is what the UI uses for push URLs
   settings: Record<string, unknown>;
+  // getSettings answer override; null answers the stored settings with the
+  // serverTimezone fill
+  getSettingsResult: Record<string, unknown> | null;
+  // the password setSettings' disableAuth check verifies against; null means
+  // state.password — set it to simulate the account password having been
+  // rotated after this socket logged in
+  settingsPassword: string | null;
   // login answers { tokenRequired: true } like an account with 2FA enabled
   twoFA: boolean;
   // addTag answer override; null uses the stored-tag answer
@@ -288,6 +295,8 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     silentHeartbeat: [],
     testNotificationResult: { ok: true, msg: "Sent Successfully." },
     settings: {},
+    getSettingsResult: null,
+    settingsPassword: null,
     twoFA: false,
     addTagResult: null,
     addMaintenanceResult: null,
@@ -521,6 +530,8 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
         return { ok: false, msg: "Incorrect username or password." };
       if (state.twoFA) return { tokenRequired: true };
       loggedIn = true;
+      // afterLogin sets socket.userID = user.id; the fake's user id is 1
+      (socket as { userID?: number }).userID = 1;
       setTimeout(() => {
         if (state.dropInsteadOfLists) {
           socket.disconnect(true);
@@ -677,7 +688,39 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
       return { ok: true, msg: "Deleted" };
     });
 
-    handle("getSettings", () => ({ ok: true, data: structuredClone(state.settings) }));
+    handle("getSettings", () => {
+      if (state.getSettingsResult !== null) return state.getSettingsResult;
+      const data = structuredClone(state.settings);
+      // getSettings fills a missing serverTimezone from server.getTimezone();
+      // the fake's server timezone is UTC like maintenanceJSON's
+      if (!data.serverTimezone) data.serverTimezone = "UTC";
+      return { ok: true, data };
+    });
+
+    // server.js setSettings of Kuma 1.23.17: Settings.setSettings upserts only
+    // the keys present in data. Turning auth off while it is on re-checks the
+    // password (doubleCheckPassword), and turning it back on disconnects every
+    // other client of the user (GHSA-23q2-5gf8-gjpp).
+    handle("setSettings", (data: Record<string, unknown>, currentPassword: unknown) => {
+      const currentDisabledAuth = state.settings.disableAuth;
+      if (!currentDisabledAuth && data.disableAuth) {
+        if (typeof currentPassword !== "string") throw new Error("Wrong data type?");
+        if (currentPassword !== (state.settingsPassword ?? state.password)) {
+          throw new Error("Incorrect current password");
+        }
+      }
+      if (currentDisabledAuth && !data.disableAuth) {
+        for (const other of io.sockets.sockets.values()) {
+          if ((other as { userID?: number }).userID !== 1 || other.id === socket.id) continue;
+          other.emit("refresh");
+          other.disconnect();
+        }
+      }
+      for (const key of Object.keys(data)) {
+        state.settings[key] = structuredClone(data[key]);
+      }
+      return { ok: true, msg: "Saved" };
+    });
 
     handle("addProxy", (p: Record<string, unknown>, id: number | null) => {
       let row: ProxyRow | undefined;

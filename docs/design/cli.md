@@ -16,7 +16,7 @@
 - Kuma 1.23 has no OpenAPI / REST API for management (only badge, push, status page and metrics are REST), so the CLI talks Socket.IO
 - Log in with `login` `{ username, password, token: "" }`; the callback returns `{ ok, msg }`
 - After login the server pushes `monitorList` (object keyed by id), `maintenanceList` (object keyed by id), `notificationList` (array), `proxyList` (array), `dockerHostList` (array), then `statusPageList` (object keyed by id) about 500ms later, then one `heartbeatList (monitorID, beats)` and one `importantHeartbeatList (monitorID, beats)` per monitor. There is no pushed tag list: each monitor's `tags` is the `monitor_tag`⋈`tag` join (`{ id, monitor_id, tag_id, value, name, color }`, ordered by tag name) and the tag table itself is only readable through `getTags`
-- The CLI waits after login only for the lists the command reads: `monitorList`, `notificationList`, `proxyList` and `dockerHostList` for every command, `maintenanceList` for the maintenance commands, and `statusPageList` for `maintenance status-pages` and every `status-pages` command — waiting for the delayed `statusPageList` unconditionally would add its ~500ms to every command
+- The CLI waits after login only for the lists the command reads: `monitorList`, `notificationList`, `proxyList` and `dockerHostList` for every command, `maintenanceList` for the maintenance commands, `statusPageList` for `maintenance status-pages`, every `status-pages` command and `settings set` when its `entryPage` override names a status page — waiting for the delayed `statusPageList` unconditionally would add its ~500ms to every command
 - Request events used, all with a trailing callback returning `{ ok, msg, ... }`:
     - `add (monitor)` → `monitorID`
     - `editMonitor (monitor)` → `monitorID`
@@ -34,6 +34,7 @@
     - `getMonitorMaintenance (id)` → `monitors` (`{ id }` rows); `addMonitorMaintenance (id, [{ id }])` DELETEs the maintenance's `monitor_maintenance` rows and INSERTs the sent ids — it replaces the whole set, it does not add
     - `getMaintenanceStatusPage (id)` → `statusPages` (`{ id, title }` rows); `addMaintenanceStatusPage (id, [{ id }])` replaces the `maintenance_status_page` set the same way
     - `getStatusPage (slug)` → `config` (`StatusPage.toJSON`); `addStatusPage (title, slug)` → `{ ok, msg }` only; `saveStatusPage (slug, config, imgDataUrl, publicGroupList)` → `{ ok, publicGroupList }` (the sent groups mutated with their ids); `deleteStatusPage (slug)` → `{ ok }`; `postIncident (slug, { title, content, style })` → `incident` (`Incident.toPublicJSON`); `unpinIncident (slug)` → `{ ok }`. None of them re-pushes `statusPageList` — `sendStatusPageList` only runs in `afterLogin`
+    - `getSettings ()` → `data` (the general settings object, `serverTimezone` filled from the server when unset); `setSettings (data, currentPassword)` → `{ ok, msg }` — `Settings.setSettings` upserts only the keys present in `data`, but the handler also reads `disableAuth`, `entryPage`, `chromeExecutable`, `nscd` and `serverTimezone` unconditionally, so a partial object would reset `entryPage`, restart Chrome, toggle nscd and could disconnect every other client
 - A request whose callback has `ok: false` exits 1 with `msg` on stderr
 
 ## Configuration
@@ -55,6 +56,7 @@
 - Notification configs and proxy passwords are never printed
 - Monitor fields that hold secrets (`basic_auth_pass`, `oauth_client_secret`, `tlsKey`, `headers`, `body`, `grpcBody`, `grpcMetadata`, `mqttPassword`, `radiusPassword`, `radiusSecret`, `databaseConnectionString`, and every `kafkaProducerSaslOptions` value other than `mechanism` / `username` / `awsRegion` / `accessKeyId`) print as `"***"` when non-empty; `pushToken` stays visible because pushers need it
 - A password inside a monitor `url` (`https://user:pass@host/`) prints as `***` in `monitors list` / `get` / `edit` and in the `publicGroupList` monitors of `status-pages get` / `save` (Kuma adds the url there when `sendUrl` is on)
+- `steamAPIKey` in `settings get` / `settings set` output prints as `"***"` when non-empty — it is the only secret among the general settings
 
 ## Exit codes
 
@@ -188,6 +190,19 @@
 - `status-pages delete <slug> --yes`: without `--yes` exits 2 before connecting; unknown slug exits 1 (Kuma's own answer is ok:false "Status Page is not found"). The page's incidents and groups are deleted with it. Prints `{ slug, deleted: true }`
 - `status-pages incident <slug> --title <t> --content <c> [--style <s>]`: `--style` is one of `info`, `warning`, `danger`, `primary`, `light`, `dark`, default `primary` (the StatusPage.vue `createIncident` default); title and content must be non-empty (exit 2). `postIncident` unpins every previous incident of the page before pinning the new one. Prints the returned `incident` (`Incident.toPublicJSON`)
 - `status-pages unpin <slug>`: prints `{ slug, unpinned: true }`
+
+### settings
+
+- `settings get`: the `getSettings` `data` object as stored, `steamAPIKey` redacted
+- `settings set [--set <key>=<value>]... [--config-file <json>]`: at least one of the two (exit 2). The allowed keys are the ones the 1.23.17 settings components edit: `serverTimezone`, `searchEngineIndex`, `entryPage`, `primaryBaseURL`, `steamAPIKey`, `nscd`, `dnsCache`, `chromeExecutable`, `checkUpdate`, `checkBeta`, `trustProxy`, `keepDataPeriodDays`, `tlsExpiryNotifyDays`, `disableAuth`; an unknown key exits 2 naming it and its source
+- every value is validated before connecting against the UI's type and bounds: the seven booleans must be booleans; `serverTimezone` an IANA timezone name; `entryPage` `dashboard` or `statusPage-<slug>`; `primaryBaseURL` an http(s) URL or empty; `keepDataPeriodDays` an integer of 0 or more; `tlsExpiryNotifyDays` an array of positive integers (sent sorted and de-duplicated, like the UI keeps the list); `chromeExecutable` and `steamAPIKey` strings
+- `entryPage=statusPage-<slug>` is checked against the pushed `statusPageList` after connecting — an unknown slug exits 1 before `setSettings` is sent, and only then does the command wait for that list
+- `steamAPIKey` is refused in `--set` — exit 2 pointing at `--config-file` — so the secret stays out of argv; `--config-file` accepts it and it prints as `"***"` in the result
+- precedence: fetched < `--config-file` < `--set`
+- like the UI's `saveSettings`, the CLI sends the whole object: it fetches `getSettings`, fills the defaults `loadSettings` applies only where the fetched object lacks them (`checkUpdate` true, `searchEngineIndex` / `dnsCache` / `trustProxy` false, `entryPage` "dashboard", `nscd` true, `keepDataPeriodDays` 180, `tlsExpiryNotifyDays` `[7, 14, 21]`), merges the overrides and sends `setSettings (merged, password)`. The whole object is required, not cosmetic: the handler reads `disableAuth`, `entryPage`, `chromeExecutable`, `nscd` and `serverTimezone` unconditionally, so a partial object would reset `entryPage`, restart Chrome, toggle nscd and — with auth currently disabled — disconnect every other client
+- `currentPassword` is the CLI's login password — the same credential `login` used, never an argument and never printed. The server checks it only when the request turns `disableAuth` on while auth is currently enabled; a wrong one answers `ok:false "Incorrect current password"` and exits 1. Turning `disableAuth` back off disconnects every other client of the user (GHSA-23q2-5gf8-gjpp); the requesting socket is excluded, so the command survives and prints the re-read settings
+- `chromeExecutable` and `nscd` changes take effect immediately (Chrome reset / nscd services started or stopped); `serverTimezone` is applied globally on every save
+- prints the settings as `getSettings` returns them after the save, `steamAPIKey` redacted the same way; Kuma's `ok:false` exits 1 with its `msg`
 
 ## Tests
 
