@@ -203,11 +203,15 @@ function isCronExpression(value: string): boolean {
   }
   const fields = pattern.replace(/\s+/g, " ").split(" ");
   if (fields.length !== 5 && fields.length !== 6) return false;
+  // croner 6.0.7 parses an empty part (surrounding whitespace) or a bare
+  // day-of-week "L", but nextRun() is then null: the window would never run
+  if (fields.includes("")) return false;
   const [second, minute, hour, day, month, dayOfWeek] = (
     fields.length === 5 ? ["0", ...fields] : fields
   ) as [string, string, string, string, string, string];
   const dom = day.replace("L", "");
   const dow = dayOfWeek.replace("L", "");
+  if (dow === "") return false;
   const parts = [
     second,
     minute,
@@ -358,8 +362,8 @@ function validateMaintenance(
         2,
         opts.edit === true
           ? `Kuma 1.23.17 ends a "${strategy}" maintenance immediately ` +
-              'when "dateRange" has an end date; clear a stored end with ' +
-              '--set dateRange=["<start>"] (local time)'
+              'when "dateRange" has an end date; drop the end (a stored one with ' +
+              "--set 'dateRange=[\"<start>\"]', local time)"
           : `Kuma 1.23.17 ends a "${strategy}" maintenance immediately ` +
               'when "dateRange" has an end date; give only a start',
       );

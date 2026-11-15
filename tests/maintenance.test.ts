@@ -472,6 +472,7 @@ describe("maintenance", () => {
       );
       expect(r.code).toBe(2);
       expect(r.stderr).toContain("end date");
+      expect(r.stderr).toContain("give only a start");
       expect(kuma.calls).toHaveLength(0);
     });
 
@@ -844,7 +845,7 @@ describe("maintenance", () => {
       );
       expect(r.code).toBe(2);
       expect(r.stderr).toContain("end date");
-      expect(r.stderr).toContain('--set dateRange=["<start>"]');
+      expect(r.stderr).toContain(`--set 'dateRange=["<start>"]'`);
       expect(callsOf("editMaintenance")).toHaveLength(0);
     });
 
@@ -1433,33 +1434,45 @@ describe("maintenance", () => {
       },
     );
 
-    test.each(["@yearly", "@annually", "@monthly", "@weekly", "@daily", "@hourly", "@Daily"])(
-      "a cron nickname %p is accepted",
-      async (cron) => {
-        const f = writeJson("nickname.json", { cron });
-        const r = await run(
-          sb,
-          ["maintenance", "add", "--title", "w", "--strategy", "cron", "--config-file", f],
-          creds(kuma.url),
-        );
-        expect(r.code).toBe(0);
-        const sent = callsOf("addMaintenance")[0]!.args[0] as Record<string, unknown>;
-        expect(sent.cron).toBe(cron);
-      },
-    );
+    test.each([
+      "@yearly",
+      "@annually",
+      "@monthly",
+      "@weekly",
+      "@daily",
+      "@hourly",
+      "@Daily",
+      " @daily ",
+    ])("a cron nickname %p is accepted", async (cron) => {
+      const f = writeJson("nickname.json", { cron });
+      const r = await run(
+        sb,
+        ["maintenance", "add", "--title", "w", "--strategy", "cron", "--config-file", f],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(0);
+      const sent = callsOf("addMaintenance")[0]!.args[0] as Record<string, unknown>;
+      expect(sent.cron).toBe(cron);
+    });
 
-    test.each(["0 9 L * *", "0 9 * * 5L", "0 9 * * * ?", "0 9 * jan mon"])(
-      "a cron expression %p is accepted",
-      async (cron) => {
-        const f = writeJson("goodshape.json", { cron });
-        const r = await run(
-          sb,
-          ["maintenance", "add", "--title", "w", "--strategy", "cron", "--config-file", f],
-          creds(kuma.url),
-        );
-        expect(r.code).toBe(0);
-      },
-    );
+    test.each([
+      "0 9 L * *",
+      "0 9 * * 5L",
+      "0 9 * * * ?",
+      "0 9 * jan mon",
+      "0 9 * JAN-DEC MON-SAT",
+      "0 9 * feb,mar,apr,may,jun,jul,aug,sep,oct,nov tue,wed,thu,fri,sun",
+      "0\t9 * * *",
+      "0  0 9 * * *",
+    ])("a cron expression %p is accepted", async (cron) => {
+      const f = writeJson("goodshape.json", { cron });
+      const r = await run(
+        sb,
+        ["maintenance", "add", "--title", "w", "--strategy", "cron", "--config-file", f],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(0);
+    });
 
     test.each([
       "0 9 FOO * *",
@@ -1468,6 +1481,9 @@ describe("maintenance", () => {
       "0 9 LW * *",
       "@midnight",
       "0 9 * * * ??",
+      " 0 9 * * *",
+      "0 9 * * * ",
+      "0 9 * * L",
     ])("illegal cron content %p exits 2 before connecting", async (cron) => {
       const f = writeJson("badletters.json", { cron });
       const r = await run(
