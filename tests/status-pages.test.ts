@@ -1,3 +1,5 @@
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { type FakeKuma, type StatusPageRow, startFakeKuma } from "./helpers/fake-kuma";
 import { creds, run, type Sandbox, sandbox } from "./helpers/run";
@@ -412,6 +414,336 @@ describe("status-pages", () => {
       const r = await run(
         sb,
         ["status-pages", "incident", "status", "--title", "t"],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(kuma.calls).toHaveLength(0);
+    });
+  });
+
+  describe("save", () => {
+    const MONITORS = [
+      { id: 5, name: "web", type: "http", url: "https://example.com" },
+      { id: 6, name: "api", type: "http", url: "https://api.example.com" },
+    ];
+
+    const writeJson = (name: string, value: Record<string, unknown>) => {
+      const path = join(sb.dir, name);
+      writeFileSync(path, JSON.stringify(value));
+      return path;
+    };
+
+    beforeEach(() => {
+      kuma.state.monitors = structuredClone(MONITORS);
+    });
+
+    test("merges the file over the fetched config and saves", async () => {
+      const f = writeJson("page.json", {
+        title: "Renamed page",
+        description: "new desc",
+        theme: "dark",
+        showTags: true,
+        domainNameList: ["status.example.com"],
+        publicGroupList: [
+          {
+            name: "Core",
+            monitorList: [
+              { id: 5, sendUrl: true },
+              { id: 6, type: "http" },
+            ],
+          },
+          { name: "Edge", weight: 9, monitorList: [] },
+        ],
+      });
+      const r = await run(
+        sb,
+        ["status-pages", "save", "status", "--config-file", f],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(0);
+      const sent = callsOf("saveStatusPage")[0]!.args;
+      expect(sent[0]).toBe("status");
+      const config = sent[1] as Record<string, unknown>;
+      expect(config).toMatchObject({
+        slug: "status",
+        title: "Renamed page",
+        description: "new desc",
+        theme: "dark",
+        showTags: true,
+        domainNameList: ["status.example.com"],
+      });
+      // untouched fields keep the fetched values
+      expect(config.footerText).toBe(STATUS.footerText);
+      expect(config.published).toBe(true);
+      // no logo in the file: the fetched icon goes as imgDataUrl
+      expect(sent[2]).toBe("/icon.svg");
+      // groups and monitors are reduced to what the handler reads
+      expect(sent[3]).toEqual([
+        { name: "Core", monitorList: [{ id: 5, sendUrl: true }, { id: 6 }] },
+        { name: "Edge", monitorList: [] },
+      ]);
+      const j = r.json();
+      expect(j.title).toBe("Renamed page");
+      expect(j.slug).toBe("status");
+      expect(j.incident).toBeNull();
+      // the save response's groups carry the new ids
+      expect(j.publicGroupList).toEqual([
+        { name: "Core", monitorList: [{ id: 5, sendUrl: true }, { id: 6 }], id: 1 },
+        { name: "Edge", monitorList: [], id: 2 },
+      ]);
+      expect(kuma.state.statusPages.find((p) => p.id === 7)!.title).toBe("Renamed page");
+    });
+
+    test("a slug in the file renames the page", async () => {
+      const f = writeJson("page.json", { slug: " New-Status ", title: "x" });
+      const r = await run(
+        sb,
+        ["status-pages", "save", "status", "--config-file", f],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(0);
+      expect(r.json().slug).toBe("new-status");
+      expect(r.json().title).toBe("x");
+      const sent = callsOf("saveStatusPage")[0]!.args;
+      // the page is found by the old slug and stored under the new one
+      expect(sent[0]).toBe("status");
+      expect((sent[1] as Record<string, unknown>).slug).toBe("new-status");
+      expect(kuma.state.statusPages.find((p) => p.id === 7)!.slug).toBe("new-status");
+      // the printed config is read back under the new slug
+      expect(callsOf("getStatusPage").at(-1)!.args).toEqual(["new-status"]);
+    });
+
+    test("a slug rename onto another page exits 3", async () => {
+      const f = writeJson("page.json", { slug: "ops" });
+      const r = await run(
+        sb,
+        ["status-pages", "save", "status", "--config-file", f],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(3);
+      expect(r.json()).toEqual({ id: 9, slug: "ops", title: "Ops page", skipped: true });
+      expect(callsOf("saveStatusPage")).toHaveLength(0);
+    });
+
+    test("an unknown slug exits 1 without calling saveStatusPage", async () => {
+      const f = writeJson("page.json", { title: "x" });
+      const r = await run(
+        sb,
+        ["status-pages", "save", "ghost", "--config-file", f],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("status page ghost not found");
+      expect(callsOf("saveStatusPage")).toHaveLength(0);
+    });
+
+    test("a group id that is not a fetched group exits 1", async () => {
+      kuma.state.statusPageGroups[7] = [{ id: 3, name: "Core", weight: 1, monitorList: [] }];
+      const f = writeJson("page.json", {
+        publicGroupList: [{ id: 99, name: "G", monitorList: [] }],
+      });
+      const r = await run(
+        sb,
+        ["status-pages", "save", "status", "--config-file", f],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("status page group 99 not found");
+      expect(callsOf("saveStatusPage")).toHaveLength(0);
+    });
+
+    test("an existing group id is kept and unlisted groups are deleted", async () => {
+      kuma.state.statusPageGroups[7] = [
+        {
+          id: 3,
+          name: "Old",
+          weight: 1,
+          monitorList: [{ id: 5, name: "web", sendUrl: 0, type: "http" }],
+        },
+        { id: 4, name: "Dropped", weight: 2, monitorList: [] },
+      ];
+      const f = writeJson("page.json", {
+        publicGroupList: [{ id: 3, name: "Core", monitorList: [{ id: 6, sendUrl: true }] }],
+      });
+      const r = await run(
+        sb,
+        ["status-pages", "save", "status", "--config-file", f],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(0);
+      expect(kuma.state.statusPageGroups[7]).toEqual([
+        {
+          id: 3,
+          name: "Core",
+          weight: 1,
+          monitorList: [
+            {
+              id: 6,
+              name: "api",
+              sendUrl: true,
+              type: "http",
+              url: "https://api.example.com",
+            },
+          ],
+        },
+      ]);
+    });
+
+    test("a monitor id that does not exist exits 1", async () => {
+      const f = writeJson("page.json", {
+        publicGroupList: [{ name: "G", monitorList: [{ id: 42 }] }],
+      });
+      const r = await run(
+        sb,
+        ["status-pages", "save", "status", "--config-file", f],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("monitor 42 not found");
+      expect(callsOf("saveStatusPage")).toHaveLength(0);
+    });
+
+    test("without publicGroupList the fetched groups are sent back reduced", async () => {
+      kuma.state.statusPageGroups[7] = [
+        {
+          id: 3,
+          name: "Core",
+          weight: 1,
+          monitorList: [
+            {
+              id: 5,
+              name: "web",
+              sendUrl: 1,
+              type: "http",
+              url: "https://example.com",
+              tags: [{ name: "prod" }],
+            },
+          ],
+        },
+      ];
+      const f = writeJson("page.json", { title: "x" });
+      const r = await run(
+        sb,
+        ["status-pages", "save", "status", "--config-file", f],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(0);
+      // the 0/1 sendUrl spelling and the extra monitor keys survive the round-trip
+      expect(callsOf("saveStatusPage")[0]!.args[3]).toEqual([
+        { id: 3, name: "Core", monitorList: [{ id: 5, sendUrl: 1 }] },
+      ]);
+    });
+
+    test("an empty publicGroupList deletes every group", async () => {
+      kuma.state.statusPageGroups[7] = [{ id: 3, name: "Core", weight: 1, monitorList: [] }];
+      const f = writeJson("page.json", { publicGroupList: [] });
+      const r = await run(
+        sb,
+        ["status-pages", "save", "status", "--config-file", f],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(0);
+      expect(callsOf("saveStatusPage")[0]!.args[3]).toEqual([]);
+      expect(kuma.state.statusPageGroups[7]).toEqual([]);
+    });
+
+    test("a logo URL becomes imgDataUrl and a PNG data URL is stored as an upload", async () => {
+      const f = writeJson("page.json", { logo: "https://cdn.example.com/logo.png" });
+      const r = await run(
+        sb,
+        ["status-pages", "save", "status", "--config-file", f],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(0);
+      expect(callsOf("saveStatusPage")[0]!.args[2]).toBe("https://cdn.example.com/logo.png");
+      expect(kuma.state.statusPages.find((p) => p.id === 7)!.icon).toBe(
+        "https://cdn.example.com/logo.png",
+      );
+
+      const f2 = writeJson("page2.json", { logo: "data:image/png;base64,iVBORw0KGgo=" });
+      const r2 = await run(
+        sb,
+        ["status-pages", "save", "status", "--config-file", f2],
+        creds(kuma.url),
+      );
+      expect(r2.code).toBe(0);
+      expect(callsOf("saveStatusPage")[1]!.args[2]).toBe("data:image/png;base64,iVBORw0KGgo=");
+      expect(kuma.state.statusPages.find((p) => p.id === 7)!.icon).toMatch(
+        /^\/upload\/logo7\.png\?t=/,
+      );
+    });
+
+    test("saveStatusPage ok:false exits 1 with Kuma's message", async () => {
+      kuma.state.fail.saveStatusPage = "Only allowed PNG logo.";
+      const f = writeJson("page.json", { title: "x" });
+      const r = await run(
+        sb,
+        ["status-pages", "save", "status", "--config-file", f],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("Only allowed PNG logo.");
+    });
+
+    test("without --config-file exits 2 before connecting", async () => {
+      const r = await run(sb, ["status-pages", "save", "status"], creds(kuma.url));
+      expect(r.code).toBe(2);
+      expect(kuma.calls).toHaveLength(0);
+    });
+
+    test("a missing config file exits 2 before connecting", async () => {
+      const r = await run(
+        sb,
+        ["status-pages", "save", "status", "--config-file", join(sb.dir, "nope.json")],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(kuma.calls).toHaveLength(0);
+    });
+
+    test.each([
+      ["an unknown key", { id: 1 }],
+      ["published", { published: false }],
+      ["icon", { icon: "/x.png" }],
+      ["a numeric slug", { slug: 5 }],
+      ["a bad slug", { slug: "a_b" }],
+      ["a blank slug", { slug: "   " }],
+      ["an empty title", { title: "" }],
+      ["a numeric title", { title: 5 }],
+      ["a bad theme", { theme: "neon" }],
+      ["a numeric theme", { theme: 1 }],
+      ["a string showTags", { showTags: "yes" }],
+      ["a numeric description", { description: 5 }],
+      ["a numeric footerText", { footerText: 5 }],
+      ["an object customCSS", { customCSS: {} }],
+      ["a numeric googleAnalyticsId", { googleAnalyticsId: 5 }],
+      ["a string domainNameList", { domainNameList: "x.example.com" }],
+      ["a numeric domain", { domainNameList: ["ok", 5] }],
+      ["a numeric logo", { logo: 5 }],
+      ["a jpeg data url", { logo: "data:image/jpeg;base64,AAA" }],
+      ["a non-png data url", { logo: "data:text/plain;base64,AAA" }],
+      ["a string publicGroupList", { publicGroupList: "x" }],
+      ["a non-object group", { publicGroupList: [5] }],
+      ["a group without monitorList", { publicGroupList: [{ name: "G" }] }],
+      ["a group without name", { publicGroupList: [{ monitorList: [] }] }],
+      ["an empty group name", { publicGroupList: [{ name: "", monitorList: [] }] }],
+      ["a fractional group id", { publicGroupList: [{ id: 1.5, name: "G", monitorList: [] }] }],
+      ["a non-object monitor", { publicGroupList: [{ name: "G", monitorList: [5] }] }],
+      ["a monitor without id", { publicGroupList: [{ name: "G", monitorList: [{}] }] }],
+      ["a zero monitor id", { publicGroupList: [{ name: "G", monitorList: [{ id: 0 }] }] }],
+      [
+        "a string sendUrl",
+        { publicGroupList: [{ name: "G", monitorList: [{ id: 5, sendUrl: "yes" }] }] },
+      ],
+      [
+        "a numeric sendUrl",
+        { publicGroupList: [{ name: "G", monitorList: [{ id: 5, sendUrl: 2 }] }] },
+      ],
+    ])("an invalid file (%s) exits 2 before connecting", async (_label, value) => {
+      const f = writeJson("page.json", value as Record<string, unknown>);
+      const r = await run(
+        sb,
+        ["status-pages", "save", "status", "--config-file", f],
         creds(kuma.url),
       );
       expect(r.code).toBe(2);

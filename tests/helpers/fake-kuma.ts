@@ -988,6 +988,117 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
       }
       return { ok: true };
     });
+
+    // saveStatusPage of Kuma 1.23.17: finds the page by the first slug arg,
+    // overwrites every config column it reads (a missing key becomes null),
+    // rewrites the domain names, then replaces the whole public group set —
+    // groups not in the list are deleted. It answers { ok, publicGroupList }
+    // with the sent groups mutated to carry their (new) ids.
+    handle(
+      "saveStatusPage",
+      (
+        slug: string,
+        config: Record<string, any>,
+        imgDataUrl: string,
+        publicGroupList: Record<string, any>[],
+      ) => {
+        const page = state.statusPages.find((p) => p.slug === slug);
+        // R.findOne returns null and the handler throws "No slug?"
+        if (page === undefined) throw new Error("No slug?");
+        checkStatusPageSlug(config?.slug);
+        // imgDataUrl.startsWith crashes on a missing value like the real one;
+        // a data: URL must be PNG, anything else becomes the icon verbatim
+        if (imgDataUrl.startsWith("data:")) {
+          if (!imgDataUrl.startsWith("data:image/png;base64,")) {
+            throw new Error("Only allowed PNG logo.");
+          }
+          // ImageDataURI.outputFile is not faked; only the stored icon matters
+          page.icon = `/upload/logo${page.id}.png?t=${Date.now()}`;
+        } else {
+          // getIcon() reports /icon.svg for a falsy stored icon
+          page.icon = imgDataUrl || "/icon.svg";
+        }
+        // the handler stores config.slug verbatim: checkSlug trims only its
+        // own copy, so surrounding spaces would be stored too
+        page.slug = config.slug;
+        page.title = config.title;
+        page.description = config.description;
+        page.theme = config.theme;
+        page.showTags = config.showTags;
+        page.footerText = config.footerText;
+        page.customCSS = config.customCSS;
+        page.showPoweredBy = config.showPoweredBy;
+        page.showCertificateExpiry = config.showCertificateExpiry;
+        page.googleAnalyticsId = config.googleAnalyticsId;
+        // updateDomainNameList: not an array throws "Invalid array", a
+        // non-string entry "Invalid domain"; blanks are skipped and a domain
+        // moves off the page that had it
+        if (!Array.isArray(config.domainNameList)) throw new Error("Invalid array");
+        for (const d of config.domainNameList) {
+          if (typeof d !== "string") throw new Error("Invalid domain");
+        }
+        const domains = (config.domainNameList as string[]).filter((d) => d.trim() !== "");
+        for (const p of state.statusPages) {
+          if (p.id !== page.id && Array.isArray(p.domainNameList)) {
+            p.domainNameList = p.domainNameList.filter((d) => !domains.includes(d));
+          }
+        }
+        page.domainNameList = domains;
+
+        const kept: Record<string, unknown>[] = [];
+        const existing = state.statusPageGroups[page.id] ?? [];
+        const nextGroupId = () =>
+          Math.max(
+            0,
+            ...Object.values(state.statusPageGroups)
+              .flat()
+              .map((g) => Number(g.id)),
+            ...kept.map((g) => Number(g.id)),
+          ) + 1;
+        let groupOrder = 1;
+        for (const g of publicGroupList) {
+          // findOne hits the DB, which already holds the groups stored earlier
+          // in this same loop, so the lookup pool is old plus just-written
+          const wantedId = g.id ? Number(g.id) : undefined;
+          const found =
+            wantedId === undefined
+              ? undefined
+              : [...existing, ...kept].find((x) => x.id === wantedId);
+          // findOne("id = ? AND public = 1 AND status_page_id = ?") returns
+          // null for another page's group and the handler throws on it
+          if (wantedId !== undefined && found === undefined) {
+            throw new TypeError("Cannot set properties of null (setting 'status_page_id')");
+          }
+          const id = found === undefined ? nextGroupId() : Number(found.id);
+          const monitorList: Record<string, unknown>[] = [];
+          for (const m of g.monitorList) {
+            const mon = state.monitors.find((x) => x.id === Number(m?.id));
+            // monitor_group.monitor_id references monitor(id)
+            if (mon === undefined) throw new Error("FOREIGN KEY constraint failed");
+            // send_url is only written when the key is present; the column
+            // defaults to 0
+            const sendUrl = m?.sendUrl === undefined ? 0 : m.sendUrl;
+            const row: Record<string, unknown> = {
+              id: mon.id,
+              name: mon.name,
+              sendUrl,
+              type: mon.type,
+            };
+            if (sendUrl) row.url = mon.url;
+            monitorList.push(row);
+          }
+          const row = { id, name: g.name, weight: groupOrder++, monitorList };
+          const at = kept.findIndex((x) => x.id === id);
+          if (at >= 0) kept[at] = row;
+          else kept.push(row);
+          // the handler mutates the sent object so the callback carries ids
+          g.id = id;
+        }
+        // groups of this page that are not in the list are deleted
+        state.statusPageGroups[page.id] = kept;
+        return { ok: true, publicGroupList };
+      },
+    );
   });
 
   // GET /api/status-page/:slug of status-page-router.js: the public status
