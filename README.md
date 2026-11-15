@@ -1,6 +1,6 @@
 # uptime-kuma-cli
 
-CLI for Uptime Kuma 1.23 over its Socket.IO API: monitors, beats, status changes, notifications, proxies and tags.
+CLI for Uptime Kuma 1.23 over its Socket.IO API: monitors, beats, status changes, notifications, proxies, maintenance windows and tags.
 
 Existing CLIs cover monitors but not proxies, notification tests, or status changes; see `docs/design/cli.md` for the comparison and the full specification.
 
@@ -93,9 +93,20 @@ uptime-kuma-cli tags list
 uptime-kuma-cli tags add --name prod --color "#22c55e"
 uptime-kuma-cli tags edit 3 --name production
 uptime-kuma-cli tags delete 3 --yes
+
+uptime-kuma-cli maintenance list
+uptime-kuma-cli maintenance add --title "db upgrade" --strategy manual --paused
+uptime-kuma-cli maintenance add --title "nightly" --strategy recurring-weekday --config-file nightly.json
+uptime-kuma-cli maintenance edit 4 --title "db upgrade (extended)"
+uptime-kuma-cli maintenance monitors 4 --add 14
+uptime-kuma-cli maintenance status-pages 4 --set-ids 2
+uptime-kuma-cli maintenance pause 4
+uptime-kuma-cli maintenance resume 4
+uptime-kuma-cli maintenance delete 4 --yes
 ```
 
-- `monitors add` and `tags add` exit 3 and send nothing when the same name exists; `monitors tag` exits 3 when the same tag+value is already attached. `monitors add --tag <id[:value]>` attaches tags at creation
+- `monitors add` and `tags add` exit 3 and send nothing when the same name exists; `maintenance add` does the same for a title; `monitors tag` exits 3 when the same tag+value is already attached. `monitors add --tag <id[:value]>` attaches tags at creation
+- `maintenance add` / `edit` take `--config-file` for the schedule fields of the `cron` and `recurring-*` strategies; `maintenance monitors` / `status-pages` replace the whole attached set — Kuma's attach events delete every existing row first, they do not add
 - Push monitors get their token in the same `add` call; the output carries `pushToken` and `pushUrl`
 - `--paused` creates the monitor without starting it (push to a paused monitor returns HTTP 404, so resume before the pusher starts)
 - Kuma only notifies on status changes; with `resendInterval` 0 a monitor that stays down does not notify again

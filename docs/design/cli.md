@@ -15,7 +15,7 @@
 - Socket.IO v4 client (`socket.io-client`) against the Kuma base URL, `transports: ["websocket"]`
 - Kuma 1.23 has no OpenAPI / REST API for management (only badge, push, status page and metrics are REST), so the CLI talks Socket.IO
 - Log in with `login` `{ username, password, token: "" }`; the callback returns `{ ok, msg }`
-- After login the server pushes `monitorList` (object keyed by id), `notificationList` (array), `proxyList` (array), `dockerHostList` (array), then one `heartbeatList (monitorID, beats)` and one `importantHeartbeatList (monitorID, beats)` per monitor. There is no pushed tag list: each monitor's `tags` is the `monitor_tag`⋈`tag` join (`{ id, monitor_id, tag_id, value, name, color }`, ordered by tag name) and the tag table itself is only readable through `getTags`
+- After login the server pushes `monitorList` (object keyed by id), `maintenanceList` (object keyed by id), `notificationList` (array), `proxyList` (array), `dockerHostList` (array), then `statusPageList` (object keyed by id) about 500ms later, then one `heartbeatList (monitorID, beats)` and one `importantHeartbeatList (monitorID, beats)` per monitor. There is no pushed tag list: each monitor's `tags` is the `monitor_tag`⋈`tag` join (`{ id, monitor_id, tag_id, value, name, color }`, ordered by tag name) and the tag table itself is only readable through `getTags`
 - Request events used, all with a trailing callback returning `{ ok, msg, ... }`:
     - `add (monitor)` → `monitorID`
     - `editMonitor (monitor)` → `monitorID`
@@ -29,6 +29,9 @@
     - `getTags ()` → `tags` (`{ id, name, color }` rows)
     - `addTag ({ name, color })` → `tag`; `editTag ({ id, name, color })` → `tag` (overwrites both fields, `ok:false "Tag not found"` for an unknown id); `deleteTag (id)` answers ok even for an unknown id
     - `addMonitorTag (tagID, monitorID, value)` / `editMonitorTag (tagID, monitorID, value)` / `deleteMonitorTag (tagID, monitorID, value)`; none of them pushes `monitorList` again, so the CLI's pushed copy goes stale within a run (each command logs in once, so the next run sees the new state)
+    - `addMaintenance (maintenance)` → `maintenanceID`; `editMaintenance (maintenance)` runs `jsonToBean`, which overwrites every field it reads, so an edit sends the whole fetched object; `getMaintenance (id)` → `maintenance`; `deleteMaintenance (id)` / `pauseMaintenance (id)` / `resumeMaintenance (id)` answer `{ ok, msg }`
+    - `getMonitorMaintenance (id)` → `monitors` (`{ id }` rows); `addMonitorMaintenance (id, [{ id }])` DELETEs the maintenance's `monitor_maintenance` rows and INSERTs the sent ids — it replaces the whole set, it does not add
+    - `getMaintenanceStatusPage (id)` → `statusPages` (`{ id, title }` rows); `addMaintenanceStatusPage (id, [{ id }])` replaces the `maintenance_status_page` set the same way
 - A request whose callback has `ok: false` exits 1 with `msg` on stderr
 
 ## Configuration
@@ -58,7 +61,7 @@
 | 0 | done |
 | 1 | Kuma answered no (`ok: false`, unknown id) |
 | 2 | configuration, usage (including a missing subcommand), connection, login, disconnect, or timeout failure |
-| 3 | a create or attach was skipped because it already exists (`monitors add` / `tags add` same name, `monitors tag` same tag+value) |
+| 3 | a create or attach was skipped because it already exists (`monitors add` / `tags add` / `maintenance add` same name or title, `monitors tag` same tag+value) |
 | 70 | unexpected error |
 
 ## Commands
@@ -145,6 +148,31 @@
 - `tags add --name <name> --color <#rgb|#rrggbb>`: `--color` must be `#rgb` or `#rrggbb` and `--name` must not be empty (exit 2 before connecting). A tag with the same name (exact) already present prints `{ id, name, skipped: true }` and exits 3 without sending `addTag` — the name is not unique in Kuma, the skip is a CLI convention like `monitors add`. Otherwise sends `addTag` and prints `{ id, name, color }`; an `addTag` answer without `tag.id` exits 70
 - `tags edit <id> [--name n] [--color c]`: at least one flag (exit 2 before connecting); `--name` must not be empty, and a `--name` that differs from the current name and is already used by another tag exits 1 naming that tag's id (the 1.23.17 TagEditDialog refuses it too; keeping the current name is fine even when another tag shares it — Kuma allows duplicate names). `editTag` overwrites both fields, so the flag not given keeps the stored value. Unknown id exits 1. Prints `{ id, name, color }`
 - `tags delete <id> --yes`: sends `deleteTag` and prints `{ id, deleted: true }`; without `--yes` exits 2 before connecting. The id is checked against `getTags` first because Kuma answers ok even for an unknown id; the monitor_tag rows cascade
+
+### maintenance
+
+- maintenance windows come from the pushed `maintenanceList`; every command checks the id against it before requesting because `getMaintenance` of an unknown id dies inside `toJSON` rather than answering cleanly
+- `maintenance list`: array sorted by id of `{ id, title, strategy, active, status }`; `status` is Kuma's computed value (`inactive`, `scheduled`, `under-maintenance`, `ended`, `unknown`)
+- `maintenance get <id>`: the `getMaintenance` object; unknown id exits 1
+- `maintenance add --title <t> --strategy <s> [--description d] [--start <ISO> --end <ISO>] [--timezone <tz>] [--paused] [--config-file <json>]`
+    - `--strategy` is one of `manual`, `single`, `cron`, `recurring-interval`, `recurring-weekday`, `recurring-day-of-month`
+    - the payload starts from the UI's `isAdd` defaults (`cron: "30 3 * * *"`, `durationMinutes: 60`, `intervalDay: 1`, `timeRange` 02:00–03:00, empty `weekdays` / `daysOfMonth`, `dateRange: []`, `timezoneOption: "SAME_AS_SERVER"`, `active: true`); `dateRange` is always an array because `jsonToBean` indexes `dateRange[0]` unconditionally
+    - `--start` / `--end` (ISO 8601 datetimes, end after start) are the `single` window: required for `single`, refused for the other five strategies — exit 2 before connecting
+    - `--timezone` takes an IANA name or `SAME_AS_SERVER`; an invalid name exits 2 because `dayjs.tz` throws inside `toJSON` and would break the `maintenanceList` push for every client
+    - `--config-file` is merged after the typed flags and carries the schedule fields of the other strategies: `cron` needs `cron` (non-empty string) and `durationMinutes` (positive integer); every `recurring-*` needs `timeRange` (two `{hours, minutes, seconds?}` objects), `weekdays` (integers 0–6), `daysOfMonth` (integers 1–31 or `"lastDay1"`) and `intervalDay` (positive integer); `recurring-weekday` additionally needs a non-empty `weekdays` and `recurring-day-of-month` a non-empty `daysOfMonth`, because `generateCron` joins them into the cron expression. A missing or malformed field exits 2 before connecting instead of failing inside Kuma. The defaults already satisfy `cron` and `recurring-interval`, so those two need no config file
+    - `--config-file` cannot set `id`; same title already present (exact match) prints `{ id, title, skipped: true }` and exits 3 without sending `addMaintenance`
+    - prints `{ id, title, strategy, active }`
+- `maintenance edit <id> [--title t] [--description d] [--start --end] [--timezone tz] [--set k=v]... [--config-file <json>]`
+    - `editMaintenance` runs `jsonToBean` over the whole object, so the CLI fetches the maintenance, merges and sends it back; at least one change is required (exit 2 before connecting)
+    - precedence: fetched < `--config-file` < `--set` < typed flags; `id` is refused in `--set` and `--config-file`
+    - the same field validation as add runs on the merged object, scoped like `monitors edit`: only touched keys are judged, plus every field the new strategy requires when `strategy` changes — a `--title` edit on a cron maintenance does not re-judge its cron fields
+    - prints the maintenance as Kuma saved it
+- `maintenance pause <id>` / `maintenance resume <id>`: prints `{ id, active }`
+- `maintenance delete <id> --yes`: sends `deleteMaintenance`, prints `{ id, deleted: true }`; without `--yes` exits 2 before connecting; unknown id exits 1 because the delete answers ok even for unknown ids
+- `maintenance monitors <id>` and `maintenance status-pages <id>` show or change what a maintenance affects: `[{ id, name }]` for monitors, `[{ id, title }]` for status pages, sorted by id
+    - `--add <id>` / `--remove <id>` (repeatable) read the current set (`getMonitorMaintenance` / `getMaintenanceStatusPage`), apply the change locally and send the full set; `--set-ids <id,...>` replaces it exactly (`--set-ids ""` clears it) and cannot be combined with `--add` / `--remove` (exit 2)
+    - every supplied id must exist in the pushed `monitorList` / `statusPageList` — exit 1 — and the maintenance id is checked against `maintenanceList` first
+    - the `add*` events DELETE every row the maintenance has and INSERT the sent ids: they replace the whole set, they do not add. That is why `--add` reads the current set first — sending only the new id would wipe the rest
 
 ## Tests
 

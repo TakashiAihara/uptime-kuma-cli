@@ -39,6 +39,14 @@ export type ProxyRow = {
   default: number;
   created_date: string;
 };
+// The statusPageList push carries StatusPage.toJSON(); the fake keeps the
+// fields fixtures set (id and title are what the CLI reads).
+export type StatusPageRow = {
+  id: number;
+  title: string;
+  slug?: string;
+} & Record<string, unknown>;
+
 export type Call = { event: string; args: unknown[] };
 export type TagRow = { id: number; name: string; color: string };
 // monitor.toJSON sends monitor.tags as the monitor_tag⋈tag join:
@@ -50,6 +58,27 @@ export type MonitorTagRow = {
   value: string | null;
   name: string;
   color: string;
+};
+// The maintenanceList push and getMaintenance carry Maintenance.toJSON(): the
+// public shape. The fake stores these fields and derives timeslotList/status
+// on emit like the real model does; every field but id is optional so
+// fixtures can stay small.
+export type MaintenanceRow = {
+  id: number;
+  title?: string;
+  description?: string;
+  strategy?: string;
+  intervalDay?: number | null;
+  active?: boolean;
+  // toJSON's dateRange: [start|null] with end appended only when set
+  dateRange?: (string | null)[];
+  timeRange?: { hours: number; minutes: number; seconds?: number }[];
+  weekdays?: unknown[];
+  daysOfMonth?: unknown[];
+  cron?: string | null;
+  duration?: number | null;
+  timezone?: string;
+  timezoneOption?: string | null;
 };
 
 export type FakeState = {
@@ -63,6 +92,14 @@ export type FakeState = {
   tags: TagRow[];
   // rows pushed as dockerHostList after login; the CLI checks docker_host ids against them
   dockerHosts: { id: number }[];
+  // rows pushed as statusPageList after login (StatusPage.toJSON values)
+  statusPages: StatusPageRow[];
+  // rows pushed as maintenanceList after login and returned by getMaintenance
+  maintenances: MaintenanceRow[];
+  // maintenance_id -> attached monitor ids / status page ids (the
+  // monitor_maintenance and maintenance_status_page join tables)
+  maintenanceMonitors: Record<number, number[]>;
+  maintenanceStatusPages: Record<number, number[]>;
   // event name -> msg; the next call to that event answers { ok: false, msg }.
   // an array arms one outcome per call in order; a null entry lets that call through
   fail: Record<string, string | (string | null)[]>;
@@ -75,6 +112,8 @@ export type FakeState = {
   twoFA: boolean;
   // addTag answer override; null uses the stored-tag answer
   addTagResult: Record<string, unknown> | null;
+  // addMaintenance answer override; null uses the stored-row answer
+  addMaintenanceResult: Record<string, unknown> | null;
   // event name whose request makes the server drop the connection without answering
   disconnectOn: string | null;
   // after the login answer, drop the connection instead of pushing the lists
@@ -178,12 +217,17 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     proxies: [],
     tags: [],
     dockerHosts: [],
+    statusPages: [],
+    maintenances: [],
+    maintenanceMonitors: {},
+    maintenanceStatusPages: {},
     fail: {},
     silentHeartbeat: [],
     testNotificationResult: { ok: true, msg: "Sent Successfully." },
     settings: {},
     twoFA: false,
     addTagResult: null,
+    addMaintenanceResult: null,
     disconnectOn: null,
     dropInsteadOfLists: false,
     dropAfterLists: false,
@@ -214,6 +258,141 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
       0,
       ...state.monitors.flatMap((m) => tagsOf(m).map((t) => (typeof t.id === "number" ? t.id : 0))),
     ) + 1;
+
+  // Maintenance.getStatus of Kuma 1.23.17, approximated: the real one parses
+  // start/end in the maintenance timezone; the fake compares the instants, so
+  // tests should use Z-suffixed or distant dates.
+  const maintenanceStatus = (m: {
+    active: boolean;
+    strategy: string;
+    dateRange: (string | null)[];
+  }): string => {
+    if (!m.active) return "inactive";
+    if (m.strategy === "manual") return "under-maintenance";
+    const now = Date.now();
+    const start = m.dateRange[0];
+    const end = m.dateRange[1];
+    if (start && Date.parse(start) > now) return "scheduled";
+    if (end && Date.parse(end) < now) return "ended";
+    if (m.strategy === "single") return "under-maintenance";
+    return "unknown";
+  };
+
+  // dayjs.tz(dayjs(), tz).format("Z"): the current UTC offset of the timezone
+  const timezoneOffset = (timezone: string): string => {
+    const name = new Intl.DateTimeFormat("en-US", {
+      timeZone: timezone,
+      timeZoneName: "longOffset",
+    })
+      .formatToParts(new Date())
+      .find((p) => p.type === "timeZoneName")?.value;
+    const match = /^GMT([+-])(\d{2}):(\d{2})$/.exec(name ?? "");
+    return match ? `${match[1]}${match[2]}:${match[3]}` : "+00:00";
+  };
+
+  // Maintenance.toPublicJSON of Kuma 1.23.17 for the fields the CLI sees;
+  // timeslotList and status are derived, missing columns get the model's
+  // defaults (the fake's server timezone is UTC). durationMinutes is
+  // parseInt(duration / 60) and timezoneOffset the current offset, both
+  // derived like the real toJSON.
+  const maintenanceJSON = (m: MaintenanceRow): Record<string, unknown> => {
+    const strategy = m.strategy ?? "single";
+    const active = m.active === undefined ? true : Boolean(m.active);
+    const dateRange = m.dateRange ?? [null];
+    const timezoneOption = m.timezoneOption ?? null;
+    const timezone =
+      m.timezone ??
+      (timezoneOption === null || timezoneOption === "" || timezoneOption === "SAME_AS_SERVER"
+        ? "UTC"
+        : timezoneOption);
+    const start = dateRange[0] ?? null;
+    const end = dateRange[1] ?? null;
+    return {
+      id: m.id,
+      title: m.title ?? "",
+      description: m.description ?? "",
+      strategy,
+      intervalDay: m.intervalDay ?? null,
+      active,
+      dateRange,
+      timeRange: m.timeRange ?? [
+        { hours: 0, minutes: 0 },
+        { hours: 0, minutes: 0 },
+      ],
+      weekdays: m.weekdays ?? [],
+      daysOfMonth: m.daysOfMonth ?? [],
+      timeslotList: strategy === "single" ? [{ startDate: start, endDate: end }] : [],
+      cron: m.cron ?? null,
+      duration: m.duration ?? null,
+      durationMinutes: typeof m.duration === "number" ? Math.trunc(m.duration / 60) : null,
+      timezone,
+      timezoneOption,
+      timezoneOffset: timezoneOffset(timezone),
+      status: maintenanceStatus({ active, strategy, dateRange }),
+    };
+  };
+
+  const maintenanceListJSON = () =>
+    Object.fromEntries(state.maintenances.map((m) => [String(m.id), maintenanceJSON(m)]));
+
+  // Maintenance.jsonToBean of Kuma 1.23.17: assigns the listed fields
+  // unconditionally, dateRange into start/end dates, and the schedule fields
+  // only for the strategy that reads them; everything else keeps the stored
+  // value. Rows are kept in the toJSON shape, so dateRange and the resolved
+  // timezone are rebuilt the way toJSON emits them. recurring-* keeps the
+  // stored cron/duration: generateCron and validateCron are not faked.
+  const applyMaintenanceJson = (
+    before: MaintenanceRow | null,
+    obj: Record<string, unknown>,
+  ): MaintenanceRow => {
+    const dateRange = obj.dateRange as (string | null)[];
+    const start = dateRange[0] || null;
+    const end = dateRange[1] || null;
+    const strategy = (obj.strategy as string | undefined) ?? before?.strategy ?? "single";
+    const timezoneOption = (obj.timezoneOption as string | null | undefined) ?? null;
+    const row: MaintenanceRow = {
+      ...before,
+      id: before?.id ?? (obj.id as number),
+      title: obj.title as string,
+      description: obj.description as string,
+      strategy,
+      intervalDay: (obj.intervalDay as number | null | undefined) ?? null,
+      active: Boolean(obj.active),
+      dateRange: end === null ? [start] : [start, end],
+      timezoneOption,
+      timezone:
+        timezoneOption === null || timezoneOption === "" || timezoneOption === "SAME_AS_SERVER"
+          ? "UTC"
+          : timezoneOption,
+    };
+    if (strategy === "cron") {
+      row.cron = (obj.cron as string | null | undefined) ?? null;
+      row.duration = typeof obj.durationMinutes === "number" ? obj.durationMinutes * 60 : null;
+    } else if (strategy.startsWith("recurring-")) {
+      // parseTimeFromTimeObject -> stored "HH:mm[:ss]" -> parseTimeObject adds
+      // seconds: 0; a missing timeRange throws like the real indexing does
+      const tr = obj.timeRange as { hours: number; minutes: number; seconds?: number }[];
+      const toTime = (t: { hours: number; minutes: number; seconds?: number } | undefined) =>
+        t === undefined
+          ? { hours: 0, minutes: 0 }
+          : { hours: t.hours, minutes: t.minutes, seconds: t.seconds ?? 0 };
+      row.timeRange = [toTime(tr[0]), toTime(tr[1])];
+      row.weekdays = (obj.weekdays as unknown[] | undefined) ?? [];
+      row.daysOfMonth = (obj.daysOfMonth as unknown[] | undefined) ?? [];
+    } else if (before === null) {
+      // manual/single never write the schedule columns; a fresh bean has the
+      // DB defaults (NULL times -> {0,0}, '[]' -> [])
+      row.timeRange = [
+        { hours: 0, minutes: 0 },
+        { hours: 0, minutes: 0 },
+      ];
+      row.weekdays = [];
+      row.daysOfMonth = [];
+      row.cron = null;
+      row.duration = null;
+    }
+    return row;
+  };
 
   io.on("connection", (socket) => {
     let loggedIn = false;
@@ -266,6 +445,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
           return;
         }
         socket.emit("monitorList", monitorList());
+        socket.emit("maintenanceList", maintenanceListJSON());
         socket.emit(
           "notificationList",
           state.notifications.map((n) => structuredClone(n)),
@@ -277,6 +457,12 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
         socket.emit(
           "dockerHostList",
           state.dockerHosts.map((h) => structuredClone(h)),
+        );
+        // Kuma pushes this one ~500ms after the other lists (afterLogin sleeps
+        // first); the fake sends it in the same batch, the CLI waits either way
+        socket.emit(
+          "statusPageList",
+          Object.fromEntries(state.statusPages.map((p) => [String(p.id), structuredClone(p)])),
         );
         for (const m of state.monitors) {
           if (state.silentHeartbeat.includes(m.id)) continue;
@@ -484,6 +670,104 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
         m.tags = tagsOf(m).filter((t) => t.tag_id !== Number(id));
       }
       return { ok: true, msg: "Deleted Successfully." };
+    });
+
+    handle("getMaintenance", (id: number) => {
+      const m = state.maintenances.find((x) => x.id === Number(id));
+      // R.findOne returns null and bean.toJSON() throws, like getMonitor
+      if (!m) throw new Error("Cannot read properties of null (reading 'toJSON')");
+      return { ok: true, maintenance: maintenanceJSON(m) };
+    });
+
+    handle("addMaintenance", (maintenance: Record<string, unknown>) => {
+      if (state.addMaintenanceResult !== null) return state.addMaintenanceResult;
+      const id = Math.max(0, ...state.maintenances.map((m) => m.id)) + 1;
+      const row = applyMaintenanceJson(null, { ...maintenance, id });
+      state.maintenances.push(row);
+      socket.emit("maintenanceList", maintenanceListJSON());
+      return { ok: true, msg: "Added Successfully.", maintenanceID: id };
+    });
+
+    handle("editMaintenance", (maintenance: Record<string, unknown>) => {
+      const i = state.maintenances.findIndex((m) => m.id === Number(maintenance.id));
+      // server.getMaintenance returns null and bean.user_id throws
+      if (i < 0) throw new Error("Cannot read properties of null (reading 'user_id')");
+      const row = applyMaintenanceJson(state.maintenances[i]!, maintenance);
+      state.maintenances[i] = row;
+      socket.emit("maintenanceList", maintenanceListJSON());
+      return { ok: true, msg: "Saved.", maintenanceID: row.id };
+    });
+
+    // the DELETE is user-scoped but answers ok even when nothing matches
+    handle("deleteMaintenance", (id: number) => {
+      state.maintenances = state.maintenances.filter((m) => m.id !== Number(id));
+      socket.emit("maintenanceList", maintenanceListJSON());
+      return { ok: true, msg: "Deleted Successfully." };
+    });
+
+    const setMaintenanceActive = (active: boolean) => (id: number) => {
+      const m = state.maintenances.find((x) => x.id === Number(id));
+      if (!m) throw new Error("Maintenance not found");
+      m.active = active;
+      socket.emit("maintenanceList", maintenanceListJSON());
+      return { ok: true, msg: active ? "Resume Successfully" : "Paused Successfully." };
+    };
+    handle("pauseMaintenance", setMaintenanceActive(false));
+    handle("resumeMaintenance", setMaintenanceActive(true));
+
+    // monitor_maintenance / maintenance_status_page: add*Maintenance* handlers
+    // DELETE every row of the maintenance first, then insert the given ids —
+    // they replace the whole set, they do not add to it. Both join tables have
+    // foreign keys to monitor / status_page / maintenance.
+    const attachIds = (
+      maintenanceID: number,
+      items: { id?: unknown }[],
+      exists: (id: number) => boolean,
+    ): number[] => {
+      if (!state.maintenances.some((m) => m.id === maintenanceID)) {
+        throw new Error("FOREIGN KEY constraint failed");
+      }
+      const ids = items.map((item) => Number(item?.id));
+      for (const id of ids) {
+        if (!exists(id)) throw new Error("FOREIGN KEY constraint failed");
+      }
+      return ids;
+    };
+
+    handle("getMonitorMaintenance", (maintenanceID: number) => {
+      const ids = state.maintenanceMonitors[Number(maintenanceID)] ?? [];
+      // the SQL selects only monitor.id
+      return { ok: true, monitors: ids.map((id) => ({ id })) };
+    });
+
+    handle("addMonitorMaintenance", (maintenanceID: number, monitors: { id?: unknown }[]) => {
+      state.maintenanceMonitors[Number(maintenanceID)] = attachIds(
+        Number(maintenanceID),
+        monitors,
+        (id) => state.monitors.some((m) => m.id === id),
+      );
+      return { ok: true, msg: "Added Successfully." };
+    });
+
+    handle("getMaintenanceStatusPage", (maintenanceID: number) => {
+      const ids = state.maintenanceStatusPages[Number(maintenanceID)] ?? [];
+      // the SQL joins status_page, so a dangling id would not be returned
+      return {
+        ok: true,
+        statusPages: ids
+          .map((id) => state.statusPages.find((p) => p.id === id))
+          .filter((p): p is StatusPageRow => p !== undefined)
+          .map((p) => ({ id: p.id, title: p.title })),
+      };
+    });
+
+    handle("addMaintenanceStatusPage", (maintenanceID: number, statusPages: { id?: unknown }[]) => {
+      state.maintenanceStatusPages[Number(maintenanceID)] = attachIds(
+        Number(maintenanceID),
+        statusPages,
+        (id) => state.statusPages.some((p) => p.id === id),
+      );
+      return { ok: true, msg: "Added Successfully." };
     });
 
     // monitor_tag has no unique constraint: the same tag+value can be attached twice

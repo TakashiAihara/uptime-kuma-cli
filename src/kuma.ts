@@ -109,6 +109,14 @@ export interface TagRow extends Record<string, unknown> {
   color: string;
 }
 
+// The statusPageList push carries StatusPage.toJSON(): id, slug, title and
+// the page config; the CLI only needs id and title.
+export type StatusPageRow = Record<string, unknown> & { id: number; title: string };
+
+// The maintenanceList push and getMaintenance carry Maintenance.toJSON(): the
+// public shape (dateRange, timeRange, status, ...), not bean columns.
+export type MaintenanceRow = Record<string, unknown> & { id: number };
+
 type BeatRow = Record<string, unknown>;
 
 let currentSocket: Socket | undefined;
@@ -147,9 +155,11 @@ export class KumaSession {
     readonly url: string,
     private readonly timeoutMs: number,
     readonly monitorList: Record<string, Monitor>,
+    readonly maintenanceList: Record<string, MaintenanceRow>,
     readonly notificationList: NotificationRow[],
     readonly proxyList: ProxyRow[],
     readonly dockerHostList: DockerHostRow[],
+    readonly statusPageList: Record<string, StatusPageRow>,
     readonly heartbeats: Map<number, BeatRow[]>,
     private readonly disconnected: Promise<never>,
   ) {}
@@ -171,6 +181,14 @@ export class KumaSession {
     return this.monitors().find((m) => m.id === id);
   }
 
+  maintenances(): MaintenanceRow[] {
+    return Object.values(this.maintenanceList).sort((a, b) => a.id - b.id);
+  }
+
+  maintenanceById(id: number): MaintenanceRow | undefined {
+    return this.maintenances().find((m) => m.id === id);
+  }
+
   notifications(): NotificationRow[] {
     return [...this.notificationList].sort((a, b) => a.id - b.id);
   }
@@ -189,6 +207,14 @@ export class KumaSession {
 
   dockerHosts(): DockerHostRow[] {
     return [...this.dockerHostList].sort((a, b) => a.id - b.id);
+  }
+
+  statusPages(): StatusPageRow[] {
+    return Object.values(this.statusPageList).sort((a, b) => a.id - b.id);
+  }
+
+  statusPageById(id: number): StatusPageRow | undefined {
+    return this.statusPages().find((p) => p.id === id);
   }
 
   // getTags is a request event: Kuma 1.23 does not push a tag list after login.
@@ -241,15 +267,20 @@ export async function connect(): Promise<KumaSession> {
 
   const pushed: {
     monitorList?: Record<string, Monitor>;
+    maintenanceList?: Record<string, MaintenanceRow>;
     notificationList?: NotificationRow[];
     proxyList?: ProxyRow[];
     dockerHostList?: DockerHostRow[];
+    statusPageList?: Record<string, StatusPageRow>;
   } = {};
   const heartbeats = new Map<number, BeatRow[]>();
   // The server pushes these right after the login callback, so the listeners
   // must be in place before login is emitted.
   socket.on("monitorList", (data: Record<string, Monitor>) => {
     pushed.monitorList = data;
+  });
+  socket.on("maintenanceList", (data: Record<string, MaintenanceRow>) => {
+    pushed.maintenanceList = data;
   });
   socket.on("notificationList", (data: NotificationRow[]) => {
     pushed.notificationList = data;
@@ -259,6 +290,9 @@ export async function connect(): Promise<KumaSession> {
   });
   socket.on("dockerHostList", (data: DockerHostRow[]) => {
     pushed.dockerHostList = data;
+  });
+  socket.on("statusPageList", (data: Record<string, StatusPageRow>) => {
+    pushed.statusPageList = data;
   });
   socket.on("heartbeatList", (id: unknown, beats: unknown) => {
     heartbeats.set(Number(id), Array.isArray(beats) ? (beats as BeatRow[]) : []);
@@ -293,15 +327,22 @@ export async function connect(): Promise<KumaSession> {
     fail(2, msg);
   }
 
+  // statusPageList is pushed ~500ms after the other lists (afterLogin sleeps
+  // first), so it gets the same wait.
   const listsDeadline = Date.now() + timeoutMs;
   while (
     !pushed.monitorList ||
+    !pushed.maintenanceList ||
     !pushed.notificationList ||
     !pushed.proxyList ||
-    !pushed.dockerHostList
+    !pushed.dockerHostList ||
+    !pushed.statusPageList
   ) {
     if (Date.now() >= listsDeadline) {
-      fail(2, "timed out waiting for pushed monitor/notification/proxy/docker host lists");
+      fail(
+        2,
+        "timed out waiting for pushed monitor/maintenance/notification/proxy/docker host/status page lists",
+      );
     }
     await Promise.race([sleep(10), disconnected]);
   }
@@ -312,9 +353,11 @@ export async function connect(): Promise<KumaSession> {
     url,
     timeoutMs,
     lists.monitorList,
+    lists.maintenanceList,
     lists.notificationList,
     lists.proxyList,
     lists.dockerHostList,
+    lists.statusPageList,
     heartbeats,
     disconnected,
   );
