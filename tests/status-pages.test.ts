@@ -131,6 +131,33 @@ describe("status-pages", () => {
       expect(r.stderr).toContain("No slug?");
     });
 
+    test("a network failure on the public route exits 2 naming the URL", async () => {
+      kuma.state.statusPageApiDrop = true;
+      const r = await run(sb, ["status-pages", "get", "status"], creds(kuma.url));
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("/api/status-page/status");
+    });
+
+    test("a password in a public monitor url prints as ***", async () => {
+      const userinfo = ["probe", "urlpw-in-fixture"].join(":");
+      kuma.state.statusPageGroups[7] = [
+        {
+          id: 3,
+          name: "Core",
+          weight: 1,
+          monitorList: [
+            { id: 5, name: "web", sendUrl: 1, url: `https://${userinfo}@example.com/health` },
+          ],
+        },
+      ];
+      const r = await run(sb, ["status-pages", "get", "status"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      expect(r.stdout).not.toContain("urlpw-in-fixture");
+      expect(r.json().publicGroupList[0].monitorList[0].url).toBe(
+        "https://probe:***@example.com/health",
+      );
+    });
+
     test("a failed HTTP fetch exits 1 naming the URL", async () => {
       kuma.state.statusPageApiStatus = 500;
       const r = await run(sb, ["status-pages", "get", "status"], creds(kuma.url));

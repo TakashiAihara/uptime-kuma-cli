@@ -117,6 +117,8 @@ export type FakeState = {
   statusPageGroups: Record<number, Record<string, unknown>[]>;
   // non-200 status the /api/status-page/:slug route answers with
   statusPageApiStatus: number;
+  // drops the TCP connection instead of answering, like a network failure
+  statusPageApiDrop: boolean;
   // verbatim body the route answers with; undefined computes it from state
   statusPageApiBody: unknown;
   // the route caches per req.url for 5 minutes like apicache; requests after
@@ -271,6 +273,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     incidents: [],
     statusPageGroups: {},
     statusPageApiStatus: 200,
+    statusPageApiDrop: false,
     statusPageApiBody: undefined,
     statusPageApiFailAfter: 0,
     statusPageApiMalformedAfter: 0,
@@ -1142,6 +1145,10 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     if (match === null) return;
     res.setHeader("content-type", "application/json");
     state.apiRequests.push(url);
+    if (state.statusPageApiDrop) {
+      res.socket?.destroy();
+      return;
+    }
     const hit = apiCache.get(url);
     if (hit !== undefined) {
       res.statusCode = hit.status;

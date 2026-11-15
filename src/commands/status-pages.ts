@@ -1,6 +1,7 @@
 import { Option, type Command } from "commander";
 import { CliError, fail, printJson, readJsonFile, socketTimeoutMs } from "../lib.ts";
 import { connect, type KumaSession, type StatusPageRow } from "../kuma.ts";
+import { redactUrl as redactMonitorUrl } from "./monitors.ts";
 
 // The six styles the StatusPage.vue incident picker offers; createIncident
 // starts a new incident at "primary".
@@ -109,7 +110,8 @@ async function fetchPublicStatusPage(
   try {
     res = await fetch(url, { signal: AbortSignal.timeout(socketTimeoutMs()) });
   } catch (e) {
-    fail(1, `GET ${shown} failed: ${(e as Error).message}`);
+    // a network error or timeout, not a Kuma answer: exit 2 like the socket's
+    fail(2, `GET ${shown} failed: ${(e as Error).message}`);
   }
   if (!res.ok) {
     let detail = "";
@@ -138,7 +140,24 @@ async function fetchPublicStatusPage(
   if (incident !== null && (typeof incident !== "object" || Array.isArray(incident))) {
     fail(70, "unexpected /api/status-page response");
   }
-  return { publicGroupList: body.publicGroupList as unknown[], incident };
+  return { publicGroupList: redactGroupUrls(body.publicGroupList), incident };
+}
+
+// Monitor.toPublicJSON adds the monitor url when sendUrl is on; a password in
+// it prints as *** like `monitors get`
+function redactGroupUrls(groups: unknown[]): unknown[] {
+  return groups.map((g) => {
+    const group = g as Record<string, unknown> | null;
+    if (group === null || typeof group !== "object" || !Array.isArray(group.monitorList)) return g;
+    return {
+      ...group,
+      monitorList: group.monitorList.map((m) => {
+        const mon = m as Record<string, unknown> | null;
+        if (mon === null || typeof mon !== "object" || mon.url === undefined) return m;
+        return { ...mon, url: redactMonitorUrl(mon.url) };
+      }),
+    };
+  });
 }
 
 function parseSaveMonitor(raw: unknown, at: string): SaveMonitor {
