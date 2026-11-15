@@ -667,8 +667,8 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
         };
         const list = monitorList();
         push("monitorList", () => socket.emit("monitorList", list));
-        // afterLogin's sendInfo(socket) emits the full info among the pushed
-        // lists (after maintenanceList on real Kuma; the order is not relied on)
+        // afterLogin's sendInfo(socket); real Kuma sends maintenanceList first,
+        // the fake sends it here, and the CLI does not rely on the order
         const info = state.info;
         if (info !== null && !state.infoBeforeLoginAck) {
           push("info", () => {

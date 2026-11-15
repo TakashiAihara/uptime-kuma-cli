@@ -97,7 +97,10 @@ describe("connect", () => {
   test("no info push falls back to major 1 with a warning", async () => {
     const err = spyOn(console, "error").mockImplementation(() => {});
     try {
+      const started = Date.now();
       const s = await session({ info: null });
+      // the grace is short; a server without a version must not stall every command
+      expect(Date.now() - started).toBeLessThan(1500);
       expect(s.serverVersion).toBeUndefined();
       expect(s.majorVersion).toBe(1);
       expect(err).toHaveBeenCalledWith(
@@ -109,14 +112,26 @@ describe("connect", () => {
   });
 
   test("the fake's pre-login info carries no version", async () => {
-    const s = await session({ skipLists: ["info"] });
-    expect(s.serverVersion).toBeUndefined();
-    expect(s.majorVersion).toBe(1);
+    const err = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const s = await session({ skipLists: ["info"] });
+      expect(s.serverVersion).toBeUndefined();
+      expect(s.majorVersion).toBe(1);
+      expect(err).toHaveBeenCalledTimes(1);
+    } finally {
+      err.mockRestore();
+    }
   });
 
   test("a non-string version is not recorded", async () => {
-    const s = await session({ info: { version: 25 } });
-    expect(s.serverVersion).toBeUndefined();
-    expect(s.majorVersion).toBe(1);
+    const err = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const s = await session({ info: { version: 25 } });
+      expect(s.serverVersion).toBeUndefined();
+      expect(s.majorVersion).toBe(1);
+      expect(err).toHaveBeenCalledTimes(1);
+    } finally {
+      err.mockRestore();
+    }
   });
 });

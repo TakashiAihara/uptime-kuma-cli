@@ -417,8 +417,8 @@ export async function connect(
     const version = (data as { version?: unknown } | null | undefined)?.version;
     if (typeof version === "string") serverVersion = version;
   });
-  // The server pushes these right after the login callback, so the listeners
-  // must be in place before login is emitted.
+  // 1.23 pushes these right after the login callback and 2.x before it, so the
+  // listeners must be in place before login is emitted.
   socket.on("monitorList", (data: Record<string, Monitor>) => {
     pushed.monitorList = data;
   });
@@ -525,8 +525,8 @@ export async function connect(
     }
     await Promise.race([sleep(10), disconnected]);
   }
-  // Real Kuma has sent it by now on both versions; the grace only covers a
-  // slow push, and a server that never sends it is treated as 1.x out loud.
+  // 1.23.17 and 2.5.11 have sent it by now; the grace covers a release that
+  // pushes it later than the lists, and one that never sends it is 1.x out loud.
   const infoDeadline = Date.now() + INFO_GRACE_MS;
   while (serverVersion === undefined && Date.now() < infoDeadline) {
     await Promise.race([sleep(10), disconnected]);
