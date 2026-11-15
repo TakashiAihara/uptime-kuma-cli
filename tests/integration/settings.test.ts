@@ -42,33 +42,37 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("settings (real Kuma)", () => {
         ? "https://it-settings-2.example.com/"
         : "https://it-settings.example.com/";
 
-    const set = await cliRun(sb, [
-      "settings",
-      "set",
-      "--set",
-      `keepDataPeriodDays=${targetDays}`,
-      "--set",
-      `primaryBaseURL=${targetUrl}`,
-    ]);
-    expect(set.code).toBe(0);
-    // the set output is already a fresh getSettings read
-    expect(set.json().keepDataPeriodDays).toBe(targetDays);
-    expect(set.json().primaryBaseURL).toBe(targetUrl);
+    // the shared Kuma outlives this test, so the originals go back even when
+    // an assertion fails
+    try {
+      const set = await cliRun(sb, [
+        "settings",
+        "set",
+        "--set",
+        `keepDataPeriodDays=${targetDays}`,
+        "--set",
+        `primaryBaseURL=${targetUrl}`,
+      ]);
+      expect(set.code).toBe(0);
+      // the set output is already a fresh getSettings read
+      expect(set.json().keepDataPeriodDays).toBe(targetDays);
+      expect(set.json().primaryBaseURL).toBe(targetUrl);
 
-    const mid = await cliRun(sb, ["settings", "get"]);
-    expect(mid.code).toBe(0);
-    expect(mid.json().keepDataPeriodDays).toBe(targetDays);
-    expect(mid.json().primaryBaseURL).toBe(targetUrl);
-
-    const restore = await cliRun(sb, [
-      "settings",
-      "set",
-      "--set",
-      `keepDataPeriodDays=${restoreDays}`,
-      "--set",
-      `primaryBaseURL=${restoreUrl}`,
-    ]);
-    expect(restore.code).toBe(0);
+      const mid = await cliRun(sb, ["settings", "get"]);
+      expect(mid.code).toBe(0);
+      expect(mid.json().keepDataPeriodDays).toBe(targetDays);
+      expect(mid.json().primaryBaseURL).toBe(targetUrl);
+    } finally {
+      const restore = await cliRun(sb, [
+        "settings",
+        "set",
+        "--set",
+        `keepDataPeriodDays=${restoreDays}`,
+        "--set",
+        `primaryBaseURL=${restoreUrl}`,
+      ]);
+      expect(restore.code).toBe(0);
+    }
 
     const after = await cliRun(sb, ["settings", "get"]);
     expect(after.code).toBe(0);
@@ -81,32 +85,34 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("settings (real Kuma)", () => {
     const key = `it-steam-${Date.now().toString(36)}`;
     const setFile = join(sb.dir, "steam.json");
     writeFileSync(setFile, JSON.stringify({ steamAPIKey: key }));
-    const set = await cliRun(sb, ["settings", "set", "--config-file", setFile]);
-    expect(set.code).toBe(0);
-    expect(set.json().steamAPIKey).toBe("***");
-    expect(set.stdout).not.toContain(key);
-
-    const get = await cliRun(sb, ["settings", "get"]);
-    expect(get.code).toBe(0);
-    expect(get.json().steamAPIKey).toBe("***");
-    expect(get.stdout).not.toContain(key);
-
-    // feeding the redacted output back must not store "***" over the key
-    const refusedFile = join(sb.dir, "steam-redacted.json");
-    writeFileSync(refusedFile, JSON.stringify({ steamAPIKey: "***" }));
-    const refused = await cliRun(sb, ["settings", "set", "--config-file", refusedFile]);
-    expect(refused.code).toBe(2);
-    expect(refused.stderr).toContain("redacted placeholder");
-
-    const still = await cliRun(sb, ["settings", "get"]);
-    expect(still.code).toBe(0);
-    expect(still.json().steamAPIKey).toBe("***");
-
-    // restore: an empty key prints as empty again
     const emptyFile = join(sb.dir, "steam-empty.json");
     writeFileSync(emptyFile, JSON.stringify({ steamAPIKey: "" }));
-    const restore = await cliRun(sb, ["settings", "set", "--config-file", emptyFile]);
-    expect(restore.code).toBe(0);
-    expect(restore.json().steamAPIKey).toBe("");
+    try {
+      const set = await cliRun(sb, ["settings", "set", "--config-file", setFile]);
+      expect(set.code).toBe(0);
+      expect(set.json().steamAPIKey).toBe("***");
+      expect(set.stdout).not.toContain(key);
+
+      const get = await cliRun(sb, ["settings", "get"]);
+      expect(get.code).toBe(0);
+      expect(get.json().steamAPIKey).toBe("***");
+      expect(get.stdout).not.toContain(key);
+
+      // feeding the redacted output back must not store "***" over the key
+      const refusedFile = join(sb.dir, "steam-redacted.json");
+      writeFileSync(refusedFile, JSON.stringify({ steamAPIKey: "***" }));
+      const refused = await cliRun(sb, ["settings", "set", "--config-file", refusedFile]);
+      expect(refused.code).toBe(2);
+      expect(refused.stderr).toContain("redacted placeholder");
+
+      const still = await cliRun(sb, ["settings", "get"]);
+      expect(still.code).toBe(0);
+      expect(still.json().steamAPIKey).toBe("***");
+    } finally {
+      // restore: an empty key prints as empty again
+      const restore = await cliRun(sb, ["settings", "set", "--config-file", emptyFile]);
+      expect(restore.code).toBe(0);
+      expect(restore.json().steamAPIKey).toBe("");
+    }
   }, 300_000);
 });

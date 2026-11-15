@@ -526,6 +526,22 @@ describe("settings set", () => {
     expect(kuma.state.settings.primaryBaseURL).toBe(url);
   });
 
+  test("a stored primaryBaseURL that does not parse but has an @ prints as ***", async () => {
+    const userPass = ["op", "unparsed-fixture"].join(":");
+    kuma.state.settings = { primaryBaseURL: `https://${userPass}@kuma.example:bad` };
+    const r = await run(sb, ["settings", "get"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.stdout).not.toContain("unparsed-fixture");
+    expect(r.json().primaryBaseURL).toBe(String.fromCharCode(42).repeat(3));
+  });
+
+  test("a stored primaryBaseURL that does not parse and has no @ prints as is", async () => {
+    kuma.state.settings = { primaryBaseURL: "not a url" };
+    const r = await run(sb, ["settings", "get"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json().primaryBaseURL).toBe("not a url");
+  });
+
   test("--set primaryBaseURL with a password exits 2 before connecting", async () => {
     const userPass = ["op", "pw-fixture"].join(":");
     const r = await run(
