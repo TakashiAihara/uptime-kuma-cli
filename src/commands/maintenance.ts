@@ -27,6 +27,28 @@ const hasOffset = (value: string): boolean => OFFSET_DATETIME.test(value);
 const isLocalDateTime = (value: unknown): value is string =>
   typeof value === "string" && LOCAL_DATETIME.test(value) && !Number.isNaN(Date.parse(value));
 
+const LOCAL_PARTS = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?$/;
+
+// Ordering must not go through Date.parse: it resolves the offset-free
+// strings in the CLI host's timezone, where DST can reorder local times.
+// Compare the fields instead; callers run isLocalDateTime first.
+function compareLocalDateTimes(a: string, b: string): number {
+  const pa = LOCAL_PARTS.exec(a);
+  const pb = LOCAL_PARTS.exec(b);
+  if (pa === null || pb === null) return Number.NaN;
+  for (let i = 1; i <= 6; i++) {
+    const na = Number(pa[i] ?? "0");
+    const nb = Number(pb[i] ?? "0");
+    if (na !== nb) return na < nb ? -1 : 1;
+  }
+  const fa = pa[7] ?? "";
+  const fb = pb[7] ?? "";
+  const width = Math.max(fa.length, fb.length);
+  const sa = fa.padEnd(width, "0");
+  const sb = fb.padEnd(width, "0");
+  return sa === sb ? 0 : sa < sb ? -1 : 1;
+}
+
 function parseIsoDateTime(value: string, flag: string): string {
   if (hasOffset(value)) {
     fail(
@@ -51,7 +73,7 @@ function parseDateRange(start: string | undefined, end: string | undefined): str
   const s = parseIsoDateTime(start, "--start");
   if (end === undefined) return [s];
   const e = parseIsoDateTime(end, "--end");
-  if (Date.parse(e) <= Date.parse(s)) fail(2, "--end must be after --start");
+  if (compareLocalDateTimes(e, s) <= 0) fail(2, "--end must be after --start");
   return [s, e];
 }
 
@@ -126,18 +148,33 @@ const isDayOfMonthList = (value: unknown): value is unknown[] =>
 // The EditMaintenance.vue intervalDay input is capped at 3650.
 const MAX_INTERVAL_DAY = 3650;
 
-// croner 6.0.x field charsets: digits and * , - / ? in every field; L in day of
-// month; the JAN-DEC / SUN-SAT names put letters in month and day of week.
-// jsonToBean stores the maintenance row before validateCron throws, so a
-// malformed expression would be left behind — the shape is checked up front.
+// croner 6.0.x field charsets: digits and * , - / ? in every field; L and W in
+// day of month; the JAN-DEC / SUN-SAT names put letters in month and day of
+// week. Kuma 1.23.17 calls the async validateCron without await, so a bad
+// expression is stored anyway and the rejection goes unhandled — only the
+// shape is checked up front; croner can still refuse values like L-1 or 13 in
+// the month field.
 const CRON_NUMERIC = /^[0-9*,\/?-]+$/;
-const CRON_DOM = /^[0-9L*,\/?-]+$/;
+const CRON_DOM = /^[0-9LW*,\/?-]+$/;
 const CRON_NAMED = /^[0-9A-Za-z*,\/?-]+$/;
 // indexed from the right: day-of-week, month, day-of-month, hour, minute, second
 const CRON_FIELDS = [CRON_NAMED, CRON_NAMED, CRON_DOM, CRON_NUMERIC, CRON_NUMERIC, CRON_NUMERIC];
 
+// croner accepts these nicknames as a whole expression
+const CRON_NICKNAMES = new Set([
+  "@yearly",
+  "@annually",
+  "@monthly",
+  "@weekly",
+  "@daily",
+  "@midnight",
+  "@hourly",
+]);
+
 function isCronExpression(value: string): boolean {
-  const fields = value.trim().split(/\s+/);
+  const trimmed = value.trim();
+  if (CRON_NICKNAMES.has(trimmed)) return true;
+  const fields = trimmed.split(/\s+/);
   if (fields.length !== 5 && fields.length !== 6) return false;
   return fields.every((f, i) => {
     const charset = CRON_FIELDS[fields.length - 1 - i];
@@ -260,11 +297,29 @@ function validateMaintenance(
       range.length < 2 ||
       !isLocalDateTime(start) ||
       !isLocalDateTime(end) ||
-      Date.parse(end) <= Date.parse(start)
+      compareLocalDateTimes(end, start) <= 0
     ) {
       fail(
         2,
         'strategy "single" requires "dateRange" as [start, end] ISO datetimes, end after start',
+      );
+    }
+  }
+  // Kuma 1.23.17 bug: Maintenance.run leaves duration undefined when a
+  // cron/recurring window has an end_date far enough out, so the timeslot
+  // timeout fires at once and the maintenance ends immediately. Those
+  // strategies may carry a start but never an end.
+  if (
+    strategy !== undefined &&
+    (strategy === "cron" || strategy.startsWith("recurring-")) &&
+    need("dateRange")
+  ) {
+    const end = (m.dateRange as unknown[])[1];
+    if (end !== null && end !== undefined) {
+      fail(
+        2,
+        `Kuma 1.23.17 ends a "${strategy}" maintenance immediately ` +
+          'when "dateRange" has an end date; give only a start',
       );
     }
   }
@@ -431,9 +486,6 @@ export function registerMaintenance(program: Command): void {
       if (strategy === "single" && (opts.start === undefined || opts.end === undefined)) {
         fail(2, "--strategy single requires --start and --end");
       }
-      if (strategy === "manual" && (opts.start !== undefined || opts.end !== undefined)) {
-        fail(2, "--start and --end do not apply to --strategy manual");
-      }
       const range = parseDateRange(opts.start, opts.end);
       const timezoneOption =
         opts.timezone === undefined ? "SAME_AS_SERVER" : parseTimezone(opts.timezone);
@@ -519,7 +571,13 @@ export function registerMaintenance(program: Command): void {
         );
       }
       const title = opts.title === undefined ? undefined : parseTitle(opts.title);
-      const range = parseDateRange(opts.start, opts.end);
+      // on edit each flag patches one end of the stored range: --start replaces
+      // index 0, --end index 1, so either may be given alone
+      const start = opts.start === undefined ? undefined : parseIsoDateTime(opts.start, "--start");
+      const end = opts.end === undefined ? undefined : parseIsoDateTime(opts.end, "--end");
+      if (start !== undefined && end !== undefined && compareLocalDateTimes(end, start) <= 0) {
+        fail(2, "--end must be after --start");
+      }
       const timezoneOption = opts.timezone === undefined ? undefined : parseTimezone(opts.timezone);
       const s = await connect(["maintenanceList"]);
       if (!s.maintenanceById(id)) fail(1, `maintenance ${id} not found`);
@@ -530,17 +588,29 @@ export function registerMaintenance(program: Command): void {
       const merged: Record<string, unknown> = { ...fetched, ...fileConfig, ...sets };
       if (title !== undefined) merged.title = title;
       if (opts.description !== undefined) merged.description = opts.description;
-      if (range !== undefined) merged.dateRange = range;
       if (timezoneOption !== undefined) merged.timezoneOption = timezoneOption;
       // the strategy may itself have just changed through a hatch, so the
       // manual rule judges the merged value
-      if (range !== undefined && merged.strategy === "manual") {
+      if ((start !== undefined || end !== undefined) && merged.strategy === "manual") {
         fail(2, "--start and --end do not apply to --strategy manual");
+      }
+      if (start !== undefined || end !== undefined) {
+        const stored = Array.isArray(merged.dateRange) ? (merged.dateRange as unknown[]) : [];
+        const next: unknown[] = [...stored];
+        if (start !== undefined) next[0] = start;
+        if (end !== undefined) {
+          // --end alone only works when the range already has a start to keep
+          if (typeof next[0] !== "string" || next[0] === "") {
+            fail(2, "--end requires --start or a stored window start");
+          }
+          next[1] = end;
+        }
+        merged.dateRange = next;
       }
       const touched = new Set([...Object.keys(fileConfig), ...Object.keys(sets)]);
       if (title !== undefined) touched.add("title");
       if (opts.description !== undefined) touched.add("description");
-      if (range !== undefined) touched.add("dateRange");
+      if (start !== undefined || end !== undefined) touched.add("dateRange");
       if (timezoneOption !== undefined) touched.add("timezoneOption");
       validateMaintenance(merged, { full: merged.strategy !== fetched.strategy, touched });
       await s.request("editMaintenance", [merged]);

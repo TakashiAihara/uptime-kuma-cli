@@ -453,6 +453,111 @@ describe("maintenance", () => {
       expect(kuma.calls).toHaveLength(0);
     });
 
+    test("--start and --end on a cron window exits 2 before connecting", async () => {
+      const r = await run(
+        sb,
+        [
+          "maintenance",
+          "add",
+          "--title",
+          "w",
+          "--strategy",
+          "cron",
+          "--start",
+          "2032-06-01T10:00:00",
+          "--end",
+          "2032-06-02T10:00:00",
+        ],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("end date");
+      expect(kuma.calls).toHaveLength(0);
+    });
+
+    test("equal start and end in different formats exits 2 before connecting", async () => {
+      const r = await run(
+        sb,
+        [
+          "maintenance",
+          "add",
+          "--title",
+          "w",
+          "--strategy",
+          "single",
+          "--start",
+          "2031-05-05T10:00",
+          "--end",
+          "2031-05-05T10:00:00",
+        ],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("--end must be after --start");
+      expect(kuma.calls).toHaveLength(0);
+    });
+
+    test("fractional seconds decide start/end ordering", async () => {
+      const reversed = await run(
+        sb,
+        [
+          "maintenance",
+          "add",
+          "--title",
+          "w",
+          "--strategy",
+          "single",
+          "--start",
+          "2031-05-05T10:00:00.500",
+          "--end",
+          "2031-05-05T10:00:00.200",
+        ],
+        creds(kuma.url),
+      );
+      expect(reversed.code).toBe(2);
+      expect(reversed.stderr).toContain("--end must be after --start");
+
+      const ordered = await run(
+        sb,
+        [
+          "maintenance",
+          "add",
+          "--title",
+          "w2",
+          "--strategy",
+          "single",
+          "--start",
+          "2031-05-05T10:00:00.2",
+          "--end",
+          "2031-05-05T10:00:00.25",
+        ],
+        creds(kuma.url),
+      );
+      expect(ordered.code).toBe(0);
+    });
+
+    test("start/end ordering does not depend on the host timezone", async () => {
+      // 2026-03-08T02:30 does not exist in America/New_York (spring forward);
+      // resolving it through Date.parse can reorder it against 03:15
+      const r = await run(
+        sb,
+        [
+          "maintenance",
+          "add",
+          "--title",
+          "w",
+          "--strategy",
+          "single",
+          "--start",
+          "2026-03-08T02:30",
+          "--end",
+          "2026-03-08T03:15",
+        ],
+        { ...creds(kuma.url), TZ: "America/New_York" },
+      );
+      expect(r.code).toBe(0);
+    });
+
     test("an invalid --timezone exits 2 before connecting", async () => {
       const r = await run(
         sb,
@@ -702,7 +807,59 @@ describe("maintenance", () => {
       expect(callsOf("editMaintenance")).toHaveLength(0);
     });
 
-    test("--start alone on a single window exits 2 without sending editMaintenance", async () => {
+    test("--start alone keeps the stored end", async () => {
+      const r = await run(
+        sb,
+        ["maintenance", "edit", "2", "--start", "2029-12-31T10:00:00"],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(0);
+      const sent = callsOf("editMaintenance")[0]!.args[0] as Record<string, unknown>;
+      expect(sent.dateRange).toEqual(["2029-12-31T10:00:00", "2030-01-01T04:00:00"]);
+    });
+
+    test("--end alone is accepted on a single window with a stored start", async () => {
+      const r = await run(
+        sb,
+        ["maintenance", "edit", "2", "--end", "2030-01-01T05:00:00"],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(0);
+      const sent = callsOf("editMaintenance")[0]!.args[0] as Record<string, unknown>;
+      expect(sent.dateRange).toEqual(["2030-01-01T02:00:00", "2030-01-01T05:00:00"]);
+    });
+
+    test("--end on a cron window exits 2 without sending editMaintenance", async () => {
+      kuma.state.maintenances[0] = {
+        ...kuma.state.maintenances[0]!,
+        strategy: "cron",
+        cron: "0 4 * * *",
+        duration: 3600,
+        dateRange: ["2030-01-01T02:00:00"],
+      };
+      const r = await run(
+        sb,
+        ["maintenance", "edit", "2", "--end", "2030-01-01T05:00:00"],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("end date");
+      expect(callsOf("editMaintenance")).toHaveLength(0);
+    });
+
+    test("--end alone without a stored start exits 2 without sending editMaintenance", async () => {
+      kuma.state.maintenances[0] = { ...kuma.state.maintenances[0]!, dateRange: [null] };
+      const r = await run(
+        sb,
+        ["maintenance", "edit", "2", "--end", "2030-01-01T05:00:00"],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("--end requires --start or a stored window start");
+      expect(callsOf("editMaintenance")).toHaveLength(0);
+    });
+
+    test("--start alone on a single window exits 2 when the merged pair is reversed", async () => {
       const r = await run(
         sb,
         ["maintenance", "edit", "2", "--start", "2032-01-01T00:00:00"],
@@ -719,6 +876,7 @@ describe("maintenance", () => {
         strategy: "cron",
         cron: "0 4 * * *",
         duration: 3600,
+        dateRange: [null],
       };
       const r = await run(
         sb,
@@ -799,6 +957,13 @@ describe("maintenance", () => {
       );
       expect(r.code).toBe(2);
       expect(kuma.calls).toHaveLength(0);
+    });
+
+    test("an untouched invalid stored dateRange does not block an unrelated edit", async () => {
+      kuma.state.maintenances.find((m) => m.id === 1)!.dateRange = ["not-a-date"];
+      const r = await run(sb, ["maintenance", "edit", "1", "--title", "renamed"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      expect(callsOf("editMaintenance")).toHaveLength(1);
     });
 
     test("editMaintenance ok:false exits 1 with Kuma's message", async () => {
@@ -1254,6 +1419,46 @@ describe("maintenance", () => {
       },
     );
 
+    test("a cron nickname is accepted", async () => {
+      const f = writeJson("nickname.json", { cron: "@daily" });
+      const r = await run(
+        sb,
+        ["maintenance", "add", "--title", "w", "--strategy", "cron", "--config-file", f],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(0);
+      const sent = callsOf("addMaintenance")[0]!.args[0] as Record<string, unknown>;
+      expect(sent.cron).toBe("@daily");
+    });
+
+    test.each(["0 9 1W * *", "0 9 LW * *", "0 9 * jan mon"])(
+      "a cron expression %p is accepted",
+      async (cron) => {
+        const f = writeJson("goodshape.json", { cron });
+        const r = await run(
+          sb,
+          ["maintenance", "add", "--title", "w", "--strategy", "cron", "--config-file", f],
+          creds(kuma.url),
+        );
+        expect(r.code).toBe(0);
+      },
+    );
+
+    test.each(["0 9 FOO * *", "X * * * *"])(
+      "letters outside the croner charset %p exit 2 before connecting",
+      async (cron) => {
+        const f = writeJson("badletters.json", { cron });
+        const r = await run(
+          sb,
+          ["maintenance", "add", "--title", "w", "--strategy", "cron", "--config-file", f],
+          creds(kuma.url),
+        );
+        expect(r.code).toBe(2);
+        expect(r.stderr).toContain("5 or 6 whitespace-separated cron fields");
+        expect(kuma.calls).toHaveLength(0);
+      },
+    );
+
     test("lastDay1 is accepted in daysOfMonth", async () => {
       const f = writeJson("lastday.json", { daysOfMonth: ["lastDay1"] });
       const r = await run(
@@ -1340,6 +1545,88 @@ describe("maintenance", () => {
       );
       expect(r.code).toBe(2);
       expect(r.stderr).toContain("intervalDay");
+      expect(kuma.calls).toHaveLength(0);
+    });
+
+    test("the intervalDay cap applies to strategies other than recurring-interval", async () => {
+      const f = writeJson("biginterval-manual.json", { intervalDay: 4000 });
+      const r = await run(
+        sb,
+        ["maintenance", "add", "--title", "w", "--strategy", "manual", "--config-file", f],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("intervalDay");
+      expect(kuma.calls).toHaveLength(0);
+    });
+
+    test("a --config-file strategy of manual overrides --strategy and rejects --start", async () => {
+      const f = writeJson("manual-override.json", { strategy: "manual" });
+      const r = await run(
+        sb,
+        [
+          "maintenance",
+          "add",
+          "--title",
+          "w",
+          "--strategy",
+          "cron",
+          "--start",
+          "2032-01-01T00:00:00",
+          "--config-file",
+          f,
+        ],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("do not apply to --strategy manual");
+      expect(kuma.calls).toHaveLength(0);
+    });
+
+    test("a --config-file strategy of cron overrides --strategy manual and accepts --start", async () => {
+      const f = writeJson("cron-override.json", { strategy: "cron" });
+      const r = await run(
+        sb,
+        [
+          "maintenance",
+          "add",
+          "--title",
+          "w",
+          "--strategy",
+          "manual",
+          "--start",
+          "2032-01-01T00:00:00",
+          "--config-file",
+          f,
+        ],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(0);
+      const sent = callsOf("addMaintenance")[0]!.args[0] as Record<string, unknown>;
+      expect(sent.strategy).toBe("cron");
+      expect(sent.dateRange).toEqual(["2032-01-01T00:00:00"]);
+    });
+
+    test("a dateRange end on a recurring strategy exits 2 before connecting", async () => {
+      const f = writeJson("rec-end.json", {
+        dateRange: ["2030-01-01T00:00:00", "2030-01-02T00:00:00"],
+      });
+      const r = await run(
+        sb,
+        [
+          "maintenance",
+          "add",
+          "--title",
+          "w",
+          "--strategy",
+          "recurring-interval",
+          "--config-file",
+          f,
+        ],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("end date");
       expect(kuma.calls).toHaveLength(0);
     });
 
