@@ -3,6 +3,10 @@
 # run starts from an empty database. The port is bound to loopback only.
 services:
   kuma:
-    image: louislam/uptime-kuma:1.23.17
+    image: ${UPTIME_KUMA_IT_IMAGE:-louislam/uptime-kuma:1.23.17}
+    # 2.x serves a database setup page instead of the app until a type is
+    # chosen; this picks the embedded SQLite. 1.23 ignores it.
+    environment:
+      UPTIME_KUMA_DB_TYPE: sqlite
     ports:
       - "127.0.0.1:${UPTIME_KUMA_IT_PORT:-3901}:3001"

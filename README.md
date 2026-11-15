@@ -146,5 +146,6 @@ uptime-kuma-cli settings set --config-file settings.json
 ## Integration tests
 
 - `bun run test:integration` runs `tests/integration` — the same CLI — against a real `louislam/uptime-kuma:1.23.17` container started with Docker Compose; it needs Docker
+- Set `UPTIME_KUMA_IT_IMAGE=louislam/uptime-kuma:2.5.11` to run the same tests against Kuma 2.x; tests that 2.x breaks until their issue lands are skipped there (CI runs both images)
 - Kuma is published on `127.0.0.1:3901` only; set `UPTIME_KUMA_IT_PORT` to use another port
 - `UPTIME_KUMA_IT_KEEP=1` leaves the container up afterwards for debugging; a later run on the same `UPTIME_KUMA_IT_PORT` removes it before starting

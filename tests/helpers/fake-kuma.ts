@@ -160,6 +160,10 @@ export type FakeState = {
   // monitor ids that exist but stay out of the login monitorList push, like
   // monitors created after this socket logged in
   unlistedMonitors: number[];
+  // which Kuma the fake mimics: "1.23" is the 1.23.17 wire behaviour, "2.x"
+  // the 2.5.11 one (versioned info before the login answer, NOT NULL
+  // conditions on add)
+  profile: "1.23" | "2.x";
   // the info payload: sent on connection with the version fields (and 2.x's
   // dbType / runtime) hidden, and in full after login; null sends no info at all
   info: Record<string, unknown> | null;
@@ -315,6 +319,7 @@ const ADD_KEYS = new Set([
 ]);
 
 export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<FakeKuma> {
+  const profile2x = init.profile === "2.x";
   const state: FakeState = {
     username: "admin",
     password: "pw-from-test",
@@ -339,14 +344,27 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     maintenanceStatusPages: {},
     skipLists: [],
     unlistedMonitors: [],
-    info: {
-      version: "1.23.17",
-      latestVersion: "1.23.17",
-      primaryBaseURL: null,
-      serverTimezone: "UTC",
-      serverTimezoneOffset: "+00:00",
-    },
-    infoBeforeLoginAck: false,
+    profile: "1.23",
+    info: profile2x
+      ? {
+          version: "2.5.11",
+          latestVersion: "2.5.11",
+          primaryBaseURL: null,
+          serverTimezone: "UTC",
+          serverTimezoneOffset: "+00:00",
+          // the rest mirrors 2.5.11's sendInfo; no test reads these yet
+          isContainer: true,
+          dbType: "sqlite",
+          runtime: { platform: "linux", arch: "x64" },
+        }
+      : {
+          version: "1.23.17",
+          latestVersion: "1.23.17",
+          primaryBaseURL: null,
+          serverTimezone: "UTC",
+          serverTimezoneOffset: "+00:00",
+        },
+    infoBeforeLoginAck: profile2x,
     infoDelayMs: 0,
     fail: {},
     silentHeartbeat: [],
@@ -763,6 +781,14 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
       const unknown = Object.keys(monitor).filter((k) => !ADD_KEYS.has(k));
       if (unknown.length)
         throw new Error(`SQLITE_ERROR: table monitor has no column named ${unknown[0]}`);
+      // 2.x's monitor.conditions is NOT NULL; the add handler stores
+      // JSON.stringify(conditions), so only a missing key leaves it NULL (an
+      // explicit null becomes the string "null"). SQLite rejects unknown
+      // columns first, at prepare time. ADD_KEYS is still the 1.23 column set,
+      // so a 2.x add that sends conditions fails above until #37 extends it.
+      if (state.profile === "2.x" && monitor.conditions === undefined) {
+        throw new Error("SQLITE_CONSTRAINT: NOT NULL constraint failed: monitor.conditions");
+      }
       if (!(monitor.accepted_statuscodes as unknown[]).every((c) => typeof c === "string"))
         throw new Error("Accepted status codes are not all strings");
       const id = Math.max(0, ...state.monitors.map((m) => m.id)) + 1;
