@@ -31,8 +31,14 @@ const COMPOSE_UP_TIMEOUT_MS = 300_000;
 const COMPOSE_DOWN_TIMEOUT_MS = 60_000;
 const TEST_LIMIT_MS = 8 * 60_000;
 const KEEP = process.env.UPTIME_KUMA_IT_KEEP === "1";
+// An empty value (a mistyped CI matrix key) would make compose fall back to
+// 1.23.17 while the job claims another image.
+if (process.env.UPTIME_KUMA_IT_IMAGE === "") {
+  console.error("UPTIME_KUMA_IT_IMAGE is set but empty");
+  process.exit(1);
+}
 // The major version an image tag names, or undefined for tags like `latest`.
-const IMAGE_MAJOR = /:(\d+)\.\d+\.\d+/.exec(process.env.UPTIME_KUMA_IT_IMAGE ?? "")?.[1];
+const IMAGE_MAJOR = /:(\d+)(?=[.\-@]|$)/.exec(process.env.UPTIME_KUMA_IT_IMAGE ?? "")?.[1];
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
