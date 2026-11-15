@@ -195,24 +195,38 @@ describe("settings set", () => {
   test.each([
     [
       "serverTimezone=Not/AZone",
-      '"serverTimezone" must be "UTC" or a canonical IANA timezone name (case-sensitive)',
+      '"serverTimezone" must be one of the timezone names Uptime Kuma 1.23.17 offers (case-sensitive)',
     ],
     [
       "serverTimezone=",
-      '"serverTimezone" must be "UTC" or a canonical IANA timezone name (case-sensitive)',
+      '"serverTimezone" must be one of the timezone names Uptime Kuma 1.23.17 offers (case-sensitive)',
     ],
     // Intl's DateTimeFormat accepts these, but the UI's fixed list does not
     [
       "serverTimezone=asia/tokyo",
-      '"serverTimezone" must be "UTC" or a canonical IANA timezone name (case-sensitive)',
+      '"serverTimezone" must be one of the timezone names Uptime Kuma 1.23.17 offers (case-sensitive)',
     ],
     [
       "serverTimezone=+09:00",
-      '"serverTimezone" must be "UTC" or a canonical IANA timezone name (case-sensitive)',
+      '"serverTimezone" must be one of the timezone names Uptime Kuma 1.23.17 offers (case-sensitive)',
     ],
     [
       "serverTimezone=Japan",
-      '"serverTimezone" must be "UTC" or a canonical IANA timezone name (case-sensitive)',
+      '"serverTimezone" must be one of the timezone names Uptime Kuma 1.23.17 offers (case-sensitive)',
+    ],
+    // in the UI's list, but Kuma 1.23.17's checkTimezone refuses it after storing
+    [
+      "serverTimezone=Europe/Zaporizhzhia",
+      '"serverTimezone" must be one of the timezone names Uptime Kuma 1.23.17 offers (case-sensitive)',
+    ],
+    // in Bun's ICU but not Kuma's
+    [
+      "serverTimezone=America/Coyhaique",
+      '"serverTimezone" must be one of the timezone names Uptime Kuma 1.23.17 offers (case-sensitive)',
+    ],
+    [
+      "serverTimezone=Etc/GMT+5",
+      '"serverTimezone" must be one of the timezone names Uptime Kuma 1.23.17 offers (case-sensitive)',
     ],
     ["searchEngineIndex=yes", '"searchEngineIndex" must be a boolean'],
     ["entryPage=foo", '"entryPage" must be "dashboard" or "statusPage-<slug>"'],
@@ -534,6 +548,18 @@ describe("settings set", () => {
     expect(kuma.calls).toHaveLength(0);
   });
 
+  test("the masked primaryBaseURL password through --set is refused too", async () => {
+    const masked = ["op", String.fromCharCode(42).repeat(3)].join(":");
+    const r = await run(
+      sb,
+      ["settings", "set", "--set", `primaryBaseURL=https://${masked}@kuma.example.com/`],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("masked password");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
   test.each(["https://kuma.example.com/?", "https://kuma.example.com/#"])(
     "a bare trailing separator in primaryBaseURL %p exits 2",
     async (value) => {
@@ -547,18 +573,23 @@ describe("settings set", () => {
     },
   );
 
-  test.each(["Europe/London", "America/Thunder_Bay", "Pacific/Enderbury"])(
-    "serverTimezone %p (a UI name) is accepted",
-    async (tz) => {
-      const r = await run(
-        sb,
-        ["settings", "set", "--set", `serverTimezone=${tz}`],
-        creds(kuma.url),
-      );
-      expect(r.code).toBe(0);
-      expect(sentSettings().serverTimezone).toBe(tz);
-    },
-  );
+  test.each([
+    "Europe/London",
+    "America/Yellowknife",
+    "America/Rainy_River",
+    "America/Nipigon",
+    "America/Pangnirtung",
+    "America/Thunder_Bay",
+    "America/Godthab",
+    "Europe/Uzhgorod",
+    "Asia/Choibalsan",
+    "Australia/Currie",
+    "Pacific/Enderbury",
+  ])("serverTimezone %p (a UI name) is accepted", async (tz) => {
+    const r = await run(sb, ["settings", "set", "--set", `serverTimezone=${tz}`], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(sentSettings().serverTimezone).toBe(tz);
+  });
 
   test("entryPage=statusPage-<slug> is sent when the page exists", async () => {
     const r = await run(
@@ -634,9 +665,15 @@ describe("settings set", () => {
 
   test("a failure on the post-save read prints the sent settings and exits 0", async () => {
     kuma.state.fail.getSettings = [null, "second read failed"];
-    kuma.state.settings = { ...kuma.state.settings, steamAPIKey: "steam-fixture-value" };
+    const userPass = ["op", "url-fixture-value"].join(":");
+    kuma.state.settings = {
+      ...kuma.state.settings,
+      steamAPIKey: "steam-fixture-value",
+      primaryBaseURL: `https://${userPass}@kuma.example.com`,
+    };
     const r = await run(sb, ["settings", "set", "--set", "trustProxy=true"], creds(kuma.url));
     expect(r.stdout).not.toContain("steam-fixture-value");
+    expect(r.stdout).not.toContain("url-fixture-value");
     expect(r.json().steamAPIKey).toBe(String.fromCharCode(42).repeat(3));
     // the write already happened, so the sent object is printed redacted
     // with a warning instead of a nonzero exit, like `status-pages save`

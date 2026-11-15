@@ -1,6 +1,7 @@
 import { type Command } from "commander";
 import { CliError, fail, parseSets, printJson, readJsonFile } from "../lib.ts";
 import { connect, type KumaSession } from "../kuma.ts";
+import { KUMA_TIMEZONES } from "../timezones.ts";
 import { redactUrl } from "./monitors.ts";
 
 const collect = (value: string, previous: string[]): string[] => [...previous, value];
@@ -11,27 +12,10 @@ const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 const ENTRY_PAGE_PREFIX = "statusPage-";
 
-// General.vue offers "UTC" plus the tzCode names of the timezones-list
-// package (3.0.3 in Kuma 1.23.17). The CLI accepts the canonical names of
-// Bun's ICU (Intl.supportedValuesOf) plus the legacy names that list still
-// offers and ICU dropped, compared case-sensitively: aliases like "Japan",
-// lowercase names and offsets like "+09:00" are refused (Kuma stores
-// "+09:00" and then answers "Invalid timezone"). The ICU set also accepts
-// some names the UI lacks (Etc/GMT±N, America/Nuuk), which Kuma runs fine.
-const UI_LEGACY_TIMEZONES = [
-  "America/Yellowknife",
-  "America/Rainy_River",
-  "America/Nipigon",
-  "America/Pangnirtung",
-  "America/Thunder_Bay",
-  "America/Godthab",
-  "Europe/Uzhgorod",
-  "Europe/Zaporizhzhia",
-  "Asia/Choibalsan",
-  "Australia/Currie",
-  "Pacific/Enderbury",
-];
-const TIMEZONES = new Set(["UTC", ...UI_LEGACY_TIMEZONES, ...Intl.supportedValuesOf("timeZone")]);
+// Kuma stores the whole settings object before checkTimezone refuses a bad
+// serverTimezone, so the CLI checks against the names Kuma 1.23.17 itself
+// takes (src/timezones.ts), compared case-sensitively.
+const TIMEZONES = new Set(KUMA_TIMEZONES);
 
 // The keys the 1.23.17 settings components write through the shared `settings`
 // object that saveSettings posts whole to setSettings: General.vue
@@ -43,7 +27,10 @@ const TIMEZONES = new Set(["UTC", ...UI_LEGACY_TIMEZONES, ...Intl.supportedValue
 const SETTING_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unknown> = {
   serverTimezone: (value, key) => {
     if (typeof value !== "string" || !TIMEZONES.has(value)) {
-      fail(2, `"${key}" must be "UTC" or a canonical IANA timezone name (case-sensitive)`);
+      fail(
+        2,
+        `"${key}" must be one of the timezone names Uptime Kuma 1.23.17 offers (case-sensitive)`,
+      );
     }
     return value;
   },
@@ -88,7 +75,7 @@ const SETTING_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unkn
       if (url.password === "***") {
         fail(
           2,
-          `"${key}" carries the masked password from settings get output; give the real URL or omit the key`,
+          `"${key}" carries the masked password from settings get output; give the real URL through --config-file or omit the key`,
         );
       }
     }
