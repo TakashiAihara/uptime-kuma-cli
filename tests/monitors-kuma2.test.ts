@@ -596,3 +596,254 @@ describe("2.x-only fields on Kuma 1.x", () => {
     expect(editCalls(k)).toHaveLength(0);
   });
 });
+
+describe("monitor timing on Kuma 2.x", () => {
+  test("edit fills a missing stored timeout with the 2.x default for the type", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [
+        { ...http(7, "pg"), type: "ping", hostname: "127.0.0.1", url: null, timeout: null },
+      ],
+    });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "interval=60"], creds(k.url));
+    expect(r.code).toBe(0);
+    expect(stored(k, "pg").timeout).toBe(10);
+  });
+
+  test("--interval 5 is accepted and stored", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        "--interval",
+        "5",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "x").interval).toBe(5);
+  });
+
+  test("--set interval=3000000 is accepted and stored", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        "--set",
+        "interval=3000000",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "x").interval).toBe(3000000);
+  });
+
+  test("--timeout 0 is accepted and stored as 0", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        "--timeout",
+        "0",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "x").timeout).toBe(0);
+  });
+
+  test("--retry-interval 0.5 exits 2 after connect with no add call", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        "--retry-interval",
+        "0.5",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("retryInterval must be at least 1 second on Uptime Kuma 2.x");
+    expect(k.calls.map((c) => c.event)).toContain("login");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("ping add without --timeout stores the 2.x UI default 10", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "ping", "--name", "p", "--hostname", "h"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "p").timeout).toBe(10);
+  });
+
+  test("kafka-producer add without --timeout stores the 2.x UI default 1", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "kafka-producer",
+        "--name",
+        "k",
+        "--kafka-producer-broker",
+        "kafka.example.com:9092",
+        "--kafka-producer-topic",
+        "t",
+        "--kafka-producer-message",
+        "m",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "k").timeout).toBe(1);
+  });
+
+  test("http add without --timeout stores the 2.x UI default 48", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "http", "--name", "h", "--url", "https://h.example.com"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "h").timeout).toBe(48);
+  });
+
+  test.each([[["--interval", "0"]], [["--interval", "abc"]], [["--timeout", "-1"]]])(
+    "add %p exits 2 before connecting",
+    async (extra) => {
+      const k = await useFake({ profile: "2.x" });
+      const r = await run(
+        sb,
+        [
+          "monitors",
+          "add",
+          "--type",
+          "http",
+          "--name",
+          "x",
+          "--url",
+          "https://x.example.com",
+          ...extra,
+        ],
+        creds(k.url),
+      );
+      expect(r.code).toBe(2);
+      expect(k.calls).toHaveLength(0);
+    },
+  );
+});
+
+describe("monitor timing on Kuma 1.x", () => {
+  test("the checked interval is the one that is sent: --set beats --config-file", async () => {
+    const k = await useFake();
+    const f = join(sb.dir, "t.json");
+    writeFileSync(f, JSON.stringify({ interval: 5 }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "push",
+        "--name",
+        "p",
+        "--config-file",
+        f,
+        "--set",
+        "interval=30",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "p").interval).toBe(30);
+  });
+
+  test.each([
+    [["--interval", "5"], "interval must be between 20 and 2073600"],
+    [["--set", "interval=3000000"], "interval must be between 20 and 2073600"],
+    [["--timeout", "0"], "Kuma 1.23 turns 0 into interval × 800 seconds"],
+  ])("add %p exits 2 after connect with no add call", async (extra, msg) => {
+    const k = await useFake();
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        ...extra,
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(msg);
+    expect(k.calls.map((c) => c.event)).toContain("login");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test.each([
+    [["--set", "interval=5"], "interval must be between 20 and 2073600"],
+    [["--set", "interval=3000000"], "interval must be between 20 and 2073600"],
+    [["--set", "timeout=0"], "Kuma 1.23 turns 0 into interval × 800 seconds"],
+  ])("edit %p exits 2 after connect with no editMonitor call", async (extra, msg) => {
+    const k = await useFake({ monitors: [http(7, "Taba")] });
+    const r = await run(sb, ["monitors", "edit", "7", ...extra], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(msg);
+    expect(k.calls.map((c) => c.event)).toContain("login");
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("ping add without --timeout stores 48", async () => {
+    const k = await useFake();
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "ping", "--name", "p", "--hostname", "h"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "p").timeout).toBe(48);
+  });
+});

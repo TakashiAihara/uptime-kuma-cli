@@ -57,6 +57,31 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
     httpId = out.id;
   }, 120_000);
 
+  test("interval 5: 2.x stores it, 1.23 refuses it after connect", async () => {
+    const r = await cliRun(sb, [
+      "monitors",
+      "add",
+      "--type",
+      "push",
+      "--name",
+      "it-fast",
+      "--interval",
+      "5",
+      "--paused",
+    ]);
+    if (!on2x) {
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("--interval must be between 20 and 2073600");
+      return;
+    }
+    expect(r.code).toBe(0);
+    const id = r.json().id;
+    const g = await cliRun(sb, ["monitors", "get", String(id)]);
+    expect(g.json()).toMatchObject({ interval: 5, retryInterval: 5, timeout: 4 });
+    const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
+    expect(del.code).toBe(0);
+  }, 180_000);
+
   test("add with the same name exits 3 without creating a second monitor", async () => {
     const r = await cliRun(sb, ["monitors", "add", "--type", "push", "--name", "it-push"]);
     expect(r.code).toBe(3);
