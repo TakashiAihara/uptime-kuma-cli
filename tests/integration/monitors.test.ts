@@ -322,4 +322,47 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
       expect(r.json()).toEqual({ id: pgId, deleted: true });
     }, 120_000);
   });
+
+  describe("stats", () => {
+    let statsId = 0;
+
+    test("add a paused http monitor for the stats check", async () => {
+      const r = await cliRun(sb, [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "it-stats",
+        "--url",
+        "http://localhost:3001",
+        "--paused",
+      ]);
+      expect(r.code).toBe(0);
+      statsId = r.json().id;
+    }, 120_000);
+
+    test("stats returns the documented field types", async () => {
+      const r = await cliRun(sb, ["monitors", "stats", String(statsId)]);
+      expect(r.code).toBe(0);
+      const s = r.json();
+      expect(s.id).toBe(statsId);
+      expect(s.name).toBe("it-stats");
+      expect(typeof s.uptime24h).toBe("number");
+      expect(typeof s.uptime30d).toBe("number");
+      expect(s.uptime24h).toBeGreaterThanOrEqual(0);
+      expect(s.uptime24h).toBeLessThanOrEqual(1);
+      expect(s.uptime30d).toBeGreaterThanOrEqual(0);
+      expect(s.uptime30d).toBeLessThanOrEqual(1);
+      expect(s.avgPing === null || typeof s.avgPing === "number").toBe(true);
+      expect(s.certExpiresAt === null || typeof s.certExpiresAt === "string").toBe(true);
+      expect(s.certDaysRemaining === null || typeof s.certDaysRemaining === "number").toBe(true);
+    }, 120_000);
+
+    test("delete the stats monitor", async () => {
+      const r = await cliRun(sb, ["monitors", "delete", String(statsId), "--yes"]);
+      expect(r.code).toBe(0);
+      expect(r.json()).toEqual({ id: statsId, deleted: true });
+    }, 120_000);
+  });
 });

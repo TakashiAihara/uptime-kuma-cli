@@ -97,6 +97,24 @@ export type MaintenanceRow = {
   timezoneOption?: string | null;
 };
 
+// Per-monitor stats values for the post-login stats pushes; a field left
+// out is derived like Kuma computes it (avgPing and the uptimes from the
+// beats), and certInfo exists only when set here — it is sent verbatim, so
+// a malformed string reaches the CLI unchanged.
+export type StatsValues = {
+  avgPing?: number | null;
+  uptime24h?: number;
+  uptime30d?: number;
+  certInfo?: string;
+};
+
+type ResolvedStats = {
+  avgPing: number | null;
+  uptime24h: number;
+  uptime30d: number;
+  certInfo: string | undefined;
+};
+
 export type FakeState = {
   username: string;
   password: string;
@@ -147,6 +165,25 @@ export type FakeState = {
   fail: Record<string, string | (string | null)[]>;
   // monitor ids whose heartbeatList is never pushed
   silentHeartbeat: number[];
+  // per-monitor stats values; unset fields derive from beats like Kuma computes them
+  stats: Record<number, StatsValues>;
+  // ms to wait before a monitor's whole stats sequence; like a slow sendStats
+  // it also delays every monitor after it in monitorList order
+  statsDelay: Record<number, number>;
+  // ms to wait before a monitor's certInfo emit; in the post-login walk it
+  // still precedes the next monitor's stats like the awaited sendCertInfo
+  certInfoDelay: Record<number, number>;
+  // a second stats round, resendStatsAfterMs after the first, with per-monitor
+  // overrides — proves the CLI keeps the first values
+  resendStatsAfterMs: number;
+  resendStats: Record<number, StatsValues>;
+  // monitor ids whose stats pushes (avgPing / uptime / certInfo) never arrive
+  silentStats: number[];
+  // per-monitor single stats events left out ("avgPing", "uptime24", "uptime720")
+  skipStatEvents: Record<number, string[]>;
+  // monitor ids whose avgPing is also pushed before the post-login walk, like a
+  // heartbeat-triggered sendStats interleaving with it
+  earlyAvgPing: number[];
   testNotificationResult: { ok: boolean; msg: string };
   // getSettings data; primaryBaseURL is what the UI uses for push URLs
   settings: Record<string, unknown>;
@@ -175,6 +212,8 @@ export type FakeState = {
 export type FakeKuma = { url: string; calls: Call[]; state: FakeState; close: () => Promise<void> };
 
 const now = () => new Date().toISOString().replace("T", " ").slice(0, 19);
+const beatTime = (b: Beat): number => Date.parse(`${b.time.replace(" ", "T")}Z`);
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // checkSlug of server/socket-handlers/status-page-socket-handler.js (1.23.17):
 // addStatusPage lower-cases the slug first, so the accepted set is lowercase
@@ -294,6 +333,14 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     unlistedMonitors: [],
     fail: {},
     silentHeartbeat: [],
+    stats: {},
+    statsDelay: {},
+    skipStatEvents: {},
+    earlyAvgPing: [],
+    certInfoDelay: {},
+    resendStatsAfterMs: 0,
+    resendStats: {},
+    silentStats: [],
     testNotificationResult: { ok: true, msg: "Sent Successfully." },
     settings: {},
     getSettingsResult: null,
@@ -486,6 +533,53 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     return row;
   };
 
+  // Monitor.sendAvgPing of Kuma 1.23.17: parseInt of AVG(ping) over the last
+  // 24 hours of beats with a ping; NaN without any, which the wire carries
+  // as null
+  const avgPingOf = (id: number): number | null => {
+    const cutoff = Date.now() - 24 * 3600_000;
+    const pings = (state.beats[id] ?? []).flatMap((b) =>
+      typeof b.ping === "number" && beatTime(b) > cutoff ? [b.ping] : [],
+    );
+    return pings.length === 0 ? null : Math.trunc(pings.reduce((a, b) => a + b, 0) / pings.length);
+  };
+
+  // calcUptime of Kuma 1.23.17 is duration-weighted over the window; the
+  // fake approximates it as the share of up beats (status 1 or 3) inside it
+  const uptimeOf = (id: number, hours: number): number => {
+    const cutoff = Date.now() - hours * 3600_000;
+    const rows = (state.beats[id] ?? []).filter((b) => beatTime(b) > cutoff);
+    if (rows.length === 0) return 0;
+    const up = rows.filter((b) => b.status === 1 || b.status === 3).length;
+    return up / rows.length;
+  };
+
+  // stats state overrides beat the derived values field by field; an explicit
+  // null avgPing stays null (?? would fall back to the derived value)
+  const pick = <T>(v: T | undefined, fallback: T): T => (v === undefined ? fallback : v);
+
+  // certInfo has no derived value: it exists only when the fixture sets it
+  const statValues = (m: Monitor): ResolvedStats => {
+    const o = state.stats[m.id];
+    return {
+      avgPing: pick(o?.avgPing, avgPingOf(m.id)),
+      uptime24h: pick(o?.uptime24h, uptimeOf(m.id, 24)),
+      uptime30d: pick(o?.uptime30d, uptimeOf(m.id, 720)),
+      certInfo: o?.certInfo,
+    };
+  };
+
+  const resendValues = (m: Monitor): ResolvedStats => {
+    const base = statValues(m);
+    const o = state.resendStats[m.id];
+    return {
+      avgPing: pick(o?.avgPing, base.avgPing),
+      uptime24h: pick(o?.uptime24h, base.uptime24h),
+      uptime30d: pick(o?.uptime30d, base.uptime30d),
+      certInfo: pick(o?.certInfo, base.certInfo),
+    };
+  };
+
   io.on("connection", (socket) => {
     let loggedIn = false;
     socket.onAny((event, ...args) => {
@@ -541,7 +635,8 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
         const push = (name: string, emit: () => void) => {
           if (!state.skipLists.includes(name)) emit();
         };
-        push("monitorList", () => socket.emit("monitorList", monitorList()));
+        const list = monitorList();
+        push("monitorList", () => socket.emit("monitorList", list));
         push("maintenanceList", () => socket.emit("maintenanceList", maintenanceListJSON()));
         push("notificationList", () =>
           socket.emit(
@@ -577,6 +672,43 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
           const imp = (state.beats[m.id] ?? []).filter((b) => b.important).reverse();
           socket.emit("importantHeartbeatList", m.id, imp, false);
         }
+        // Monitor.sendStats of Kuma 1.23.17 runs after the heartbeat lists,
+        // once per monitor in monitorList order (its integer keys enumerate
+        // by id): avgPing, uptime 24h, uptime 30d, then certInfo only when a
+        // monitor_tls_info row exists. Each sendStats of this walk is awaited,
+        // so within it a monitor's certInfo precedes the next monitor's
+        // avgPing (earlyAvgPing models a heartbeat run breaking that); the
+        // delays model the DB lookups and hold the rest of the walk. The walk
+        // sends ids as strings like Kuma's for...in over monitorList.
+        const emitStats = async (values: (m: Monitor) => ResolvedStats) => {
+          for (const m of Object.values(list)) {
+            if (state.silentStats.includes(m.id)) continue;
+            const delay = state.statsDelay[m.id] ?? 0;
+            if (delay > 0) await sleep(delay);
+            const v = values(m);
+            const skip = state.skipStatEvents[m.id] ?? [];
+            const sid = String(m.id);
+            if (!skip.includes("avgPing")) socket.emit("avgPing", sid, v.avgPing);
+            if (!skip.includes("uptime24")) socket.emit("uptime", sid, 24, v.uptime24h);
+            if (!skip.includes("uptime720")) socket.emit("uptime", sid, 720, v.uptime30d);
+            if (v.certInfo !== undefined) {
+              const certDelay = state.certInfoDelay[m.id] ?? 0;
+              if (certDelay > 0) await sleep(certDelay);
+              socket.emit("certInfo", sid, v.certInfo);
+            }
+          }
+        };
+        void (async () => {
+          for (const m of Object.values(list)) {
+            if (state.earlyAvgPing.includes(m.id))
+              socket.emit("avgPing", m.id, statValues(m).avgPing);
+          }
+          await emitStats(statValues);
+          if (Object.keys(state.resendStats).length > 0) {
+            if (state.resendStatsAfterMs > 0) await sleep(state.resendStatsAfterMs);
+            await emitStats(resendValues);
+          }
+        })();
         if (state.dropAfterLists) setTimeout(() => socket.disconnect(true), 50);
       }, 20);
       return { ok: true, token: "jwt-token" };
@@ -648,9 +780,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     handle("getMonitorBeats", (id: number, period: number) => {
       if (period == null) throw new Error("Invalid period.");
       const cutoff = Date.now() - Number(period) * 3600_000;
-      const data = (state.beats[Number(id)] ?? []).filter(
-        (b) => Date.parse(`${b.time.replace(" ", "T")}Z`) > cutoff,
-      );
+      const data = (state.beats[Number(id)] ?? []).filter((b) => beatTime(b) > cutoff);
       return { ok: true, data: structuredClone(data) };
     });
 

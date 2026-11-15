@@ -117,7 +117,27 @@ export type StatusPageRow = Record<string, unknown> & { id: number; title: strin
 // public shape (dateRange, timeRange, status, ...), not bean columns.
 export type MaintenanceRow = Record<string, unknown> & { id: number };
 
+// The resolved stats of one monitor as `monitors stats` reports them: the
+// uptime values are Kuma's 0..1 ratios over its 24h and 30d windows,
+// avgPing is null when the monitor has no beats with a ping in 24h, and
+// certInfo is the raw monitor_tls_info info_json (undefined when the
+// monitor has no such row).
+export type MonitorStats = {
+  avgPing: number | null;
+  uptime24h: number;
+  uptime30d: number;
+  certInfo: string | undefined;
+};
+
 type BeatRow = Record<string, unknown>;
+
+// First-value-wins record of the stats pushes, kept event by event; sendStats
+// re-emits them on every heartbeat.
+type MonitorStatEvents = {
+  avgPing?: { value: number | null };
+  uptime: Map<number, { at: number; value: number }>;
+  certInfo?: { at: number; json: string };
+};
 
 let currentSocket: Socket | undefined;
 
@@ -161,6 +181,7 @@ export class KumaSession {
     readonly dockerHostList: DockerHostRow[],
     readonly statusPageList: Record<string, StatusPageRow> | undefined,
     readonly heartbeats: Map<number, BeatRow[]>,
+    private readonly statsEvents: Map<number, MonitorStatEvents>,
     // setSettings takes the login password again as currentPassword when the
     // request would disable auth; it is the same secret resolveCredentials
     // already produced for the login, kept here so no command re-resolves it.
@@ -249,6 +270,72 @@ export class KumaSession {
       await Promise.race([sleep(10), this.disconnected]);
     }
   }
+
+  // The stats pushes of Kuma 1.23.17: sendStats emits, per monitor, avgPing,
+  // uptime 24h, uptime 30d and — only when a monitor_tls_info row exists —
+  // certInfo right after the uptime 30d. Besides the post-login walk it runs
+  // on every heartbeat of any monitor, outside that walk, so another
+  // monitor's pushes can interleave; each monitor's certInfo wait therefore
+  // ends 500 ms after its own uptime 30d (a certInfo that has arrived is used
+  // either way) and never makes the command fail. The listeners in connect()
+  // keep the first value of each kind, event by event.
+  async monitorStats(
+    ids: number[],
+    names: ReadonlyMap<number, string>,
+  ): Promise<Map<number, MonitorStats>> {
+    const deadline = Date.now() + this.timeoutMs;
+
+    const complete = (id: number): boolean => {
+      const rec = this.statsEvents.get(id);
+      return rec?.avgPing !== undefined && rec.uptime.has(24) && rec.uptime.has(720);
+    };
+
+    // a monitor's own bound: certInfo counts only when it came within 500 ms
+    // of that monitor's uptime 30d, whatever else the command still waits for
+    const certInTime = (id: number): string | undefined => {
+      const rec = this.statsEvents.get(id);
+      const uptime30d = rec?.uptime.get(720);
+      if (uptime30d === undefined || rec?.certInfo === undefined) return undefined;
+      return rec.certInfo.at <= uptime30d.at + 500 ? rec.certInfo.json : undefined;
+    };
+    const certDone = (id: number): boolean => {
+      const uptime30d = this.statsEvents.get(id)?.uptime.get(720);
+      if (uptime30d === undefined) return false;
+      return certInTime(id) !== undefined || Date.now() >= uptime30d.at + 500;
+    };
+
+    for (;;) {
+      const missing = ids.filter((id) => !complete(id));
+      if (missing.length === 0 && ids.every(certDone)) break;
+      if (Date.now() >= deadline) {
+        if (missing.length > 0) {
+          const what = missing.map((id) => `${id} (${names.get(id) ?? "unknown"})`).join(", ");
+          fail(2, `timed out waiting for stats of monitor(s) ${what}`);
+        }
+        // only a certInfo grace is still running at the deadline: no cert
+        break;
+      }
+      await Promise.race([sleep(10), this.disconnected]);
+    }
+
+    const out = new Map<number, MonitorStats>();
+    for (const id of ids) {
+      const rec = this.statsEvents.get(id);
+      const avgPing = rec?.avgPing;
+      const uptime24h = rec?.uptime.get(24);
+      const uptime30d = rec?.uptime.get(720);
+      if (avgPing === undefined || uptime24h === undefined || uptime30d === undefined) {
+        fail(70, `stats of monitor ${id} missing after the wait`);
+      }
+      out.set(id, {
+        avgPing: avgPing.value,
+        uptime24h: uptime24h.value,
+        uptime30d: uptime30d.value,
+        certInfo: certInTime(id),
+      });
+    }
+    return out;
+  }
 }
 
 // monitorList, notificationList, proxyList and dockerHostList are pushed in
@@ -290,6 +377,23 @@ export async function connect(
     statusPageList?: Record<string, StatusPageRow>;
   } = {};
   const heartbeats = new Map<number, BeatRow[]>();
+  const statsEvents = new Map<number, MonitorStatEvents>();
+  // afterLogin's `for (let monitorID in monitorList)` hands sendStats string
+  // keys while the heartbeat and REST paths pass numbers; both normalize to
+  // the monitor id (the heartbeatList listener does the same Number(id)).
+  const statId = (id: unknown): number => {
+    if (typeof id !== "number" && typeof id !== "string") return NaN;
+    const n = Number(id);
+    return Number.isFinite(n) ? n : NaN;
+  };
+  const statRecord = (id: number): MonitorStatEvents => {
+    let rec = statsEvents.get(id);
+    if (rec === undefined) {
+      rec = { uptime: new Map() };
+      statsEvents.set(id, rec);
+    }
+    return rec;
+  };
   // The server pushes these right after the login callback, so the listeners
   // must be in place before login is emitted.
   socket.on("monitorList", (data: Record<string, Monitor>) => {
@@ -312,6 +416,45 @@ export async function connect(
   });
   socket.on("heartbeatList", (id: unknown, beats: unknown) => {
     heartbeats.set(Number(id), Array.isArray(beats) ? (beats as BeatRow[]) : []);
+  });
+  // The stats pushes arrive after the lists, once after login and again on
+  // every heartbeat; only `monitors stats` waits for them. The first value
+  // of each kind wins; arrival times bound each monitor's 500 ms certInfo
+  // grace.
+  socket.on("avgPing", (id: unknown, value: unknown) => {
+    const mid = statId(id);
+    if (Number.isNaN(mid)) return;
+    const rec = statRecord(mid);
+    if (rec.avgPing === undefined) {
+      rec.avgPing = {
+        // parseInt(AVG(ping)) is NaN without beats; JSON carries NaN as null
+        value: typeof value === "number" && Number.isFinite(value) ? value : null,
+      };
+    }
+  });
+  socket.on("uptime", (id: unknown, period: unknown, value: unknown) => {
+    const mid = statId(id);
+    if (
+      Number.isNaN(mid) ||
+      typeof period !== "number" ||
+      !Number.isFinite(period) ||
+      typeof value !== "number" ||
+      !Number.isFinite(value)
+    ) {
+      return;
+    }
+    const rec = statRecord(mid);
+    if (!rec.uptime.has(period)) {
+      rec.uptime.set(period, { at: Date.now(), value });
+    }
+  });
+  socket.on("certInfo", (id: unknown, data: unknown) => {
+    const mid = statId(id);
+    if (Number.isNaN(mid) || typeof data !== "string") return;
+    const rec = statRecord(mid);
+    if (rec.certInfo === undefined) {
+      rec.certInfo = { at: Date.now(), json: data };
+    }
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -376,6 +519,7 @@ export async function connect(
     present("dockerHostList"),
     wanted.has("statusPageList") ? present("statusPageList") : undefined,
     heartbeats,
+    statsEvents,
     password,
     disconnected,
   );

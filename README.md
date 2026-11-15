@@ -51,6 +51,8 @@ All output is JSON on stdout.
 uptime-kuma-cli monitors list --name taba
 uptime-kuma-cli monitors list --tag prod
 uptime-kuma-cli monitors get 14
+uptime-kuma-cli monitors stats
+uptime-kuma-cli monitors stats 14
 uptime-kuma-cli monitors add --type http --name "docs" --url https://docs.example.com --notifications-from 14
 uptime-kuma-cli monitors add --type keyword --name "login page" --url https://example.com/login --keyword "Sign in"
 uptime-kuma-cli monitors add --type json-query --name "relay jp" --url https://api.example.com/relays \
@@ -127,6 +129,7 @@ uptime-kuma-cli settings set --config-file settings.json
 - Kuma only notifies on status changes; with `resendInterval` 0 a monitor that stays down does not notify again
 - Notification configs, proxy passwords and secret monitor fields (basic auth, OAuth secret, TLS key, headers, body, ...) are never printed; pass secrets with `--config-file` / `--password-file`
 - `monitors add` / `monitors edit` take `--set key=value` and `--config-file` for monitor fields without a dedicated flag; secret fields only go through `--config-file` so they stay out of argv
+- `monitors stats` reports Kuma's pushed stats like `beats latest` waits for heartbeats: `uptime24h` / `uptime30d` are 0–1 ratios over the 24h / 30d windows, `avgPing` is null when no beat has a ping, `certExpiresAt` / `certDaysRemaining` are null without a certificate — the wait for a monitor's certificate ends 500 ms after its own 30d uptime arrives, and missing stats (not a missing certificate) exit 2 naming the monitors
 - New monitors get the notifications marked default; every type except port / push gets the proxy flagged `default` (proxyId), and `--proxy-id` overrides it
 - Each command logs in once; Kuma allows 20 logins per minute per instance, so pace long loops. Accounts with 2FA are not supported
 
