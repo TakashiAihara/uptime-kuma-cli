@@ -11,15 +11,27 @@ const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 const ENTRY_PAGE_PREFIX = "statusPage-";
 
-// General.vue offers UTC plus the names timezoneList() returns, and that
-// list comes from the timezones-list package (util-frontend.js); the
-// Intl.supportedValuesOf set is the closest available here. The comparison
-// is case-sensitive, so aliases like "Japan" and offset forms like "+09:00"
-// — both of which Intl's DateTimeFormat accepts — are refused like the
-// UI's fixed list refuses them.
-// "UTC" is listed explicitly because the UI offers it explicitly; Bun's ICU
-// list already contains it (Node's does not), so no test can tell it apart.
-const TIMEZONES = new Set(["UTC", ...Intl.supportedValuesOf("timeZone")]);
+// General.vue offers "UTC" plus the tzCode names of the timezones-list
+// package (3.0.3 in Kuma 1.23.17). The CLI accepts the canonical names of
+// Bun's ICU (Intl.supportedValuesOf) plus the legacy names that list still
+// offers and ICU dropped, compared case-sensitively: aliases like "Japan",
+// lowercase names and offsets like "+09:00" are refused (Kuma stores
+// "+09:00" and then answers "Invalid timezone"). The ICU set also accepts
+// some names the UI lacks (Etc/GMT±N, America/Nuuk), which Kuma runs fine.
+const UI_LEGACY_TIMEZONES = [
+  "America/Yellowknife",
+  "America/Rainy_River",
+  "America/Nipigon",
+  "America/Pangnirtung",
+  "America/Thunder_Bay",
+  "America/Godthab",
+  "Europe/Uzhgorod",
+  "Europe/Zaporizhzhia",
+  "Asia/Choibalsan",
+  "Australia/Currie",
+  "Pacific/Enderbury",
+];
+const TIMEZONES = new Set(["UTC", ...UI_LEGACY_TIMEZONES, ...Intl.supportedValuesOf("timeZone")]);
 
 // The keys the 1.23.17 settings components write through the shared `settings`
 // object that saveSettings posts whole to setSettings: General.vue
@@ -31,7 +43,7 @@ const TIMEZONES = new Set(["UTC", ...Intl.supportedValuesOf("timeZone")]);
 const SETTING_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unknown> = {
   serverTimezone: (value, key) => {
     if (typeof value !== "string" || !TIMEZONES.has(value)) {
-      fail(2, `"${key}" must be "UTC" or an IANA timezone name`);
+      fail(2, `"${key}" must be "UTC" or a canonical IANA timezone name (case-sensitive)`);
     }
     return value;
   },
@@ -67,8 +79,17 @@ const SETTING_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unkn
       if (url === null || (url.protocol !== "http:" && url.protocol !== "https:")) {
         fail(2, `"${key}" must be a URL starting with http:// or https://, or empty`);
       }
-      if (url.search !== "" || url.hash !== "") {
+      // URL.search / URL.hash are "" for a bare trailing ? or #, so the
+      // separators themselves are looked for
+      if (value.includes("?") || value.includes("#")) {
         fail(2, `"${key}" must not contain a query string or fragment`);
+      }
+      // get masks the password as ***; feeding that output back would store it
+      if (url.password === "***") {
+        fail(
+          2,
+          `"${key}" carries the masked password from settings get output; give the real URL or omit the key`,
+        );
       }
     }
     return value;
@@ -160,9 +181,9 @@ async function fetchSettings(s: KumaSession): Promise<Record<string, unknown>> {
   return data as Record<string, unknown>;
 }
 
-// steamAPIKey is the only secret among the general settings; it prints as
-// "***" whenever it holds a value. primaryBaseURL may embed user:pass@ like
-// a monitor url, so it goes through the same redaction.
+// The general settings hold two secrets: steamAPIKey prints as "***"
+// whenever it holds a value, and a password inside primaryBaseURL is masked
+// like a monitor url.
 function redactSettings(data: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {
     ...data,
@@ -241,6 +262,15 @@ export function registerSettings(program: Command): void {
       }
       validateSettingValues(sets);
       validateSettingValues(fileConfig);
+      // a password inside primaryBaseURL is a secret too: argv is no place for it
+      if (typeof sets.primaryBaseURL === "string" && sets.primaryBaseURL !== "") {
+        if (new URL(sets.primaryBaseURL).password !== "") {
+          fail(
+            2,
+            "--set primaryBaseURL with a password would put a secret in the command line; use --config-file instead",
+          );
+        }
+      }
 
       // Only an entryPage override can point at a status page; the pushed
       // list is waited for just then, like the other commands that need it.

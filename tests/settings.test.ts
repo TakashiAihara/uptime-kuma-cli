@@ -193,12 +193,27 @@ describe("settings set", () => {
   });
 
   test.each([
-    ["serverTimezone=Not/AZone", '"serverTimezone" must be "UTC" or an IANA timezone name'],
-    ["serverTimezone=", '"serverTimezone" must be "UTC" or an IANA timezone name'],
+    [
+      "serverTimezone=Not/AZone",
+      '"serverTimezone" must be "UTC" or a canonical IANA timezone name (case-sensitive)',
+    ],
+    [
+      "serverTimezone=",
+      '"serverTimezone" must be "UTC" or a canonical IANA timezone name (case-sensitive)',
+    ],
     // Intl's DateTimeFormat accepts these, but the UI's fixed list does not
-    ["serverTimezone=asia/tokyo", '"serverTimezone" must be "UTC" or an IANA timezone name'],
-    ["serverTimezone=+09:00", '"serverTimezone" must be "UTC" or an IANA timezone name'],
-    ["serverTimezone=Japan", '"serverTimezone" must be "UTC" or an IANA timezone name'],
+    [
+      "serverTimezone=asia/tokyo",
+      '"serverTimezone" must be "UTC" or a canonical IANA timezone name (case-sensitive)',
+    ],
+    [
+      "serverTimezone=+09:00",
+      '"serverTimezone" must be "UTC" or a canonical IANA timezone name (case-sensitive)',
+    ],
+    [
+      "serverTimezone=Japan",
+      '"serverTimezone" must be "UTC" or a canonical IANA timezone name (case-sensitive)',
+    ],
     ["searchEngineIndex=yes", '"searchEngineIndex" must be a boolean'],
     ["entryPage=foo", '"entryPage" must be "dashboard" or "statusPage-<slug>"'],
     ["entryPage=statusPage-", '"entryPage" must be "dashboard" or "statusPage-<slug>"'],
@@ -478,7 +493,8 @@ describe("settings set", () => {
     expect(g.json().primaryBaseURL).toBe("https://op:***@kuma.example.com/");
     expect(g.stdout).not.toContain("pw-fixture");
 
-    const s = await run(sb, ["settings", "set", "--set", `primaryBaseURL=${url}`], creds(kuma.url));
+    const f = writeJson("url.json", { primaryBaseURL: url });
+    const s = await run(sb, ["settings", "set", "--config-file", f], creds(kuma.url));
     expect(s.code).toBe(0);
     // the raw value goes on the wire; only the printed output is redacted
     expect(sentSettings().primaryBaseURL).toBe(url);
@@ -486,6 +502,63 @@ describe("settings set", () => {
     expect(s.stdout).not.toContain("pw-fixture");
     expect(kuma.state.settings.primaryBaseURL).toBe(url);
   });
+
+  test("--set primaryBaseURL with a password exits 2 before connecting", async () => {
+    const userPass = ["op", "pw-fixture"].join(":");
+    const r = await run(
+      sb,
+      ["settings", "set", "--set", `primaryBaseURL=https://${userPass}@kuma.example.com`],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("use --config-file instead");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("--set primaryBaseURL without a password is accepted", async () => {
+    const r = await run(
+      sb,
+      ["settings", "set", "--set", "primaryBaseURL=https://kuma.example.com"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect(sentSettings().primaryBaseURL).toBe("https://kuma.example.com");
+  });
+
+  test("the masked primaryBaseURL password from get output is refused", async () => {
+    const masked = ["op", String.fromCharCode(42).repeat(3)].join(":");
+    const f = writeJson("masked.json", { primaryBaseURL: `https://${masked}@kuma.example.com/` });
+    const r = await run(sb, ["settings", "set", "--config-file", f], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("masked password");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test.each(["https://kuma.example.com/?", "https://kuma.example.com/#"])(
+    "a bare trailing separator in primaryBaseURL %p exits 2",
+    async (value) => {
+      const r = await run(
+        sb,
+        ["settings", "set", "--set", `primaryBaseURL=${value}`],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("must not contain a query string or fragment");
+    },
+  );
+
+  test.each(["Europe/London", "America/Thunder_Bay", "Pacific/Enderbury"])(
+    "serverTimezone %p (a UI name) is accepted",
+    async (tz) => {
+      const r = await run(
+        sb,
+        ["settings", "set", "--set", `serverTimezone=${tz}`],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(0);
+      expect(sentSettings().serverTimezone).toBe(tz);
+    },
+  );
 
   test("entryPage=statusPage-<slug> is sent when the page exists", async () => {
     const r = await run(
@@ -561,7 +634,10 @@ describe("settings set", () => {
 
   test("a failure on the post-save read prints the sent settings and exits 0", async () => {
     kuma.state.fail.getSettings = [null, "second read failed"];
+    kuma.state.settings = { ...kuma.state.settings, steamAPIKey: "steam-fixture-value" };
     const r = await run(sb, ["settings", "set", "--set", "trustProxy=true"], creds(kuma.url));
+    expect(r.stdout).not.toContain("steam-fixture-value");
+    expect(r.json().steamAPIKey).toBe(String.fromCharCode(42).repeat(3));
     // the write already happened, so the sent object is printed redacted
     // with a warning instead of a nonzero exit, like `status-pages save`
     expect(r.code).toBe(0);
