@@ -3352,6 +3352,19 @@ describe("monitors add", () => {
     expect(r.stderr).toContain("databaseConnectionString");
     expect(addCalls()).toHaveLength(0);
   });
+
+  test("postgres: --config-file with a non-string databaseConnectionString exits 2", async () => {
+    const f = join(sb.dir, "pg-num.json");
+    writeFileSync(f, JSON.stringify({ databaseConnectionString: 5432 }));
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "postgres", "--name", "x", "--config-file", f],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("databaseConnectionString");
+    expect(addCalls()).toHaveLength(0);
+  });
 });
 
 describe("monitors edit", () => {
@@ -3925,6 +3938,22 @@ describe("monitors edit", () => {
     const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
     expect(sent.type).toBe("postgres");
     expect(sent.databaseConnectionString).toBe("postgres://u:p@db/x");
+  });
+
+  test("edit postgres with --config-file clearing databaseConnectionString exits 2", async () => {
+    kuma.state.monitors.push({
+      ...http(61, "pg"),
+      type: "postgres",
+      url: null,
+      databaseConnectionString: "postgres://u:p@db/x",
+      databaseQuery: null,
+    });
+    const f = join(sb.dir, "edit-pg-empty.json");
+    writeFileSync(f, JSON.stringify({ databaseConnectionString: "" }));
+    const r = await run(sb, ["monitors", "edit", "61", "--config-file", f], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("databaseConnectionString");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
   });
 
   test("edit --set type=mqtt without the required fields exits 2", async () => {
