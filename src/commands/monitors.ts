@@ -113,8 +113,7 @@ function generatePushToken(): string {
   return token;
 }
 
-// Fields Kuma's monitor JSON carries that must never reach stdout. The last
-// six are Kuma 2.x fields that 1.23 never sends.
+// Fields Kuma's monitor JSON carries that must never reach stdout.
 const SECRET_KEYS = new Set([
   "basic_auth_pass",
   "oauth_client_secret",
@@ -127,6 +126,7 @@ const SECRET_KEYS = new Set([
   "databaseConnectionString",
   "grpcBody",
   "grpcMetadata",
+  // Kuma 2.x fields; 1.23 never sends them
   "bearer_token",
   "gamedigToken",
   "rabbitmqPassword",

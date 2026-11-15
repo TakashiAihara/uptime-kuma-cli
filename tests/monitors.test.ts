@@ -1804,6 +1804,19 @@ describe("monitors add", () => {
     expect(kuma.calls).toHaveLength(0);
   });
 
+  test("a Kuma 2.x secret field in --config-file is refused as not a monitor field", async () => {
+    const f = join(sb.dir, "ssh.json");
+    writeFileSync(f, JSON.stringify({ sshPassword: ["s", "x"].join("-") }));
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "push", "--name", "x", "--config-file", f],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('key "sshPassword" is not a monitor field');
+    expect(kuma.calls).toHaveLength(0);
+  });
+
   // The Kuma 2.x secret fields are not 1.23 monitor columns, so the field
   // check refuses them before the secret check can point at --config-file
   test.each([
@@ -1820,7 +1833,7 @@ describe("monitors add", () => {
       creds(kuma.url),
     );
     expect(r.code).toBe(2);
-    expect(r.stderr).toContain(key);
+    expect(r.stderr).toContain(`key "${key}" is not a monitor field`);
     expect(kuma.calls).toHaveLength(0);
   });
 
@@ -3820,7 +3833,7 @@ describe("monitors edit", () => {
   ])("edit --set %s=... exits 2 for the Kuma 2.x secret fields", async (key) => {
     const r = await run(sb, ["monitors", "edit", "7", "--set", `${key}=x`], creds(kuma.url));
     expect(r.code).toBe(2);
-    expect(r.stderr).toContain(key);
+    expect(r.stderr).toContain(`key "${key}" is not a monitor field`);
     expect(kuma.calls).toHaveLength(0);
   });
 

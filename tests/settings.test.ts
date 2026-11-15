@@ -106,6 +106,14 @@ describe("settings get", () => {
     expect(r.json().steamAPIKey).toBe("");
   });
 
+  test("globalpingApiToken is not editable yet (#41)", async () => {
+    const f = writeJson("gp.json", { globalpingApiToken: ["g", "x"].join("-") });
+    const r = await run(sb, ["settings", "set", "--config-file", f], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('"globalpingApiToken" is not a setting the Uptime Kuma UI edits');
+    expect(kuma.calls).toHaveLength(0);
+  });
+
   test("globalpingApiToken prints as *** when non-empty and stays empty", async () => {
     const secret = ["fixture", "globalping"].join("-");
     kuma.state.settings = { globalpingApiToken: secret };
