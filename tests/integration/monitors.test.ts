@@ -6,8 +6,7 @@ import { cliRun, on2x } from "./helpers";
 
 // Runs only when scripts/integration.ts provides UPTIME_KUMA_IT_*; a plain
 // `bun test` skips the whole file.
-// Kuma 2.x: #37
-describe.skipIf(!process.env.UPTIME_KUMA_IT_URL || on2x)("monitors (real Kuma)", () => {
+describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
   let sb: Sandbox;
   let pushId = 0;
   let pushToken = "";
@@ -115,6 +114,60 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL || on2x)("monitors (real Kuma)",
     expect(r.code).toBe(0);
     expect(r.json()).toEqual({ id: pushId, deleted: true });
   }, 120_000);
+
+  test("json-query with the default operator goes up; 1.23 refuses --json-path-operator", async () => {
+    // Kuma's own /api/entry-page answers {"type":"entryPage",...}; a 2.x
+    // json-query without an operator would go DOWN on every beat
+    const args = [
+      "monitors",
+      "add",
+      "--type",
+      "json-query",
+      "--name",
+      "it-jq",
+      "--url",
+      "http://localhost:3001/api/entry-page",
+      "--json-path",
+      "type",
+      "--expected-value",
+      "entryPage",
+      "--interval",
+      "20",
+    ];
+    if (!on2x) {
+      const refused = await cliRun(sb, [...args, "--json-path-operator", "!="]);
+      expect(refused.code).toBe(2);
+      expect(refused.stderr).toContain('"jsonPathOperator" needs Uptime Kuma 2.x');
+    }
+    const r = await cliRun(sb, args);
+    expect(r.code).toBe(0);
+    const id = r.json().id;
+
+    let up = false;
+    for (let i = 0; i < 12 && !up; i++) {
+      await new Promise((res) => setTimeout(res, 5_000));
+      const b = await cliRun(sb, ["beats", String(id), "--hours", "1"]);
+      expect(b.code).toBe(0);
+      up = b.json().some((beat: any) => beat.status === 1);
+    }
+    expect(up).toBe(true);
+
+    const g = await cliRun(sb, ["monitors", "get", String(id)]);
+    expect(g.code).toBe(0);
+    if (on2x) {
+      expect(g.json()).toMatchObject({ jsonPathOperator: "==", conditions: [], rabbitmqNodes: [] });
+      const e = await cliRun(sb, ["monitors", "edit", String(id), "--set", "description=it"]);
+      expect(e.code).toBe(0);
+      expect(e.json()).toMatchObject({ description: "it", jsonPathOperator: "==", conditions: [] });
+      const op = await cliRun(sb, ["monitors", "edit", String(id), "--json-path-operator", "!="]);
+      expect(op.code).toBe(0);
+      expect(op.json().jsonPathOperator).toBe("!=");
+    } else {
+      expect(g.json()).not.toHaveProperty("jsonPathOperator");
+    }
+    const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
+    expect(del.code).toBe(0);
+  }, 300_000);
 
   describe("group / ping / dns", () => {
     let groupId = 0;

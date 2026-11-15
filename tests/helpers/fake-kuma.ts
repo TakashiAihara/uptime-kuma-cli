@@ -318,6 +318,56 @@ const ADD_KEYS = new Set([
   "authWorkstation",
 ]);
 
+// The columns a 2.x `add` accepts: the 1.23 set plus the fields 2.5.11's
+// editMonitor reads (2.5.11/server/server.js editMonitor) — the same list as
+// MONITOR_2X_FIELDS in src/kuma.ts, kept as a literal copy for the same
+// reason. editMonitor copies a fixed field list and silently drops the rest,
+// which the fake approximates by storing the object whole.
+const ADD_KEYS_2X = new Set([
+  ...ADD_KEYS,
+  "bearer_token",
+  "cacheBust",
+  "conditions",
+  "domainExpiryNotification",
+  "gamedigToken",
+  "ipFamily",
+  "jsonPathOperator",
+  "location",
+  "manual_status",
+  "mqttCheckType",
+  "mqttWebsocketPath",
+  "ntpRootDispersionThreshold",
+  "ntpStratumThreshold",
+  "ntpTimeOffsetThreshold",
+  "oauth_audience",
+  "ping_count",
+  "ping_numeric",
+  "ping_per_request_timeout",
+  "protocol",
+  "rabbitmqNodes",
+  "rabbitmqPassword",
+  "rabbitmqUsername",
+  "remote_browser",
+  "responseMaxLength",
+  "retryOnlyOnStatusCodeFailure",
+  "saveErrorResponse",
+  "saveResponse",
+  "screenshot_delay",
+  "sftpPath",
+  "smtpSecurity",
+  "snmpOid",
+  "snmpVersion",
+  "sshAuthMethod",
+  "sshPassphrase",
+  "sshPassword",
+  "sshPrivateKey",
+  "sshUsername",
+  "subtype",
+  "system_service_name",
+  "wsIgnoreSecWebsocketAcceptHeader",
+  "wsSubprotocol",
+]);
+
 export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<FakeKuma> {
   const profile2x = init.profile === "2.x";
   const state: FakeState = {
@@ -778,14 +828,14 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     });
 
     handle("add", (monitor: Monitor) => {
-      const unknown = Object.keys(monitor).filter((k) => !ADD_KEYS.has(k));
+      const allowed = state.profile === "2.x" ? ADD_KEYS_2X : ADD_KEYS;
+      const unknown = Object.keys(monitor).filter((k) => !allowed.has(k));
       if (unknown.length)
         throw new Error(`SQLITE_ERROR: table monitor has no column named ${unknown[0]}`);
       // 2.x's monitor.conditions is NOT NULL; the add handler stores
       // JSON.stringify(conditions), so only a missing key leaves it NULL (an
       // explicit null becomes the string "null"). SQLite rejects unknown
-      // columns first, at prepare time. ADD_KEYS is still the 1.23 column set,
-      // so a 2.x add that sends conditions fails above until #37 extends it.
+      // columns first, at prepare time.
       if (state.profile === "2.x" && monitor.conditions === undefined) {
         throw new Error("SQLITE_CONSTRAINT: NOT NULL constraint failed: monitor.conditions");
       }

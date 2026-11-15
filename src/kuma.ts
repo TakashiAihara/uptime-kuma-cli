@@ -87,6 +87,55 @@ export const MONITOR_ADD_FIELDS = new Set([
   "authWorkstation",
 ]);
 
+// The monitor fields 2.5.11's editMonitor reads (2.5.11/server/server.js
+// editMonitor) that MONITOR_ADD_FIELDS lacks. 1.23's `add` stores the object
+// as-is and fails on an unknown column, and its editMonitor copies a fixed
+// list and silently drops the rest, so the CLI accepts these only after
+// connect() on a >= 2 server.
+export const MONITOR_2X_FIELDS = new Set([
+  "bearer_token",
+  "cacheBust",
+  "conditions",
+  "domainExpiryNotification",
+  "gamedigToken",
+  "ipFamily",
+  "jsonPathOperator",
+  "location",
+  "manual_status",
+  "mqttCheckType",
+  "mqttWebsocketPath",
+  "ntpRootDispersionThreshold",
+  "ntpStratumThreshold",
+  "ntpTimeOffsetThreshold",
+  "oauth_audience",
+  "ping_count",
+  "ping_numeric",
+  "ping_per_request_timeout",
+  "protocol",
+  "rabbitmqNodes",
+  "rabbitmqPassword",
+  "rabbitmqUsername",
+  "remote_browser",
+  "responseMaxLength",
+  "retryOnlyOnStatusCodeFailure",
+  "saveErrorResponse",
+  "saveResponse",
+  "screenshot_delay",
+  "sftpPath",
+  "smtpSecurity",
+  "snmpOid",
+  "snmpVersion",
+  "sshAuthMethod",
+  "sshPassphrase",
+  "sshPassword",
+  "sshPrivateKey",
+  "sshUsername",
+  "subtype",
+  "system_service_name",
+  "wsIgnoreSecWebsocketAcceptHeader",
+  "wsSubprotocol",
+]);
+
 export interface NotificationRow extends Record<string, unknown> {
   id: number;
   name: string;
