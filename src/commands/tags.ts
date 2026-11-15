@@ -65,8 +65,9 @@ export function registerTags(program: Command): void {
       const tag = list.find((t) => t.id === id);
       if (!tag) fail(1, `tag ${id} not found`);
       // The 1.23.17 TagEditDialog refuses a name another tag already uses;
-      // renaming to the tag's own current name is fine.
-      if (name !== undefined) {
+      // renaming to the tag's own current name is fine, and Kuma itself
+      // allows duplicate names
+      if (name !== undefined && name !== tag.name) {
         const other = list.find((t) => t.id !== id && t.name === name);
         if (other) fail(1, `tag name "${name}" is already used by tag ${other.id}`);
       }

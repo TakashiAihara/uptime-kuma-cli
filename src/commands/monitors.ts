@@ -1244,7 +1244,7 @@ export function registerMonitors(program: Command): void {
       // monitor tagged twice would end up with identical duplicate rows
       if (rows.length > 1) {
         fail(
-          2,
+          1,
           `monitor ${id} has tag ${tagId} attached ${rows.length} times; use untag + tag instead`,
         );
       }

@@ -4829,13 +4829,13 @@ describe("monitor tags", () => {
       expect(rows.find((t) => t.tag_id === 6)!.value).toBeNull();
     });
 
-    test("a tag attached more than once exits 2 and points at untag + tag", async () => {
+    test("a tag attached more than once exits 1 and points at untag + tag", async () => {
       const r = await run(
         sb,
         ["monitors", "retag", "9", "--tag", "5", "--value", "z"],
         creds(kuma.url),
       );
-      expect(r.code).toBe(2);
+      expect(r.code).toBe(1);
       expect(r.stderr).toContain("untag + tag");
       expect(kuma.calls.find((c) => c.event === "editMonitorTag")).toBeUndefined();
       expect(

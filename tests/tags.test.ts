@@ -190,6 +190,20 @@ describe("tags", () => {
     expect(r.json()).toEqual({ id: 2, name: "prod", color: "#ff0000" });
   });
 
+  test("edit keeping a duplicated name alongside --color is allowed", async () => {
+    kuma.state.tags.find((t) => t.id === 1)!.name = "prod";
+    const r = await run(
+      sb,
+      ["tags", "edit", "1", "--name", "prod", "--color", "#abc"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect(r.json()).toEqual({ id: 1, name: "prod", color: "#abc" });
+    expect(kuma.calls.find((c) => c.event === "editTag")!.args).toEqual([
+      { id: 1, name: "prod", color: "#abc" },
+    ]);
+  });
+
   test("edit with an empty --name exits 2 before connecting", async () => {
     const r = await run(sb, ["tags", "edit", "1", "--name", ""], creds(kuma.url));
     expect(r.code).toBe(2);
