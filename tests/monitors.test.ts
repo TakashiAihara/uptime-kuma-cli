@@ -834,6 +834,706 @@ describe("monitors add", () => {
     expect(sent.port).toBeUndefined();
   });
 
+  test("grpc-keyword: sends the gRPC fields and reads --grpc-protobuf from a file", async () => {
+    const proto = join(sb.dir, "health.proto");
+    writeFileSync(
+      proto,
+      'syntax = "proto3";\n\nservice Health {\n  rpc Check(HealthCheckRequest) returns (HealthCheckResponse);\n}\n',
+    );
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "grpc-keyword",
+        "--name",
+        "grpc1",
+        "--grpc-url",
+        "grpc.example.com:443",
+        "--keyword",
+        "SERVING",
+        "--grpc-service-name",
+        "Health",
+        "--grpc-method",
+        "check",
+        "--grpc-protobuf",
+        proto,
+        "--grpc-enable-tls",
+        "--invert-keyword",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.type).toBe("grpc-keyword");
+    expect(sent.url).toBeNull();
+    expect(sent.grpcUrl).toBe("grpc.example.com:443");
+    expect(sent.keyword).toBe("SERVING");
+    expect(sent.invertKeyword).toBe(true);
+    expect(sent.grpcServiceName).toBe("Health");
+    expect(sent.grpcMethod).toBe("check");
+    expect(sent.grpcProtobuf).toContain("service Health");
+    expect(sent.grpcEnableTls).toBe(true);
+    expect(sent.grpcBody).toBe("{}");
+  });
+
+  test("grpc-keyword: grpcBody comes from --config-file when given", async () => {
+    const proto = join(sb.dir, "health.proto");
+    writeFileSync(proto, 'syntax = "proto3";\n');
+    const f = join(sb.dir, "grpc.json");
+    writeFileSync(f, JSON.stringify({ grpcBody: '{"k":"v"}' }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "grpc-keyword",
+        "--name",
+        "grpc-body",
+        "--grpc-url",
+        "h:1",
+        "--keyword",
+        "k",
+        "--grpc-service-name",
+        "S",
+        "--grpc-method",
+        "m",
+        "--grpc-protobuf",
+        proto,
+        "--config-file",
+        f,
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).grpcBody).toBe('{"k":"v"}');
+  });
+
+  test("grpc-keyword: grpcEnableTls and invertKeyword stay unset without the flags", async () => {
+    const proto = join(sb.dir, "health.proto");
+    writeFileSync(proto, 'syntax = "proto3";\n');
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "grpc-keyword",
+        "--name",
+        "grpc2",
+        "--grpc-url",
+        "grpc.example.com:443",
+        "--keyword",
+        "SERVING",
+        "--grpc-service-name",
+        "Health",
+        "--grpc-method",
+        "check",
+        "--grpc-protobuf",
+        proto,
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.grpcEnableTls).toBeUndefined();
+    expect(sent.invertKeyword).toBeUndefined();
+    expect(sent.grpcBody).toBe("{}");
+  });
+
+  test("grpc-keyword: --set grpcProtobuf=null exits 2 before sending", async () => {
+    const proto = join(sb.dir, "health.proto");
+    writeFileSync(proto, 'syntax = "proto3";\n');
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "grpc-keyword",
+        "--name",
+        "x",
+        "--grpc-url",
+        "h:1",
+        "--keyword",
+        "k",
+        "--grpc-service-name",
+        "S",
+        "--grpc-method",
+        "m",
+        "--grpc-protobuf",
+        proto,
+        "--set",
+        "grpcProtobuf=null",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("grpcProtobuf");
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test.each([
+    ["empty", ""],
+    ["not JSON", "not json"],
+    ["null", null],
+  ])("grpc-keyword: --config-file grpcBody=%s exits 2 before sending", async (_l, body) => {
+    const proto = join(sb.dir, "p.proto");
+    writeFileSync(proto, 'syntax = "proto3";\n');
+    const f = join(sb.dir, "grpc.json");
+    writeFileSync(f, JSON.stringify({ grpcBody: body }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "grpc-keyword",
+        "--name",
+        "x",
+        "--grpc-url",
+        "h:1",
+        "--keyword",
+        "k",
+        "--grpc-service-name",
+        "S",
+        "--grpc-method",
+        "m",
+        "--grpc-protobuf",
+        proto,
+        "--config-file",
+        f,
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("grpcBody");
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test("keyword: --invert-keyword is sent", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "keyword",
+        "--name",
+        "kw-inv",
+        "--url",
+        "https://kw.example.com",
+        "--keyword",
+        "Welcome",
+        "--invert-keyword",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).invertKeyword).toBe(true);
+  });
+
+  test("real-browser: sends the url like http", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "real-browser",
+        "--name",
+        "rb1",
+        "--url",
+        "https://rb.example.com",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.type).toBe("real-browser");
+    expect(sent.url).toBe("https://rb.example.com");
+  });
+
+  test("mqtt: sends hostname, port, topic and the optional fields", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "mqtt",
+        "--name",
+        "mq1",
+        "--hostname",
+        "mqtt.example.com",
+        "--port",
+        "1883",
+        "--mqtt-topic",
+        "sensors/#",
+        "--mqtt-username",
+        "u1",
+        "--mqtt-success-message",
+        "ok",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.hostname).toBe("mqtt.example.com");
+    expect(sent.port).toBe(1883);
+    expect(sent.mqttTopic).toBe("sensors/#");
+    expect(sent.mqttUsername).toBe("u1");
+    expect(sent.mqttSuccessMessage).toBe("ok");
+    expect(sent.mqttPassword).toBe("");
+  });
+
+  test("mqtt: the optional fields stay at the UI defaults without the flags", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "mqtt",
+        "--name",
+        "mq2",
+        "--hostname",
+        "mqtt.example.com",
+        "--port",
+        "1883",
+        "--mqtt-topic",
+        "t",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.mqttUsername).toBe("");
+    expect(sent.mqttPassword).toBe("");
+    expect(sent.mqttSuccessMessage).toBe("");
+  });
+
+  test("kafka-producer: sends brokers, topic, message and the optional flags", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "kafka-producer",
+        "--name",
+        "kf1",
+        "--kafka-producer-broker",
+        "kafka1:9092",
+        "--kafka-producer-broker",
+        "kafka2:9093",
+        "--kafka-producer-topic",
+        "uptime",
+        "--kafka-producer-message",
+        "ping",
+        "--kafka-producer-ssl",
+        "--kafka-producer-allow-auto-topic-creation",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.type).toBe("kafka-producer");
+    expect(sent.kafkaProducerBrokers).toEqual(["kafka1:9092", "kafka2:9093"]);
+    expect(sent.kafkaProducerTopic).toBe("uptime");
+    expect(sent.kafkaProducerMessage).toBe("ping");
+    expect(sent.kafkaProducerSsl).toBe(true);
+    expect(sent.kafkaProducerAllowAutoTopicCreation).toBe(true);
+    expect(sent.kafkaProducerSaslOptions).toEqual({ mechanism: "None" });
+  });
+
+  test("kafka-producer: ssl and auto-topic-creation stay false without the flags", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "kafka-producer",
+        "--name",
+        "kf2",
+        "--kafka-producer-broker",
+        "kafka1:9092",
+        "--kafka-producer-topic",
+        "uptime",
+        "--kafka-producer-message",
+        "ping",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.kafkaProducerSsl).toBe(false);
+    expect(sent.kafkaProducerAllowAutoTopicCreation).toBe(false);
+    expect(sent.kafkaProducerSaslOptions).toEqual({ mechanism: "None" });
+  });
+
+  test("kafka-producer: SASL options come from --config-file", async () => {
+    const f = join(sb.dir, "kafka.json");
+    writeFileSync(
+      f,
+      JSON.stringify({
+        kafkaProducerSaslOptions: { mechanism: "plain", username: "u", password: "p" },
+      }),
+    );
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "kafka-producer",
+        "--name",
+        "kf3",
+        "--kafka-producer-broker",
+        "kafka1:9092",
+        "--kafka-producer-topic",
+        "uptime",
+        "--kafka-producer-message",
+        "ping",
+        "--config-file",
+        f,
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.kafkaProducerSaslOptions).toEqual({
+      mechanism: "plain",
+      username: "u",
+      password: "p",
+    });
+  });
+
+  test.each([
+    ["null", { kafkaProducerSaslOptions: null }, "must be an object"],
+    ["a string", { kafkaProducerSaslOptions: "x" }, "must be an object"],
+    ["an array", { kafkaProducerSaslOptions: ["plain"] }, "must be an object"],
+    ["no mechanism", { kafkaProducerSaslOptions: {} }, "mechanism must be one of"],
+    [
+      "a bad mechanism",
+      { kafkaProducerSaslOptions: { mechanism: "oauth" } },
+      "mechanism must be one of",
+    ],
+  ])(
+    "kafka-producer: SASL options as %s exits 2 before connecting",
+    async (_label, config, word) => {
+      const f = join(sb.dir, "kafka-sasl.json");
+      writeFileSync(f, JSON.stringify(config));
+      const r = await run(
+        sb,
+        [
+          "monitors",
+          "add",
+          "--type",
+          "kafka-producer",
+          "--name",
+          "x",
+          "--kafka-producer-broker",
+          "kafka1:9092",
+          "--kafka-producer-topic",
+          "t",
+          "--kafka-producer-message",
+          "m",
+          "--config-file",
+          f,
+        ],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("kafkaProducerSaslOptions");
+      expect(r.stderr).toContain(word);
+      expect(kuma.calls).toHaveLength(0);
+    },
+  );
+
+  test.each([
+    "kafka1",
+    "h:abc",
+    "h:0",
+    "h:70000",
+    ":1",
+    "h:",
+    "::1:9092",
+    "[::1]:9092",
+    "a:1:2",
+    "h:1e3",
+  ])(
+    "kafka-producer: broker %s that is not host:port exits 2 before connecting",
+    async (broker) => {
+      const r = await run(
+        sb,
+        [
+          "monitors",
+          "add",
+          "--type",
+          "kafka-producer",
+          "--name",
+          "x",
+          "--kafka-producer-broker",
+          broker,
+          "--kafka-producer-topic",
+          "t",
+          "--kafka-producer-message",
+          "m",
+        ],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("--kafka-producer-broker");
+      expect(kuma.calls).toHaveLength(0);
+    },
+  );
+
+  test("kafka-producer: a hatch broker overrides the flag and a bad one exits 2", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "kafka-producer",
+        "--name",
+        "x",
+        "--kafka-producer-broker",
+        "k:9092",
+        "--kafka-producer-topic",
+        "t",
+        "--kafka-producer-message",
+        "m",
+        "--set",
+        'kafkaProducerBrokers=["nohost"]',
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("kafkaProducerBrokers");
+    expect(r.stderr).toContain("host:port");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("radius: sends hostname, the 1812 default port and the station ids", async () => {
+    const f = join(sb.dir, "radius.json");
+    writeFileSync(f, JSON.stringify({ radiusPassword: "pw", radiusSecret: "sec" }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "radius",
+        "--name",
+        "rad1",
+        "--hostname",
+        "radius.example.com",
+        "--radius-username",
+        "user1",
+        "--radius-called-station-id",
+        "00-11-22",
+        "--radius-calling-station-id",
+        "aa-bb-cc",
+        "--config-file",
+        f,
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.type).toBe("radius");
+    expect(sent.hostname).toBe("radius.example.com");
+    expect(sent.port).toBe(1812);
+    expect(sent.radiusUsername).toBe("user1");
+    expect(sent.radiusPassword).toBe("pw");
+    expect(sent.radiusSecret).toBe("sec");
+    expect(sent.radiusCalledStationId).toBe("00-11-22");
+    expect(sent.radiusCallingStationId).toBe("aa-bb-cc");
+  });
+
+  test("radius: --port overrides the 1812 default", async () => {
+    const f = join(sb.dir, "radius.json");
+    writeFileSync(f, JSON.stringify({ radiusPassword: "pw", radiusSecret: "sec" }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "radius",
+        "--name",
+        "rad2",
+        "--hostname",
+        "radius.example.com",
+        "--port",
+        "1813",
+        "--radius-username",
+        "user1",
+        "--radius-called-station-id",
+        "c",
+        "--radius-calling-station-id",
+        "d",
+        "--config-file",
+        f,
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).port).toBe(1813);
+  });
+
+  test("radius: --port abc exits 2 before connecting", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "radius",
+        "--name",
+        "x",
+        "--hostname",
+        "h",
+        "--port",
+        "abc",
+        "--radius-username",
+        "u",
+        "--radius-called-station-id",
+        "c",
+        "--radius-calling-station-id",
+        "d",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--port");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("radius: missing the config-file secrets exits 2 before sending", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "radius",
+        "--name",
+        "x",
+        "--hostname",
+        "h",
+        "--radius-username",
+        "u",
+        "--radius-called-station-id",
+        "c",
+        "--radius-calling-station-id",
+        "d",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("radiusPassword");
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test("radius: --config-file with radiusPassword but no radiusSecret exits 2", async () => {
+    const f = join(sb.dir, "radius.json");
+    writeFileSync(f, JSON.stringify({ radiusPassword: "pw" }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "radius",
+        "--name",
+        "x",
+        "--hostname",
+        "h",
+        "--radius-username",
+        "u",
+        "--radius-called-station-id",
+        "c",
+        "--radius-calling-station-id",
+        "d",
+        "--config-file",
+        f,
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("radiusSecret");
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test.each(["radiusCalledStationId", "radiusCallingStationId"])(
+    "radius: --set %s=null exits 2 even with the secrets in --config-file",
+    async (field) => {
+      const f = join(sb.dir, "radius.json");
+      writeFileSync(f, JSON.stringify({ radiusPassword: "pw", radiusSecret: "sec" }));
+      const r = await run(
+        sb,
+        [
+          "monitors",
+          "add",
+          "--type",
+          "radius",
+          "--name",
+          "x",
+          "--hostname",
+          "h",
+          "--radius-username",
+          "u",
+          "--radius-called-station-id",
+          "c",
+          "--radius-calling-station-id",
+          "d",
+          "--config-file",
+          f,
+          "--set",
+          `${field}=null`,
+        ],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain(field);
+      expect(addCalls()).toHaveLength(0);
+    },
+  );
+
+  test("--grpc-protobuf with a missing file exits 2 before connecting", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "grpc-keyword",
+        "--name",
+        "x",
+        "--grpc-url",
+        "h:1",
+        "--keyword",
+        "k",
+        "--grpc-service-name",
+        "S",
+        "--grpc-method",
+        "m",
+        "--grpc-protobuf",
+        join(sb.dir, "nope.proto"),
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--grpc-protobuf");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
   test.each([
     [["--type", "ping", "--name", "x"], "--hostname"],
     [["--type", "dns", "--name", "x"], "--hostname"],
@@ -844,6 +1544,87 @@ describe("monitors add", () => {
     [["--type", "gamedig", "--name", "x", "--hostname", "h", "--port", "1"], "--game"],
     [["--type", "gamedig", "--name", "x", "--hostname", "h", "--game", "g"], "--port"],
     [["--type", "tailscale-ping", "--name", "x"], "--hostname"],
+    [["--type", "real-browser", "--name", "x"], "--url"],
+    [["--type", "grpc-keyword", "--name", "x"], "--keyword"],
+    [["--type", "grpc-keyword", "--name", "x", "--keyword", "k"], "--grpc-url"],
+    [
+      ["--type", "grpc-keyword", "--name", "x", "--keyword", "k", "--grpc-url", "h:1"],
+      "--grpc-service-name",
+    ],
+    [
+      [
+        "--type",
+        "grpc-keyword",
+        "--name",
+        "x",
+        "--keyword",
+        "k",
+        "--grpc-url",
+        "h:1",
+        "--grpc-service-name",
+        "S",
+      ],
+      "--grpc-method",
+    ],
+    [
+      [
+        "--type",
+        "grpc-keyword",
+        "--name",
+        "x",
+        "--keyword",
+        "k",
+        "--grpc-url",
+        "h:1",
+        "--grpc-service-name",
+        "S",
+        "--grpc-method",
+        "m",
+      ],
+      "--grpc-protobuf",
+    ],
+    [["--type", "mqtt", "--name", "x"], "--hostname"],
+    [["--type", "mqtt", "--name", "x", "--hostname", "h"], "--port"],
+    [["--type", "mqtt", "--name", "x", "--hostname", "h", "--port", "1883"], "--mqtt-topic"],
+    [["--type", "kafka-producer", "--name", "x"], "--kafka-producer-broker"],
+    [
+      ["--type", "kafka-producer", "--name", "x", "--kafka-producer-broker", "h:1"],
+      "--kafka-producer-topic",
+    ],
+    [
+      [
+        "--type",
+        "kafka-producer",
+        "--name",
+        "x",
+        "--kafka-producer-broker",
+        "h:1",
+        "--kafka-producer-topic",
+        "t",
+      ],
+      "--kafka-producer-message",
+    ],
+    [["--type", "radius", "--name", "x"], "--hostname"],
+    [["--type", "radius", "--name", "x", "--hostname", "h"], "--radius-username"],
+    [
+      ["--type", "radius", "--name", "x", "--hostname", "h", "--radius-username", "u"],
+      "--radius-called-station-id",
+    ],
+    [
+      [
+        "--type",
+        "radius",
+        "--name",
+        "x",
+        "--hostname",
+        "h",
+        "--radius-username",
+        "u",
+        "--radius-called-station-id",
+        "c",
+      ],
+      "--radius-calling-station-id",
+    ],
   ])("missing required options exit 2 before connecting: %p", async (args, word) => {
     const r = await run(sb, ["monitors", "add", ...args], creds(kuma.url));
     expect(r.code).toBe(2);
@@ -2162,12 +2943,189 @@ describe("monitors add", () => {
       ["--type", "dns", "--name", "x", "--hostname", "h", "--set", 'dns_resolve_server=""'],
       "dns_resolve_server",
     ],
+    [
+      [
+        "--type",
+        "mqtt",
+        "--name",
+        "x",
+        "--hostname",
+        "h",
+        "--port",
+        "1883",
+        "--mqtt-topic",
+        "t",
+        "--set",
+        "mqttTopic=null",
+      ],
+      "mqttTopic",
+    ],
+    [
+      [
+        "--type",
+        "mqtt",
+        "--name",
+        "x",
+        "--hostname",
+        "h",
+        "--port",
+        "1883",
+        "--mqtt-topic",
+        "t",
+        "--set",
+        "hostname=null",
+      ],
+      "hostname",
+    ],
+    [
+      [
+        "--type",
+        "mqtt",
+        "--name",
+        "x",
+        "--hostname",
+        "h",
+        "--port",
+        "1883",
+        "--mqtt-topic",
+        "t",
+        "--set",
+        "port=null",
+      ],
+      "port must",
+    ],
+    [
+      ["--type", "real-browser", "--name", "x", "--url", "https://x", "--set", "url=null"],
+      "url must be a non-empty string",
+    ],
+    [
+      [
+        "--type",
+        "kafka-producer",
+        "--name",
+        "x",
+        "--kafka-producer-broker",
+        "h:1",
+        "--kafka-producer-topic",
+        "t",
+        "--kafka-producer-message",
+        "m",
+        "--set",
+        "kafkaProducerTopic=null",
+      ],
+      "kafkaProducerTopic",
+    ],
+    [
+      [
+        "--type",
+        "kafka-producer",
+        "--name",
+        "x",
+        "--kafka-producer-broker",
+        "h:1",
+        "--kafka-producer-topic",
+        "t",
+        "--kafka-producer-message",
+        "m",
+        "--set",
+        "kafkaProducerMessage=null",
+      ],
+      "kafkaProducerMessage",
+    ],
+    [
+      [
+        "--type",
+        "kafka-producer",
+        "--name",
+        "x",
+        "--kafka-producer-broker",
+        "h:1",
+        "--kafka-producer-topic",
+        "t",
+        "--kafka-producer-message",
+        "m",
+        "--set",
+        "kafkaProducerBrokers=null",
+      ],
+      "kafkaProducerBrokers",
+    ],
+    [
+      [
+        "--type",
+        "kafka-producer",
+        "--name",
+        "x",
+        "--kafka-producer-broker",
+        "h:1",
+        "--kafka-producer-topic",
+        "t",
+        "--kafka-producer-message",
+        "m",
+        "--set",
+        "kafkaProducerBrokers=[]",
+      ],
+      "kafkaProducerBrokers",
+    ],
+    [
+      [
+        "--type",
+        "radius",
+        "--name",
+        "x",
+        "--hostname",
+        "h",
+        "--radius-username",
+        "u",
+        "--radius-called-station-id",
+        "c",
+        "--radius-calling-station-id",
+        "d",
+        "--set",
+        "radiusUsername=null",
+      ],
+      "radiusUsername",
+    ],
   ])("a hatch-nulled required field exits 2 before sending add: %p", async (extra, field) => {
     const r = await run(sb, ["monitors", "add", ...extra], creds(kuma.url));
     expect(r.code).toBe(2);
     expect(r.stderr).toContain(field);
     expect(addCalls()).toHaveLength(0);
   });
+
+  test.each(["grpcUrl", "grpcServiceName", "grpcMethod", "keyword"])(
+    "grpc-keyword: --set %s=null exits 2 even with --grpc-protobuf",
+    async (field) => {
+      const proto = join(sb.dir, "p.proto");
+      writeFileSync(proto, 'syntax = "proto3";\n');
+      const r = await run(
+        sb,
+        [
+          "monitors",
+          "add",
+          "--type",
+          "grpc-keyword",
+          "--name",
+          "x",
+          "--grpc-url",
+          "h:1",
+          "--keyword",
+          "k",
+          "--grpc-service-name",
+          "S",
+          "--grpc-method",
+          "m",
+          "--grpc-protobuf",
+          proto,
+          "--set",
+          `${field}=null`,
+        ],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain(field);
+      expect(addCalls()).toHaveLength(0);
+    },
+  );
 
   test.each([[["--interval", "19"]], [["--interval", "2073601"]], [["--set", "interval=19"]]])(
     "an interval outside Kuma's 20..2073600 bounds exits 2: %p",
@@ -2787,11 +3745,428 @@ describe("monitors edit", () => {
     expect(kuma.calls).toHaveLength(0);
   });
 
-  test("edit --set type=mqtt is accepted: any 1.23.17 picker type may be set", async () => {
-    const r = await run(sb, ["monitors", "edit", "7", "--set", "type=mqtt"], creds(kuma.url));
+  test("edit --set type=mqtt with the required fields is sent", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "type=mqtt",
+        "--set",
+        "hostname=mqtt.example.com",
+        "--set",
+        "port=1883",
+        "--set",
+        "mqttTopic=sensors/#",
+      ],
+      creds(kuma.url),
+    );
     expect(r.code).toBe(0);
     const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
     expect(sent.type).toBe("mqtt");
+    expect(sent.hostname).toBe("mqtt.example.com");
+    expect(sent.port).toBe(1883);
+    expect(sent.mqttTopic).toBe("sensors/#");
+  });
+
+  test("edit --set type=postgres is accepted for a type add cannot create yet", async () => {
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "type=postgres"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.type).toBe("postgres");
+  });
+
+  test("edit --set type=mqtt without the required fields exits 2", async () => {
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "type=mqtt"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("hostname");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit --set type=grpc-keyword without the required fields exits 2", async () => {
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=grpc-keyword"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("keyword");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit --set type=grpc-keyword with every required field is sent", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "type=grpc-keyword",
+        "--set",
+        "grpcUrl=grpc.example.com:443",
+        "--set",
+        "keyword=SERVING",
+        "--set",
+        "grpcServiceName=Health",
+        "--set",
+        "grpcMethod=check",
+        "--set",
+        'grpcProtobuf="syntax = \\"proto3\\";"',
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.type).toBe("grpc-keyword");
+    expect(sent.grpcUrl).toBe("grpc.example.com:443");
+    expect(sent.keyword).toBe("SERVING");
+    expect(sent.grpcServiceName).toBe("Health");
+    expect(sent.grpcMethod).toBe("check");
+    expect(sent.grpcProtobuf).toBe('syntax = "proto3";');
+  });
+
+  test("edit --set type=grpc-keyword without grpcProtobuf exits 2", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "type=grpc-keyword",
+        "--set",
+        "grpcUrl=grpc.example.com:443",
+        "--set",
+        "keyword=SERVING",
+        "--set",
+        "grpcServiceName=Health",
+        "--set",
+        "grpcMethod=check",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("grpcProtobuf");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit --set type=grpc-keyword defaults a stored null grpcBody to {}", async () => {
+    kuma.state.monitors.find((m) => m.id === 7)!.grpcBody = null;
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "type=grpc-keyword",
+        "--set",
+        "grpcUrl=h:1",
+        "--set",
+        "keyword=k",
+        "--set",
+        "grpcServiceName=S",
+        "--set",
+        "grpcMethod=m",
+        "--set",
+        'grpcProtobuf="proto"',
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.type).toBe("grpc-keyword");
+    expect(sent.grpcBody).toBe("{}");
+  });
+
+  test('edit --set type=grpc-keyword with --config-file grpcBody="" exits 2', async () => {
+    const f = join(sb.dir, "grpc-empty.json");
+    writeFileSync(f, JSON.stringify({ grpcBody: "" }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "type=grpc-keyword",
+        "--set",
+        "grpcUrl=h:1",
+        "--set",
+        "keyword=k",
+        "--set",
+        "grpcServiceName=S",
+        "--set",
+        "grpcMethod=m",
+        "--set",
+        'grpcProtobuf="proto"',
+        "--config-file",
+        f,
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("grpcBody");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit --set type=grpc-keyword defaults a stored empty grpcBody to {}", async () => {
+    kuma.state.monitors.find((m) => m.id === 7)!.grpcBody = "";
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "type=grpc-keyword",
+        "--set",
+        "grpcUrl=h:1",
+        "--set",
+        "keyword=k",
+        "--set",
+        "grpcServiceName=S",
+        "--set",
+        "grpcMethod=m",
+        "--set",
+        'grpcProtobuf="proto"',
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.type).toBe("grpc-keyword");
+    expect(sent.grpcBody).toBe("{}");
+  });
+
+  test("edit --set type=real-browser without url exits 2", async () => {
+    const r = await run(
+      sb,
+      ["monitors", "edit", "9", "--set", "type=real-browser"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("url must be a non-empty string");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit --set type=real-browser with url is sent", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "9",
+        "--set",
+        "type=real-browser",
+        "--set",
+        "url=https://rb.example.com",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.type).toBe("real-browser");
+    expect(sent.url).toBe("https://rb.example.com");
+  });
+
+  test("edit --set type=kafka-producer without the required fields exits 2", async () => {
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=kafka-producer"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("kafkaProducerTopic");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit --set type=kafka-producer with every required field is sent", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "type=kafka-producer",
+        "--set",
+        "kafkaProducerTopic=t",
+        "--set",
+        "kafkaProducerMessage=m",
+        "--set",
+        'kafkaProducerBrokers=["h:1"]',
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.type).toBe("kafka-producer");
+    expect(sent.kafkaProducerTopic).toBe("t");
+    expect(sent.kafkaProducerMessage).toBe("m");
+    expect(sent.kafkaProducerBrokers).toEqual(["h:1"]);
+  });
+
+  test("edit --set type=kafka-producer with a stored malformed broker exits 2", async () => {
+    kuma.state.monitors.find((m) => m.id === 7)!.kafkaProducerBrokers = ["bad-broker"];
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "type=kafka-producer",
+        "--set",
+        "kafkaProducerTopic=t",
+        "--set",
+        "kafkaProducerMessage=m",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("kafkaProducerBrokers");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit --set type=kafka-producer over stored null brokers exits 2", async () => {
+    kuma.state.monitors.find((m) => m.id === 7)!.kafkaProducerBrokers = null;
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "type=kafka-producer",
+        "--set",
+        "kafkaProducerTopic=t",
+        "--set",
+        "kafkaProducerMessage=m",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("kafkaProducerBrokers");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit --set type=radius without the required fields exits 2", async () => {
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "type=radius"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("hostname");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit --set type=radius without the secrets exits 2", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "type=radius",
+        "--set",
+        "hostname=h",
+        "--set",
+        "port=1812",
+        "--set",
+        "radiusUsername=u",
+        "--set",
+        "radiusCalledStationId=c",
+        "--set",
+        "radiusCallingStationId=d",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("radiusPassword");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit --set type=radius with secrets via --config-file is sent", async () => {
+    const f = join(sb.dir, "radius-secrets.json");
+    writeFileSync(f, JSON.stringify({ radiusPassword: "pw", radiusSecret: "sec" }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "type=radius",
+        "--set",
+        "hostname=h",
+        "--set",
+        "port=1812",
+        "--set",
+        "radiusUsername=u",
+        "--set",
+        "radiusCalledStationId=c",
+        "--set",
+        "radiusCallingStationId=d",
+        "--config-file",
+        f,
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.type).toBe("radius");
+    expect(sent.hostname).toBe("h");
+    expect(sent.port).toBe(1812);
+    expect(sent.radiusUsername).toBe("u");
+    expect(sent.radiusPassword).toBe("pw");
+    expect(sent.radiusSecret).toBe("sec");
+  });
+
+  test("edit --set type=radius over stored port 0 exits 2", async () => {
+    kuma.state.monitors.find((m) => m.id === 7)!.port = 0;
+    const f = join(sb.dir, "radius-edit.json");
+    writeFileSync(
+      f,
+      JSON.stringify({
+        hostname: "h",
+        radiusUsername: "u",
+        radiusCalledStationId: "c",
+        radiusCallingStationId: "d",
+        radiusPassword: "pw",
+        radiusSecret: "sec",
+      }),
+    );
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=radius", "--config-file", f],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("port must be a port number");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit --set type=mqtt over stored null port exits 2", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "type=mqtt",
+        "--set",
+        "hostname=h",
+        "--set",
+        "mqttTopic=t",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("port must be a port number");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
   });
 
   test("edit name-only keeps a stored timeout of 0", async () => {

@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { sandbox, type Sandbox } from "../helpers/run";
 import { cliRun } from "./helpers";
 
@@ -190,5 +192,93 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
         expect(r.json()).toEqual({ id, deleted: true });
       }
     }, 300_000);
+  });
+
+  describe("mqtt / radius", () => {
+    let mqttId = 0;
+    let radiusId = 0;
+
+    test("add a paused mqtt monitor with mqttPassword via --config-file", async () => {
+      const f = join(sb.dir, "mqtt.json");
+      writeFileSync(f, JSON.stringify({ mqttPassword: "it-mqtt-secret" }));
+      const r = await cliRun(sb, [
+        "monitors",
+        "add",
+        "--type",
+        "mqtt",
+        "--name",
+        "it-mqtt",
+        "--hostname",
+        "localhost",
+        "--port",
+        "1883",
+        "--mqtt-topic",
+        "it/topic",
+        "--config-file",
+        f,
+        "--paused",
+      ]);
+      expect(r.code).toBe(0);
+      expect(r.json()).toMatchObject({ name: "it-mqtt", type: "mqtt", active: false });
+      mqttId = r.json().id;
+    }, 120_000);
+
+    test("add a paused radius monitor with radiusPassword/radiusSecret via --config-file", async () => {
+      const f = join(sb.dir, "radius.json");
+      writeFileSync(
+        f,
+        JSON.stringify({ radiusPassword: "it-radius-pw", radiusSecret: "it-radius-secret" }),
+      );
+      const r = await cliRun(sb, [
+        "monitors",
+        "add",
+        "--type",
+        "radius",
+        "--name",
+        "it-radius",
+        "--hostname",
+        "localhost",
+        "--radius-username",
+        "it-user",
+        "--radius-called-station-id",
+        "it-called",
+        "--radius-calling-station-id",
+        "it-calling",
+        "--config-file",
+        f,
+        "--paused",
+      ]);
+      expect(r.code).toBe(0);
+      expect(r.json()).toMatchObject({ name: "it-radius", type: "radius", active: false });
+      radiusId = r.json().id;
+    }, 120_000);
+
+    test("get shows the mqtt monitor with its secret redacted", async () => {
+      const r = await cliRun(sb, ["monitors", "get", String(mqttId)]);
+      expect(r.code).toBe(0);
+      const m = r.json();
+      expect(m.type).toBe("mqtt");
+      expect(m.mqttTopic).toBe("it/topic");
+      expect(m.mqttPassword).toBe("***");
+    }, 120_000);
+
+    test("get shows the radius monitor with its secrets redacted", async () => {
+      const r = await cliRun(sb, ["monitors", "get", String(radiusId)]);
+      expect(r.code).toBe(0);
+      const m = r.json();
+      expect(m.type).toBe("radius");
+      expect(m.port).toBe(1812);
+      expect(m.radiusUsername).toBe("it-user");
+      expect(m.radiusPassword).toBe("***");
+      expect(m.radiusSecret).toBe("***");
+    }, 120_000);
+
+    test("delete the mqtt and radius monitors", async () => {
+      for (const id of [mqttId, radiusId]) {
+        const r = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
+        expect(r.code).toBe(0);
+        expect(r.json()).toEqual({ id, deleted: true });
+      }
+    }, 180_000);
   });
 });
