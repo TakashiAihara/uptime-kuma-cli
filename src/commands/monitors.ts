@@ -331,13 +331,14 @@ function parseMonitorInterval(value: string, flag: string): number {
   return n;
 }
 
-// A kafkaProducerBrokers entry is "host:port"; the host may itself contain
-// colons (IPv6), so the port is whatever follows the last colon.
+// A kafkaProducerBrokers entry is "host:port"; kafkajs splits the string on
+// ":" (connectionPoolBuilder), so a host containing ":" cannot work.
 function isKafkaBroker(value: unknown): value is string {
   if (typeof value !== "string") return false;
-  const i = value.lastIndexOf(":");
-  if (i <= 0 || i === value.length - 1) return false;
-  const port = value.slice(i + 1);
+  const parts = value.split(":");
+  if (parts.length !== 2) return false;
+  const [host, port] = parts;
+  if (!host || !port) return false;
   if (!/^\d+$/.test(port)) return false;
   const n = Number(port);
   return n >= 1 && n <= 65535;
@@ -386,11 +387,7 @@ const HATCH_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unknow
       fail(2, `${k} must be an object`);
     }
     const mechanism = (v as Record<string, unknown>).mechanism;
-    if (
-      mechanism !== undefined &&
-      (typeof mechanism !== "string" ||
-        !(KAFKA_SASL_MECHANISMS as readonly string[]).includes(mechanism))
-    ) {
+    if (!(KAFKA_SASL_MECHANISMS as readonly string[]).includes(mechanism as string)) {
       fail(2, `${k}.mechanism must be one of ${KAFKA_SASL_MECHANISMS.join(", ")}`);
     }
     return v;
@@ -449,6 +446,7 @@ function validateFinalMonitor(
     needString("grpcUrl");
     needString("grpcServiceName");
     needString("grpcMethod");
+    needString("grpcProtobuf");
   }
   if (type === "json-query") {
     needString("jsonPath");
@@ -467,7 +465,11 @@ function validateFinalMonitor(
     needString("hostname");
   }
   if (
-    (type === "port" || type === "steam" || type === "gamedig" || type === "mqtt") &&
+    (type === "port" ||
+      type === "steam" ||
+      type === "gamedig" ||
+      type === "mqtt" ||
+      type === "radius") &&
     inScope("port")
   ) {
     const port = monitor.port;
@@ -668,6 +670,9 @@ export function registerMonitors(program: Command): void {
           fail(2, "--type grpc-keyword requires --grpc-service-name");
         }
         if (!opts.grpcMethod) fail(2, "--type grpc-keyword requires --grpc-method");
+        if (!opts.grpcProtobuf) {
+          fail(2, "--type grpc-keyword requires --grpc-protobuf");
+        }
       }
       if (type === "port" || type === "steam" || type === "gamedig" || type === "mqtt") {
         if (!opts.hostname) fail(2, `--type ${type} requires --hostname`);
@@ -877,6 +882,9 @@ export function registerMonitors(program: Command): void {
         typed.grpcUrl = opts.grpcUrl;
         typed.grpcServiceName = opts.grpcServiceName;
         typed.grpcMethod = opts.grpcMethod;
+        // Kuma 1.23 always JSON.parses grpcBody at check time; "{}" is the
+        // empty request the UI's blank textarea produces.
+        typed.grpcBody = "{}";
         if (grpcProtobuf !== undefined) typed.grpcProtobuf = grpcProtobuf;
         if (opts.grpcEnableTls) typed.grpcEnableTls = true;
       }
