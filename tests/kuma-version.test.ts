@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { connect, disconnect, parseMajorVersion } from "../src/kuma";
 import { type FakeKuma, startFakeKuma } from "./helpers/fake-kuma";
 import { creds, type Sandbox, sandbox } from "./helpers/run";
@@ -44,17 +44,19 @@ const session = async (init: Parameters<typeof startFakeKuma>[0] = {}) => {
 };
 
 describe("parseMajorVersion", () => {
-  const cases: [unknown, number][] = [
+  const cases: [string | undefined, number][] = [
     ["1.23.17", 1],
     ["2.5.11", 2],
     ["2.0.0-beta.2", 2],
+    ["2.0.0-beta.2-temp", 2],
+    ["3.0.0-beta.0", 3],
     ["10.1.0", 10],
     [undefined, 1],
     ["", 1],
     ["abc", 1],
     ["2", 1],
-    [2, 1],
-    [["2.5.11"], 1],
+    ["2.5", 1],
+    ["x2.5.11", 1],
   ];
   test.each(cases)("%p -> %p", (version, expected) => {
     expect(parseMajorVersion(version)).toBe(expected);
@@ -62,10 +64,22 @@ describe("parseMajorVersion", () => {
 });
 
 describe("connect", () => {
-  test("reports the version of the default fake", async () => {
-    const s = await session();
-    expect(s.serverVersion).toBe("1.23.17");
-    expect(s.majorVersion).toBe(1);
+  test("reports the version of the default fake without a warning", async () => {
+    const err = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const s = await session();
+      expect(s.serverVersion).toBe("1.23.17");
+      expect(s.majorVersion).toBe(1);
+      expect(err).not.toHaveBeenCalled();
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  test("an info that arrives shortly after the lists is still read", async () => {
+    const s = await session({ info: { version: "2.5.11" }, infoDelayMs: 150 });
+    expect(s.serverVersion).toBe("2.5.11");
+    expect(s.majorVersion).toBe(2);
   });
 
   test("a 2.x info payload reports major version 2", async () => {
@@ -74,13 +88,27 @@ describe("connect", () => {
     expect(s.majorVersion).toBe(2);
   });
 
-  test("no info push leaves serverVersion undefined and major 1", async () => {
-    const s = await session({ info: null });
-    expect(s.serverVersion).toBeUndefined();
-    expect(s.majorVersion).toBe(1);
+  test("an info sent before the login answer, like 2.x, is read", async () => {
+    const s = await session({ info: { version: "2.5.11" }, infoBeforeLoginAck: true });
+    expect(s.serverVersion).toBe("2.5.11");
+    expect(s.majorVersion).toBe(2);
   });
 
-  test("the pre-login info alone hides the version", async () => {
+  test("no info push falls back to major 1 with a warning", async () => {
+    const err = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const s = await session({ info: null });
+      expect(s.serverVersion).toBeUndefined();
+      expect(s.majorVersion).toBe(1);
+      expect(err).toHaveBeenCalledWith(
+        "warning: the server sent no version after login; assuming Uptime Kuma 1.x",
+      );
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  test("the fake's pre-login info carries no version", async () => {
     const s = await session({ skipLists: ["info"] });
     expect(s.serverVersion).toBeUndefined();
     expect(s.majorVersion).toBe(1);

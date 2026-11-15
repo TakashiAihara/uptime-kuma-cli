@@ -139,6 +139,9 @@ type MonitorStatEvents = {
   certInfo?: { at: number; json: string };
 };
 
+// Grace after the pushed lists for the versioned `info` (connect() below).
+const INFO_GRACE_MS = 500;
+
 let currentSocket: Socket | undefined;
 
 // The socket would otherwise keep the process alive after the command finished.
@@ -183,13 +186,16 @@ export class KumaSession {
     readonly heartbeats: Map<number, BeatRow[]>,
     private readonly statsEvents: Map<number, MonitorStatEvents>,
     readonly serverVersion: string | undefined,
-    readonly majorVersion: number,
     // setSettings takes the login password again as currentPassword when the
     // request would disable auth; it is the same secret resolveCredentials
     // already produced for the login, kept here so no command re-resolves it.
     readonly loginPassword: string,
     private readonly disconnected: Promise<never>,
   ) {}
+
+  get majorVersion(): number {
+    return parseMajorVersion(this.serverVersion);
+  }
 
   // ok:false is Kuma answering no (exit 1); a missing callback is a timeout (exit 2).
   async request(event: string, args: any[] = []): Promise<any> {
@@ -341,10 +347,10 @@ export class KumaSession {
 }
 
 // info.version is package.json's semver on both Kuma versions; a missing or
-// unparsable value keeps major 1 so 1.23 stays the default target.
-export function parseMajorVersion(version: unknown): number {
-  if (typeof version !== "string") return 1;
-  const match = /^(\d+)\.\d+\.\d+/.exec(version);
+// unparsable value keeps major 1 so 1.23 stays the default target. Nightly
+// builds already report 3.x, so callers branch on `>= 2`, not `=== 2`.
+export function parseMajorVersion(version: string | undefined): number {
+  const match = version === undefined ? null : /^(\d+)\.\d+\.\d+/.exec(version);
   return match === null ? 1 : Number(match[1]);
 }
 
@@ -404,7 +410,8 @@ export async function connect(
     }
     return rec;
   };
-  // The versioned `info` lands inside the lists wait below (after monitorList in 1.23, before the login answer in 2.x).
+  // 2.x sends the versioned `info` before the login answer and 1.23 between
+  // the pushed lists, so the listener goes in before login is emitted.
   let serverVersion: string | undefined;
   socket.on("info", (data: unknown) => {
     const version = (data as { version?: unknown } | null | undefined)?.version;
@@ -518,6 +525,15 @@ export async function connect(
     }
     await Promise.race([sleep(10), disconnected]);
   }
+  // Real Kuma has sent it by now on both versions; the grace only covers a
+  // slow push, and a server that never sends it is treated as 1.x out loud.
+  const infoDeadline = Date.now() + INFO_GRACE_MS;
+  while (serverVersion === undefined && Date.now() < infoDeadline) {
+    await Promise.race([sleep(10), disconnected]);
+  }
+  if (serverVersion === undefined) {
+    console.error("warning: the server sent no version after login; assuming Uptime Kuma 1.x");
+  }
   const present = <K extends keyof typeof pushed>(name: K): NonNullable<(typeof pushed)[K]> => {
     const value = pushed[name];
     if (value === undefined) fail(70, `pushed ${name} missing after the wait`);
@@ -537,7 +553,6 @@ export async function connect(
     heartbeats,
     statsEvents,
     serverVersion,
-    parseMajorVersion(serverVersion),
     password,
     disconnected,
   );
