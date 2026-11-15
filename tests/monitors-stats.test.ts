@@ -149,6 +149,33 @@ describe("monitors stats", () => {
     },
   );
 
+  test("a later monitor's interleaved avgPing does not drop an earlier monitor's certInfo", async () => {
+    // monitor 2's avgPing arrives first, as from a heartbeat-triggered sendStats,
+    // and monitor 1's certInfo comes a little after its uptime 30d
+    kuma.state.earlyAvgPing = [2];
+    kuma.state.certInfoDelay = { 1: 100 };
+    const r = await run(sb, ["monitors", "stats", "1"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json()).toMatchObject({ id: 1, certDaysRemaining: 47 });
+  });
+
+  test("one id completes even when another monitor's stats never arrive", async () => {
+    kuma.state.silentStats = [2];
+    const r = await run(sb, ["monitors", "stats", "1"], {
+      ...creds(kuma.url),
+      UPTIME_KUMA_TIMEOUT: "2",
+    });
+    expect(r.code).toBe(0);
+    expect(r.json()).toMatchObject({ id: 1, certDaysRemaining: 47 });
+  });
+
+  test("a middle monitor's certInfo past its own 500 ms grace reads as absent", async () => {
+    kuma.state.certInfoDelay = { 1: 600 };
+    const r = await run(sb, ["monitors", "stats", "1"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json()).toMatchObject({ id: 1, certExpiresAt: null, certDaysRemaining: null });
+  });
+
   test("the last monitor's certInfo inside the grace is kept", async () => {
     kuma.state.certInfoDelay = { 4: 100 };
     const r = await run(sb, ["monitors", "stats", "4"], creds(kuma.url));

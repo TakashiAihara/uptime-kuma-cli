@@ -131,8 +131,8 @@ export type MonitorStats = {
 
 type BeatRow = Record<string, unknown>;
 
-// First-value-wins record of the stats pushes; sendStats re-emits the whole
-// set on every heartbeat, and the command uses the first complete set.
+// First-value-wins record of the stats pushes, kept event by event; sendStats
+// re-emits them on every heartbeat.
 type MonitorStatEvents = {
   avgPing?: { value: number | null };
   uptime: Map<number, { at: number; value: number }>;
@@ -271,63 +271,40 @@ export class KumaSession {
     }
   }
 
-  // The stats pushes of Kuma 1.23.17: sendStats emits, per monitor in
-  // monitorList order, avgPing, uptime 24h, uptime 30d and — only when a
-  // monitor_tls_info row exists — certInfo right after the uptime 30d. The
-  // sends are awaited monitor by monitor, so a monitor's certInfo always
-  // precedes the next monitor's avgPing; the last monitor has no successor,
-  // so the wait for its certInfo ends 500 ms after its uptime 30d (a certInfo
-  // that has arrived is used either way). sendStats
-  // also runs on every heartbeat, so the events keep arriving — the
-  // listeners in connect() keep the first value of each kind.
+  // The stats pushes of Kuma 1.23.17: sendStats emits, per monitor, avgPing,
+  // uptime 24h, uptime 30d and — only when a monitor_tls_info row exists —
+  // certInfo right after the uptime 30d. Besides the post-login walk it runs
+  // on every heartbeat of any monitor, outside that walk, so another
+  // monitor's pushes can interleave; each monitor's certInfo wait therefore
+  // ends 500 ms after its own uptime 30d (a certInfo that has arrived is used
+  // either way) and never makes the command fail. The listeners in connect()
+  // keep the first value of each kind, event by event.
   async monitorStats(
     ids: number[],
     names: ReadonlyMap<number, string>,
   ): Promise<Map<number, MonitorStats>> {
-    const order = this.monitors();
-    const position = new Map(order.map((m, i) => [m.id, i] as const));
     const deadline = Date.now() + this.timeoutMs;
-    const certSettled = new Map<number, string | undefined>();
 
     const complete = (id: number): boolean => {
       const rec = this.statsEvents.get(id);
       return rec?.avgPing !== undefined && rec.uptime.has(24) && rec.uptime.has(720);
     };
 
-    for (;;) {
-      for (const id of ids) {
-        if (certSettled.has(id)) continue;
-        const rec = this.statsEvents.get(id);
-        const i = position.get(id);
-        if (i === undefined) continue;
-        // a certInfo that has arrived is used whenever it came
-        if (rec?.certInfo !== undefined) {
-          certSettled.set(id, rec.certInfo.json);
-          continue;
-        }
-        if (i === order.length - 1) {
-          const uptime30d = rec?.uptime.get(720);
-          if (uptime30d !== undefined && Date.now() >= uptime30d.at + 500) {
-            certSettled.set(id, undefined);
-          }
-          continue;
-        }
-        const next = order[i + 1];
-        if (next !== undefined && this.statsEvents.get(next.id)?.avgPing !== undefined) {
-          certSettled.set(id, undefined);
-        }
-      }
+    const certDone = (id: number): boolean => {
+      const uptime30d = this.statsEvents.get(id)?.uptime.get(720);
+      return uptime30d !== undefined && Date.now() >= uptime30d.at + 500;
+    };
 
+    for (;;) {
       const missing = ids.filter((id) => !complete(id));
-      const pending = ids.filter((id) => !certSettled.has(id));
-      if (missing.length === 0 && pending.length === 0) break;
+      if (missing.length === 0 && ids.every(certDone)) break;
       if (Date.now() >= deadline) {
-        const what = (list: number[]) =>
-          list.map((id) => `${id} (${names.get(id) ?? "unknown"})`).join(", ");
         if (missing.length > 0) {
-          fail(2, `timed out waiting for stats of monitor(s) ${what(missing)}`);
+          const what = missing.map((id) => `${id} (${names.get(id) ?? "unknown"})`).join(", ");
+          fail(2, `timed out waiting for stats of monitor(s) ${what}`);
         }
-        fail(2, `timed out waiting for certInfo of monitor(s) ${what(pending)}`);
+        // only a certInfo grace is still running at the deadline: no cert
+        break;
       }
       await Promise.race([sleep(10), this.disconnected]);
     }
@@ -345,7 +322,7 @@ export class KumaSession {
         avgPing: avgPing.value,
         uptime24h: uptime24h.value,
         uptime30d: uptime30d.value,
-        certInfo: certSettled.get(id),
+        certInfo: rec?.certInfo?.json,
       });
     }
     return out;

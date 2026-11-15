@@ -681,8 +681,8 @@ export function registerMonitors(program: Command): void {
         names,
       );
       const rows = targets.map((m) => {
-        const st = stats.get(m.id);
-        if (st === undefined) fail(70, `stats of monitor ${m.id} missing after the wait`);
+        // monitorStats returns every requested id or fails itself
+        const st = stats.get(m.id)!;
         const cert = certInfoFields(st.certInfo);
         return {
           id: m.id,

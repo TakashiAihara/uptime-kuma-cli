@@ -181,6 +181,9 @@ export type FakeState = {
   silentStats: number[];
   // per-monitor single stats events left out ("avgPing", "uptime24", "uptime720")
   skipStatEvents: Record<number, string[]>;
+  // monitor ids whose avgPing is also pushed before the post-login walk, like a
+  // heartbeat-triggered sendStats interleaving with it
+  earlyAvgPing: number[];
   testNotificationResult: { ok: boolean; msg: string };
   // getSettings data; primaryBaseURL is what the UI uses for push URLs
   settings: Record<string, unknown>;
@@ -333,6 +336,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     stats: {},
     statsDelay: {},
     skipStatEvents: {},
+    earlyAvgPing: [],
     certInfoDelay: {},
     resendStatsAfterMs: 0,
     resendStats: {},
@@ -692,6 +696,10 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
           }
         };
         void (async () => {
+          for (const m of Object.values(list)) {
+            if (state.earlyAvgPing.includes(m.id))
+              socket.emit("avgPing", m.id, statValues(m).avgPing);
+          }
           await emitStats(statValues);
           if (Object.keys(state.resendStats).length > 0) {
             if (state.resendStatsAfterMs > 0) await sleep(state.resendStatsAfterMs);
