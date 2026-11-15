@@ -18,16 +18,31 @@ const collect = (value: string, previous: string[]): string[] => [...previous, v
 // reads them as local time in timezoneOption (dayjs.tz in getStatus, the
 // single-window croner job), so an offset designator would be misparsed —
 // the UI's datetime-local input never sends one, and neither does the CLI.
-const LOCAL_DATETIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/;
 const OFFSET_DATETIME =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?([zZ]|[+-]\d{2}(:\d{2}|\d{2})?)$/;
 
 const hasOffset = (value: string): boolean => OFFSET_DATETIME.test(value);
 
-const isLocalDateTime = (value: unknown): value is string =>
-  typeof value === "string" && LOCAL_DATETIME.test(value) && !Number.isNaN(Date.parse(value));
-
 const LOCAL_PARTS = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?$/;
+
+// Date.parse rolls an impossible day into the next month and engines differ
+// on T24:00, so the calendar fields are checked directly.
+const isLocalDateTime = (value: unknown): value is string => {
+  if (typeof value !== "string") return false;
+  const m = LOCAL_PARTS.exec(value);
+  if (m === null) return false;
+  const [, y, mo, d, h, mi] = m;
+  const year = Number(y);
+  const month = Number(mo);
+  const day = Number(d);
+  const hour = Number(h);
+  const minute = Number(mi);
+  const second = m[6] === undefined ? 0 : Number(m[6]);
+  if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) return false;
+  const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+  const dim = month === 2 ? (leap ? 29 : 28) : [4, 6, 9, 11].includes(month) ? 30 : 31;
+  return day >= 1 && day <= dim;
+};
 
 // Ordering must not go through Date.parse: it resolves the offset-free
 // strings in the CLI host's timezone, where DST can reorder local times.
@@ -56,7 +71,7 @@ function parseIsoDateTime(value: string, flag: string): string {
       `${flag} must be local time in the maintenance timezone without an offset, got "${value}"`,
     );
   }
-  if (!LOCAL_DATETIME.test(value) || Number.isNaN(Date.parse(value))) {
+  if (!isLocalDateTime(value)) {
     fail(2, `${flag} must be an ISO 8601 local datetime, got "${value}"`);
   }
   return value;
@@ -145,7 +160,9 @@ const isWeekdayList = (value: unknown): value is number[] =>
 const isDayOfMonthList = (value: unknown): value is unknown[] =>
   Array.isArray(value) && value.every((d) => isIntIn(d, 1, 31) || d === "lastDay1");
 
-// The EditMaintenance.vue intervalDay input is capped at 3650.
+// The EditMaintenance.vue intervalDay input is capped at 3650; recurring-interval
+// is tighter because generateCron emits "*/N" in day-of-month and croner 6.0.7
+// rejects a step over 31.
 const MAX_INTERVAL_DAY = 3650;
 
 // croner 6.0.7 shape check, mirroring CronPattern.parse up to
@@ -270,14 +287,22 @@ function validateMaintenance(
   }
   const strategy = typeof m.strategy === "string" ? m.strategy : undefined;
   if (need("intervalDay")) {
-    // recurring-interval feeds interval_day into "*/N"; the other strategies
-    // only store it, so null stays acceptable there
+    // recurring-interval feeds interval_day into "*/N" in day-of-month where
+    // croner 6.0.7 rejects steps over 31; the other strategies only store it,
+    // so null stays acceptable there
     const required = strategy === "recurring-interval";
     const v = m.intervalDay;
     const ok = required
-      ? isPosInt(v) && v <= MAX_INTERVAL_DAY
+      ? isPosInt(v) && v <= 31
       : v === null || v === undefined || (isPosInt(v) && v <= MAX_INTERVAL_DAY);
-    if (!ok) fail(2, "intervalDay must be a positive integer no greater than 3650");
+    if (!ok) {
+      fail(
+        2,
+        `intervalDay must be a positive integer no greater than ${
+          required ? "31 for recurring-interval" : "3650"
+        }`,
+      );
+    }
   }
   if (
     need("timezoneOption") &&
@@ -529,9 +554,6 @@ export function registerMaintenance(program: Command): void {
       const strategy = opts.strategy as (typeof STRATEGIES)[number];
       const title = parseTitle(opts.title as string);
       const description = (opts.description as string | undefined) ?? "";
-      if (strategy === "single" && (opts.start === undefined || opts.end === undefined)) {
-        fail(2, "--strategy single requires --start and --end");
-      }
       const range = parseDateRange(opts.start, opts.end);
       const timezoneOption =
         opts.timezone === undefined ? "SAME_AS_SERVER" : parseTimezone(opts.timezone);
@@ -562,6 +584,16 @@ export function registerMaintenance(program: Command): void {
         timezoneOption,
         ...fileConfig,
       };
+      // single needs both bounds however they arrive — --start/--end or a
+      // --config-file dateRange — judged on the merged strategy and range
+      const rangePair = Array.isArray(payload.dateRange) && payload.dateRange.length >= 2;
+      if (
+        payload.strategy === "single" &&
+        (opts.start === undefined || opts.end === undefined) &&
+        !rangePair
+      ) {
+        fail(2, "--strategy single requires --start and --end");
+      }
       // a --config-file strategy of manual overrides the flag's strategy, so
       // the merged value is what the manual rule judges
       if (range !== undefined && payload.strategy === "manual") {
@@ -601,6 +633,16 @@ export function registerMaintenance(program: Command): void {
       }
       if (fileConfig.id !== undefined) {
         fail(2, '--config-file cannot set "id"; the id selects the maintenance');
+      }
+      // an unknown strategy is refused before connecting; the post-fetch
+      // validateMaintenance still judges the effective merged value
+      for (const candidate of [fileConfig.strategy, sets.strategy]) {
+        if (
+          candidate !== undefined &&
+          !(STRATEGIES as readonly string[]).includes(String(candidate))
+        ) {
+          fail(2, `unknown maintenance strategy "${String(candidate)}"`);
+        }
       }
       const hasChange =
         opts.title !== undefined ||
