@@ -447,6 +447,24 @@ function validateFinalMonitor(
     needString("grpcServiceName");
     needString("grpcMethod");
     needString("grpcProtobuf");
+    if (inScope("grpcBody")) {
+      // A type change keeps the stored grpcBody; an empty one gets the same
+      // "{}" default add uses, and the result must parse as JSON.
+      if (
+        edit?.typeChanged === true &&
+        !edit.touched.has("grpcBody") &&
+        (monitor.grpcBody === null || monitor.grpcBody === undefined || monitor.grpcBody === "")
+      ) {
+        monitor.grpcBody = "{}";
+      }
+      const body = monitor.grpcBody;
+      if (typeof body !== "string") fail(2, "grpcBody must be a string containing JSON");
+      try {
+        JSON.parse(body);
+      } catch {
+        fail(2, "grpcBody must be a string containing JSON");
+      }
+    }
   }
   if (type === "json-query") {
     needString("jsonPath");

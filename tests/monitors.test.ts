@@ -975,6 +975,44 @@ describe("monitors add", () => {
     expect(addCalls()).toHaveLength(0);
   });
 
+  test.each([
+    ["empty", ""],
+    ["not JSON", "not json"],
+    ["null", null],
+  ])("grpc-keyword: --config-file grpcBody=%s exits 2 before sending", async (_l, body) => {
+    const proto = join(sb.dir, "p.proto");
+    writeFileSync(proto, 'syntax = "proto3";\n');
+    const f = join(sb.dir, "grpc.json");
+    writeFileSync(f, JSON.stringify({ grpcBody: body }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "grpc-keyword",
+        "--name",
+        "x",
+        "--grpc-url",
+        "h:1",
+        "--keyword",
+        "k",
+        "--grpc-service-name",
+        "S",
+        "--grpc-method",
+        "m",
+        "--grpc-protobuf",
+        proto,
+        "--config-file",
+        f,
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("grpcBody");
+    expect(addCalls()).toHaveLength(0);
+  });
+
   test("keyword: --invert-keyword is sent", async () => {
     const r = await run(
       sb,
@@ -3813,6 +3851,35 @@ describe("monitors edit", () => {
     expect(r.code).toBe(2);
     expect(r.stderr).toContain("grpcProtobuf");
     expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit --set type=grpc-keyword defaults a stored null grpcBody to {}", async () => {
+    kuma.state.monitors.find((m) => m.id === 7)!.grpcBody = null;
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "type=grpc-keyword",
+        "--set",
+        "grpcUrl=h:1",
+        "--set",
+        "keyword=k",
+        "--set",
+        "grpcServiceName=S",
+        "--set",
+        "grpcMethod=m",
+        "--set",
+        'grpcProtobuf="proto"',
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.type).toBe("grpc-keyword");
+    expect(sent.grpcBody).toBe("{}");
   });
 
   test("edit --set type=real-browser without url exits 2", async () => {
