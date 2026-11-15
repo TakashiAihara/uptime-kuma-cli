@@ -106,6 +106,13 @@ describe("monitors list", () => {
     expect(r.code).toBe(0);
     expect(r.json().map((m: any) => m.id)).toEqual([7]);
   });
+
+  test("works when the maintenance and status page lists never arrive", async () => {
+    kuma.state.skipLists = ["maintenanceList", "statusPageList"];
+    const r = await run(sb, ["monitors", "list"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json().map((m: any) => m.id)).toEqual([2, 7, 9]);
+  });
 });
 
 describe("monitors get", () => {

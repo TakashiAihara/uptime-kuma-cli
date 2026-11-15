@@ -109,6 +109,14 @@ export interface TagRow extends Record<string, unknown> {
   color: string;
 }
 
+// The statusPageList push carries StatusPage.toJSON(): id, slug, title and
+// the page config; the CLI only needs id and title.
+export type StatusPageRow = Record<string, unknown> & { id: number; title: string };
+
+// The maintenanceList push and getMaintenance carry Maintenance.toJSON(): the
+// public shape (dateRange, timeRange, status, ...), not bean columns.
+export type MaintenanceRow = Record<string, unknown> & { id: number };
+
 type BeatRow = Record<string, unknown>;
 
 let currentSocket: Socket | undefined;
@@ -147,9 +155,11 @@ export class KumaSession {
     readonly url: string,
     private readonly timeoutMs: number,
     readonly monitorList: Record<string, Monitor>,
+    readonly maintenanceList: Record<string, MaintenanceRow> | undefined,
     readonly notificationList: NotificationRow[],
     readonly proxyList: ProxyRow[],
     readonly dockerHostList: DockerHostRow[],
+    readonly statusPageList: Record<string, StatusPageRow> | undefined,
     readonly heartbeats: Map<number, BeatRow[]>,
     private readonly disconnected: Promise<never>,
   ) {}
@@ -171,6 +181,16 @@ export class KumaSession {
     return this.monitors().find((m) => m.id === id);
   }
 
+  maintenances(): MaintenanceRow[] {
+    const list = this.maintenanceList;
+    if (list === undefined) fail(70, "maintenanceList was not awaited");
+    return Object.values(list).sort((a, b) => a.id - b.id);
+  }
+
+  maintenanceById(id: number): MaintenanceRow | undefined {
+    return this.maintenances().find((m) => m.id === id);
+  }
+
   notifications(): NotificationRow[] {
     return [...this.notificationList].sort((a, b) => a.id - b.id);
   }
@@ -189,6 +209,16 @@ export class KumaSession {
 
   dockerHosts(): DockerHostRow[] {
     return [...this.dockerHostList].sort((a, b) => a.id - b.id);
+  }
+
+  statusPages(): StatusPageRow[] {
+    const list = this.statusPageList;
+    if (list === undefined) fail(70, "statusPageList was not awaited");
+    return Object.values(list).sort((a, b) => a.id - b.id);
+  }
+
+  statusPageById(id: number): StatusPageRow | undefined {
+    return this.statusPages().find((p) => p.id === id);
   }
 
   // getTags is a request event: Kuma 1.23 does not push a tag list after login.
@@ -217,7 +247,15 @@ export class KumaSession {
   }
 }
 
-export async function connect(): Promise<KumaSession> {
+// monitorList, notificationList, proxyList and dockerHostList are pushed in
+// the same tick right after login, so every command waits for them. The
+// maintenance commands additionally name the lists they read: maintenanceList
+// for the window itself and statusPageList for the status-pages attach —
+// statusPageList arrives ~500ms later (afterLogin sleeps first), so waiting
+// for it unconditionally would add that latency to every command.
+export async function connect(
+  extraLists: readonly ("maintenanceList" | "statusPageList")[] = [],
+): Promise<KumaSession> {
   const timeoutMs = socketTimeoutMs();
   const { url, username, password } = await resolveCredentials();
   const socket = io(url, {
@@ -241,15 +279,20 @@ export async function connect(): Promise<KumaSession> {
 
   const pushed: {
     monitorList?: Record<string, Monitor>;
+    maintenanceList?: Record<string, MaintenanceRow>;
     notificationList?: NotificationRow[];
     proxyList?: ProxyRow[];
     dockerHostList?: DockerHostRow[];
+    statusPageList?: Record<string, StatusPageRow>;
   } = {};
   const heartbeats = new Map<number, BeatRow[]>();
   // The server pushes these right after the login callback, so the listeners
   // must be in place before login is emitted.
   socket.on("monitorList", (data: Record<string, Monitor>) => {
     pushed.monitorList = data;
+  });
+  socket.on("maintenanceList", (data: Record<string, MaintenanceRow>) => {
+    pushed.maintenanceList = data;
   });
   socket.on("notificationList", (data: NotificationRow[]) => {
     pushed.notificationList = data;
@@ -259,6 +302,9 @@ export async function connect(): Promise<KumaSession> {
   });
   socket.on("dockerHostList", (data: DockerHostRow[]) => {
     pushed.dockerHostList = data;
+  });
+  socket.on("statusPageList", (data: Record<string, StatusPageRow>) => {
+    pushed.statusPageList = data;
   });
   socket.on("heartbeatList", (id: unknown, beats: unknown) => {
     heartbeats.set(Number(id), Array.isArray(beats) ? (beats as BeatRow[]) : []);
@@ -293,28 +339,38 @@ export async function connect(): Promise<KumaSession> {
     fail(2, msg);
   }
 
+  const wanted = new Set<keyof typeof pushed>([
+    "monitorList",
+    "notificationList",
+    "proxyList",
+    "dockerHostList",
+    ...extraLists,
+  ]);
   const listsDeadline = Date.now() + timeoutMs;
-  while (
-    !pushed.monitorList ||
-    !pushed.notificationList ||
-    !pushed.proxyList ||
-    !pushed.dockerHostList
-  ) {
+  for (;;) {
+    const missing = [...wanted].filter((name) => pushed[name] === undefined);
+    if (missing.length === 0) break;
     if (Date.now() >= listsDeadline) {
-      fail(2, "timed out waiting for pushed monitor/notification/proxy/docker host lists");
+      fail(2, `timed out waiting for pushed lists: ${missing.join(", ")}`);
     }
     await Promise.race([sleep(10), disconnected]);
   }
-  const lists = pushed as Required<typeof pushed>;
+  const present = <K extends keyof typeof pushed>(name: K): NonNullable<(typeof pushed)[K]> => {
+    const value = pushed[name];
+    if (value === undefined) fail(70, `pushed ${name} missing after the wait`);
+    return value;
+  };
 
   return new KumaSession(
     socket,
     url,
     timeoutMs,
-    lists.monitorList,
-    lists.notificationList,
-    lists.proxyList,
-    lists.dockerHostList,
+    present("monitorList"),
+    wanted.has("maintenanceList") ? present("maintenanceList") : undefined,
+    present("notificationList"),
+    present("proxyList"),
+    present("dockerHostList"),
+    wanted.has("statusPageList") ? present("statusPageList") : undefined,
     heartbeats,
     disconnected,
   );

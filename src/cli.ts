@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { Command, CommanderError } from "commander";
 import { registerBeats, registerEvents } from "./commands/beats.ts";
+import { registerMaintenance } from "./commands/maintenance.ts";
 import { registerMonitors } from "./commands/monitors.ts";
 import { registerNotifications } from "./commands/notifications.ts";
 import { registerProxies } from "./commands/proxies.ts";
@@ -22,6 +23,7 @@ registerEvents(program);
 registerNotifications(program);
 registerProxies(program);
 registerTags(program);
+registerMaintenance(program);
 
 let exitCode = 0;
 try {
