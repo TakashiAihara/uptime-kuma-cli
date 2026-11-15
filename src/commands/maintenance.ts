@@ -166,7 +166,7 @@ const CRON_NICKNAMES = new Map([
   ["@hourly", "0 * * * *"],
 ]);
 
-const CRON_LEGAL = /^[0-9*,\/-]*$/;
+const CRON_LEGAL = /^[0-9*,/-]*$/;
 
 // croner's replaceAlphaMonths / replaceAlphaDays are substring replacements,
 // so a name only survives the charset check when it converts fully to digits
