@@ -113,7 +113,8 @@ function generatePushToken(): string {
   return token;
 }
 
-// Fields Kuma's monitor JSON carries that must never reach stdout.
+// Fields Kuma's monitor JSON carries that must never reach stdout. The last
+// six are Kuma 2.x fields that 1.23 never sends.
 const SECRET_KEYS = new Set([
   "basic_auth_pass",
   "oauth_client_secret",
@@ -126,6 +127,12 @@ const SECRET_KEYS = new Set([
   "databaseConnectionString",
   "grpcBody",
   "grpcMetadata",
+  "bearer_token",
+  "gamedigToken",
+  "rabbitmqPassword",
+  "sshPassword",
+  "sshPrivateKey",
+  "sshPassphrase",
 ]);
 
 // kafkaProducerSaslOptions is an object holding the SASL password or AWS secret keys;

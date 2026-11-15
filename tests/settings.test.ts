@@ -106,6 +106,27 @@ describe("settings get", () => {
     expect(r.json().steamAPIKey).toBe("");
   });
 
+  test("globalpingApiToken prints as *** when non-empty and stays empty", async () => {
+    const secret = ["fixture", "globalping"].join("-");
+    kuma.state.settings = { globalpingApiToken: secret };
+    const r = await run(sb, ["settings", "get"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json().globalpingApiToken).toBe("***");
+    expect(r.stdout).not.toContain(secret);
+
+    // the set re-read goes through the same redaction
+    const s = await run(sb, ["settings", "set", "--set", "trustProxy=true"], creds(kuma.url));
+    expect(s.code).toBe(0);
+    expect(s.json().globalpingApiToken).toBe("***");
+    expect(s.stdout).not.toContain(secret);
+    expect(sentSettings().globalpingApiToken).toBe(secret);
+
+    kuma.state.settings = { globalpingApiToken: "" };
+    const empty = await run(sb, ["settings", "get"], creds(kuma.url));
+    expect(empty.code).toBe(0);
+    expect(empty.json().globalpingApiToken).toBe("");
+  });
+
   test("getSettings ok:false exits 1 with Kuma's message", async () => {
     kuma.state.fail.getSettings = "You are not logged in.";
     const r = await run(sb, ["settings", "get"], creds(kuma.url));
