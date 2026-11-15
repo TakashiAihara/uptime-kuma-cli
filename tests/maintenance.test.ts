@@ -844,6 +844,7 @@ describe("maintenance", () => {
       );
       expect(r.code).toBe(2);
       expect(r.stderr).toContain("end date");
+      expect(r.stderr).toContain('--set dateRange=["<start>"]');
       expect(callsOf("editMaintenance")).toHaveLength(0);
     });
 
@@ -964,6 +965,19 @@ describe("maintenance", () => {
       const r = await run(sb, ["maintenance", "edit", "1", "--title", "renamed"], creds(kuma.url));
       expect(r.code).toBe(0);
       expect(callsOf("editMaintenance")).toHaveLength(1);
+    });
+
+    test("an untouched stored end on a cron window does not block an unrelated edit", async () => {
+      kuma.state.maintenances[0] = {
+        ...kuma.state.maintenances[0]!,
+        strategy: "cron",
+        cron: "0 4 * * *",
+        duration: 3600,
+      };
+      const r = await run(sb, ["maintenance", "edit", "2", "--title", "renamed"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      const sent = callsOf("editMaintenance")[0]!.args[0] as Record<string, unknown>;
+      expect(sent.dateRange).toEqual(["2030-01-01T02:00:00", "2030-01-01T04:00:00"]);
     });
 
     test("editMaintenance ok:false exits 1 with Kuma's message", async () => {
@@ -1419,19 +1433,22 @@ describe("maintenance", () => {
       },
     );
 
-    test("a cron nickname is accepted", async () => {
-      const f = writeJson("nickname.json", { cron: "@daily" });
-      const r = await run(
-        sb,
-        ["maintenance", "add", "--title", "w", "--strategy", "cron", "--config-file", f],
-        creds(kuma.url),
-      );
-      expect(r.code).toBe(0);
-      const sent = callsOf("addMaintenance")[0]!.args[0] as Record<string, unknown>;
-      expect(sent.cron).toBe("@daily");
-    });
+    test.each(["@yearly", "@annually", "@monthly", "@weekly", "@daily", "@hourly", "@Daily"])(
+      "a cron nickname %p is accepted",
+      async (cron) => {
+        const f = writeJson("nickname.json", { cron });
+        const r = await run(
+          sb,
+          ["maintenance", "add", "--title", "w", "--strategy", "cron", "--config-file", f],
+          creds(kuma.url),
+        );
+        expect(r.code).toBe(0);
+        const sent = callsOf("addMaintenance")[0]!.args[0] as Record<string, unknown>;
+        expect(sent.cron).toBe(cron);
+      },
+    );
 
-    test.each(["0 9 1W * *", "0 9 LW * *", "0 9 * jan mon"])(
+    test.each(["0 9 L * *", "0 9 * * 5L", "0 9 * * * ?", "0 9 * jan mon"])(
       "a cron expression %p is accepted",
       async (cron) => {
         const f = writeJson("goodshape.json", { cron });
@@ -1444,20 +1461,24 @@ describe("maintenance", () => {
       },
     );
 
-    test.each(["0 9 FOO * *", "X * * * *"])(
-      "letters outside the croner charset %p exit 2 before connecting",
-      async (cron) => {
-        const f = writeJson("badletters.json", { cron });
-        const r = await run(
-          sb,
-          ["maintenance", "add", "--title", "w", "--strategy", "cron", "--config-file", f],
-          creds(kuma.url),
-        );
-        expect(r.code).toBe(2);
-        expect(r.stderr).toContain("5 or 6 whitespace-separated cron fields");
-        expect(kuma.calls).toHaveLength(0);
-      },
-    );
+    test.each([
+      "0 9 FOO * *",
+      "X * * * *",
+      "0 9 1W * *",
+      "0 9 LW * *",
+      "@midnight",
+      "0 9 * * * ??",
+    ])("illegal cron content %p exits 2 before connecting", async (cron) => {
+      const f = writeJson("badletters.json", { cron });
+      const r = await run(
+        sb,
+        ["maintenance", "add", "--title", "w", "--strategy", "cron", "--config-file", f],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("5 or 6 whitespace-separated cron fields");
+      expect(kuma.calls).toHaveLength(0);
+    });
 
     test("lastDay1 is accepted in daysOfMonth", async () => {
       const f = writeJson("lastday.json", { daysOfMonth: ["lastDay1"] });

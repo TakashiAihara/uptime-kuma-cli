@@ -148,38 +148,76 @@ const isDayOfMonthList = (value: unknown): value is unknown[] =>
 // The EditMaintenance.vue intervalDay input is capped at 3650.
 const MAX_INTERVAL_DAY = 3650;
 
-// croner 6.0.x field charsets: digits and * , - / ? in every field; L and W in
-// day of month; the JAN-DEC / SUN-SAT names put letters in month and day of
-// week. Kuma 1.23.17 calls the async validateCron without await, so a bad
-// expression is stored anyway and the rejection goes unhandled — only the
-// shape is checked up front; croner can still refuse values like L-1 or 13 in
-// the month field.
-const CRON_NUMERIC = /^[0-9*,\/?-]+$/;
-const CRON_DOM = /^[0-9LW*,\/?-]+$/;
-const CRON_NAMED = /^[0-9A-Za-z*,\/?-]+$/;
-// indexed from the right: day-of-week, month, day-of-month, hour, minute, second
-const CRON_FIELDS = [CRON_NAMED, CRON_NAMED, CRON_DOM, CRON_NUMERIC, CRON_NUMERIC, CRON_NUMERIC];
-
-// croner accepts these nicknames as a whole expression
-const CRON_NICKNAMES = new Set([
-  "@yearly",
-  "@annually",
-  "@monthly",
-  "@weekly",
-  "@daily",
-  "@midnight",
-  "@hourly",
+// croner 6.0.7 shape check, mirroring CronPattern.parse up to
+// throwAtIllegalCharacters: a nickname expands first, the pattern splits on
+// whitespace into 5 or 6 parts (5 gets a leading seconds "0"), the first "L"
+// is stripped from day-of-month and day-of-week, month and day-of-week parts
+// of 3+ chars get the JAN-DEC / SUN-SAT names replaced, the first "?" of each
+// part becomes a number, and what remains may only contain [0-9*/,-]. Ranges and
+// values are still croner's job; Kuma 1.23.17 calls the async validateCron
+// without await, so a bad expression is stored anyway and the rejection
+// goes unhandled — only the shape is checked up front.
+const CRON_NICKNAMES = new Map([
+  ["@yearly", "0 0 1 1 *"],
+  ["@annually", "0 0 1 1 *"],
+  ["@monthly", "0 0 1 * *"],
+  ["@weekly", "0 0 * * 0"],
+  ["@daily", "0 0 * * *"],
+  ["@hourly", "0 * * * *"],
 ]);
 
+const CRON_LEGAL = /^[0-9*,\/-]*$/;
+
+// croner's replaceAlphaMonths / replaceAlphaDays are substring replacements,
+// so a name only survives the charset check when it converts fully to digits
+const alphaMonths = (value: string): string =>
+  value
+    .replace(/jan/gi, "1")
+    .replace(/feb/gi, "2")
+    .replace(/mar/gi, "3")
+    .replace(/apr/gi, "4")
+    .replace(/may/gi, "5")
+    .replace(/jun/gi, "6")
+    .replace(/jul/gi, "7")
+    .replace(/aug/gi, "8")
+    .replace(/sep/gi, "9")
+    .replace(/oct/gi, "10")
+    .replace(/nov/gi, "11")
+    .replace(/dec/gi, "12");
+
+const alphaDays = (value: string): string =>
+  value
+    .replace(/-sun/gi, "-7")
+    .replace(/sun/gi, "0")
+    .replace(/mon/gi, "1")
+    .replace(/tue/gi, "2")
+    .replace(/wed/gi, "3")
+    .replace(/thu/gi, "4")
+    .replace(/fri/gi, "5")
+    .replace(/sat/gi, "6");
+
 function isCronExpression(value: string): boolean {
-  const trimmed = value.trim();
-  if (CRON_NICKNAMES.has(trimmed)) return true;
-  const fields = trimmed.split(/\s+/);
+  let pattern = value;
+  if (pattern.includes("@")) {
+    pattern = (CRON_NICKNAMES.get(pattern.trim().toLowerCase()) ?? pattern).trim();
+  }
+  const fields = pattern.replace(/\s+/g, " ").split(" ");
   if (fields.length !== 5 && fields.length !== 6) return false;
-  return fields.every((f, i) => {
-    const charset = CRON_FIELDS[fields.length - 1 - i];
-    return charset !== undefined && charset.test(f);
-  });
+  const [second, minute, hour, day, month, dayOfWeek] = (
+    fields.length === 5 ? ["0", ...fields] : fields
+  ) as [string, string, string, string, string, string];
+  const dom = day.replace("L", "");
+  const dow = dayOfWeek.replace("L", "");
+  const parts = [
+    second,
+    minute,
+    hour,
+    dom,
+    month.length >= 3 ? alphaMonths(month) : month,
+    dow.length >= 3 ? alphaDays(dow) : dow,
+  ];
+  // croner substitutes the first "?" of each part with a number; leftovers fail
+  return parts.every((part) => CRON_LEGAL.test(part.replace("?", "0")));
 }
 
 // Maintenance.jsonToBean of Kuma 1.23.17 writes title, description, strategy,
@@ -193,7 +231,7 @@ function isCronExpression(value: string): boolean {
 // scoping monitors edit uses for its touched/typeChanged rule.
 function validateMaintenance(
   m: Record<string, unknown>,
-  opts: { full: boolean; touched?: ReadonlySet<string> },
+  opts: { full: boolean; touched?: ReadonlySet<string>; edit?: boolean },
 ): void {
   const need = (key: string) => opts.full || opts.touched?.has(key) === true;
   if (!Array.isArray(m.dateRange)) fail(2, "dateRange must be an array");
@@ -318,8 +356,12 @@ function validateMaintenance(
     if (end !== null && end !== undefined) {
       fail(
         2,
-        `Kuma 1.23.17 ends a "${strategy}" maintenance immediately ` +
-          'when "dateRange" has an end date; give only a start',
+        opts.edit === true
+          ? `Kuma 1.23.17 ends a "${strategy}" maintenance immediately ` +
+              'when "dateRange" has an end date; clear a stored end with ' +
+              '--set dateRange=["<start>"] (local time)'
+          : `Kuma 1.23.17 ends a "${strategy}" maintenance immediately ` +
+              'when "dateRange" has an end date; give only a start',
       );
     }
   }
@@ -612,7 +654,11 @@ export function registerMaintenance(program: Command): void {
       if (opts.description !== undefined) touched.add("description");
       if (start !== undefined || end !== undefined) touched.add("dateRange");
       if (timezoneOption !== undefined) touched.add("timezoneOption");
-      validateMaintenance(merged, { full: merged.strategy !== fetched.strategy, touched });
+      validateMaintenance(merged, {
+        full: merged.strategy !== fetched.strategy,
+        touched,
+        edit: true,
+      });
       await s.request("editMaintenance", [merged]);
       // Print what Kuma stored, like the UI does after its save.
       printJson(await fetchMaintenance(s, id));
