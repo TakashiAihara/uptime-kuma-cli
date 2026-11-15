@@ -136,7 +136,7 @@ type BeatRow = Record<string, unknown>;
 type MonitorStatEvents = {
   avgPing?: { value: number | null };
   uptime: Map<number, { at: number; value: number }>;
-  certInfo?: { json: string };
+  certInfo?: { at: number; json: string };
 };
 
 let currentSocket: Socket | undefined;
@@ -290,9 +290,18 @@ export class KumaSession {
       return rec?.avgPing !== undefined && rec.uptime.has(24) && rec.uptime.has(720);
     };
 
+    // a monitor's own bound: certInfo counts only when it came within 500 ms
+    // of that monitor's uptime 30d, whatever else the command still waits for
+    const certInTime = (id: number): string | undefined => {
+      const rec = this.statsEvents.get(id);
+      const uptime30d = rec?.uptime.get(720);
+      if (uptime30d === undefined || rec?.certInfo === undefined) return undefined;
+      return rec.certInfo.at <= uptime30d.at + 500 ? rec.certInfo.json : undefined;
+    };
     const certDone = (id: number): boolean => {
       const uptime30d = this.statsEvents.get(id)?.uptime.get(720);
-      return uptime30d !== undefined && Date.now() >= uptime30d.at + 500;
+      if (uptime30d === undefined) return false;
+      return certInTime(id) !== undefined || Date.now() >= uptime30d.at + 500;
     };
 
     for (;;) {
@@ -322,7 +331,7 @@ export class KumaSession {
         avgPing: avgPing.value,
         uptime24h: uptime24h.value,
         uptime30d: uptime30d.value,
-        certInfo: rec?.certInfo?.json,
+        certInfo: certInTime(id),
       });
     }
     return out;
@@ -410,8 +419,8 @@ export async function connect(
   });
   // The stats pushes arrive after the lists, once after login and again on
   // every heartbeat; only `monitors stats` waits for them. The first value
-  // of each kind wins; the uptime arrival time starts the last monitor's
-  // 500 ms certInfo grace.
+  // of each kind wins; arrival times bound each monitor's 500 ms certInfo
+  // grace.
   socket.on("avgPing", (id: unknown, value: unknown) => {
     const mid = statId(id);
     if (Number.isNaN(mid)) return;
@@ -444,7 +453,7 @@ export async function connect(
     if (Number.isNaN(mid) || typeof data !== "string") return;
     const rec = statRecord(mid);
     if (rec.certInfo === undefined) {
-      rec.certInfo = { json: data };
+      rec.certInfo = { at: Date.now(), json: data };
     }
   });
 

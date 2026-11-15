@@ -170,8 +170,8 @@ export type FakeState = {
   // ms to wait before a monitor's whole stats sequence; like a slow sendStats
   // it also delays every monitor after it in monitorList order
   statsDelay: Record<number, number>;
-  // ms to wait before a monitor's certInfo emit; it still precedes the next
-  // monitor's stats like the awaited sendCertInfo
+  // ms to wait before a monitor's certInfo emit; in the post-login walk it
+  // still precedes the next monitor's stats like the awaited sendCertInfo
   certInfoDelay: Record<number, number>;
   // a second stats round, resendStatsAfterMs after the first, with per-monitor
   // overrides — proves the CLI keeps the first values
@@ -675,9 +675,11 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
         // Monitor.sendStats of Kuma 1.23.17 runs after the heartbeat lists,
         // once per monitor in monitorList order (its integer keys enumerate
         // by id): avgPing, uptime 24h, uptime 30d, then certInfo only when a
-        // monitor_tls_info row exists. Each sendStats is awaited, so a
-        // monitor's certInfo precedes the next monitor's avgPing; the delays
-        // model the DB lookups and hold the rest of the stream the same way
+        // monitor_tls_info row exists. Each sendStats of this walk is awaited,
+        // so within it a monitor's certInfo precedes the next monitor's
+        // avgPing (earlyAvgPing models a heartbeat run breaking that); the
+        // delays model the DB lookups and hold the rest of the walk. The walk
+        // sends ids as strings like Kuma's for...in over monitorList.
         const emitStats = async (values: (m: Monitor) => ResolvedStats) => {
           for (const m of Object.values(list)) {
             if (state.silentStats.includes(m.id)) continue;
@@ -685,13 +687,14 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
             if (delay > 0) await sleep(delay);
             const v = values(m);
             const skip = state.skipStatEvents[m.id] ?? [];
-            if (!skip.includes("avgPing")) socket.emit("avgPing", m.id, v.avgPing);
-            if (!skip.includes("uptime24")) socket.emit("uptime", m.id, 24, v.uptime24h);
-            if (!skip.includes("uptime720")) socket.emit("uptime", m.id, 720, v.uptime30d);
+            const sid = String(m.id);
+            if (!skip.includes("avgPing")) socket.emit("avgPing", sid, v.avgPing);
+            if (!skip.includes("uptime24")) socket.emit("uptime", sid, 24, v.uptime24h);
+            if (!skip.includes("uptime720")) socket.emit("uptime", sid, 720, v.uptime30d);
             if (v.certInfo !== undefined) {
               const certDelay = state.certInfoDelay[m.id] ?? 0;
               if (certDelay > 0) await sleep(certDelay);
-              socket.emit("certInfo", m.id, v.certInfo);
+              socket.emit("certInfo", sid, v.certInfo);
             }
           }
         };

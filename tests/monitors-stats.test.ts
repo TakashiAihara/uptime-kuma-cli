@@ -169,11 +169,35 @@ describe("monitors stats", () => {
     expect(r.json()).toMatchObject({ id: 1, certDaysRemaining: 47 });
   });
 
-  test("a middle monitor's certInfo past its own 500 ms grace reads as absent", async () => {
+  test("a monitor's certInfo past its own 500 ms grace reads as absent", async () => {
     kuma.state.certInfoDelay = { 1: 600 };
     const r = await run(sb, ["monitors", "stats", "1"], creds(kuma.url));
     expect(r.code).toBe(0);
     expect(r.json()).toMatchObject({ id: 1, certExpiresAt: null, certDaysRemaining: null });
+  });
+
+  test("a monitor whose certInfo has arrived does not sit out the 500 ms grace", async () => {
+    // monitor 1 has a cert, monitor 3 has none and waits the full grace
+    const t1 = Date.now();
+    const withCert = await run(sb, ["monitors", "stats", "1"], creds(kuma.url));
+    const withCertMs = Date.now() - t1;
+    const t3 = Date.now();
+    const withoutCert = await run(sb, ["monitors", "stats", "3"], creds(kuma.url));
+    const withoutCertMs = Date.now() - t3;
+    expect(withCert.code).toBe(0);
+    expect(withoutCert.code).toBe(0);
+    expect(withoutCertMs - withCertMs).toBeGreaterThan(300);
+  });
+
+  test("a late certInfo stays absent while other monitors keep the wait open", async () => {
+    // monitor 1's certInfo comes 600 ms after its uptime 30d; the later
+    // monitors' stats are delayed so the command is still waiting then
+    kuma.state.certInfoDelay = { 1: 600 };
+    kuma.state.statsDelay = { 2: 400 };
+    const r = await run(sb, ["monitors", "stats"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const row = (r.json() as { id: number }[]).find((x) => x.id === 1);
+    expect(row).toMatchObject({ id: 1, certExpiresAt: null, certDaysRemaining: null });
   });
 
   test("the last monitor's certInfo inside the grace is kept", async () => {
