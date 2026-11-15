@@ -160,6 +160,14 @@ export type FakeState = {
   // monitor ids that exist but stay out of the login monitorList push, like
   // monitors created after this socket logged in
   unlistedMonitors: number[];
+  // the info payload: sent on connection with the version fields (and 2.x's
+  // dbType / runtime) hidden, and in full after login; null sends no info at all
+  info: Record<string, unknown> | null;
+  // ms to hold the post-login info back after the pushed lists
+  infoDelayMs: number;
+  // send the full info before the login answer instead of after monitorList,
+  // like 2.x whose afterLogin runs before the login callback
+  infoBeforeLoginAck: boolean;
   // event name -> msg; the next call to that event answers { ok: false, msg }.
   // an array arms one outcome per call in order; a null entry lets that call through
   fail: Record<string, string | (string | null)[]>;
@@ -331,6 +339,15 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     maintenanceStatusPages: {},
     skipLists: [],
     unlistedMonitors: [],
+    info: {
+      version: "1.23.17",
+      latestVersion: "1.23.17",
+      primaryBaseURL: null,
+      serverTimezone: "UTC",
+      serverTimezoneOffset: "+00:00",
+    },
+    infoBeforeLoginAck: false,
+    infoDelayMs: 0,
     fail: {},
     silentHeartbeat: [],
     stats: {},
@@ -582,6 +599,16 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
 
   io.on("connection", (socket) => {
     let loggedIn = false;
+    // sendInfo(socket, true) on connection hides the version fields until login
+    if (state.info !== null) {
+      const hidden = { ...state.info };
+      delete hidden.version;
+      delete hidden.latestVersion;
+      delete hidden.isContainer;
+      delete hidden.dbType;
+      delete hidden.runtime;
+      socket.emit("info", hidden);
+    }
     socket.onAny((event, ...args) => {
       const plain = args.filter((a) => typeof a !== "function");
       calls.push({ event, args: structuredClone(plain) });
@@ -627,6 +654,9 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
       loggedIn = true;
       // afterLogin sets socket.userID = user.id; the fake's user id is 1
       (socket as { userID?: number }).userID = 1;
+      if (state.info !== null && state.infoBeforeLoginAck) {
+        socket.emit("info", structuredClone(state.info));
+      }
       setTimeout(() => {
         if (state.dropInsteadOfLists) {
           socket.disconnect(true);
@@ -637,6 +667,15 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
         };
         const list = monitorList();
         push("monitorList", () => socket.emit("monitorList", list));
+        // afterLogin's sendInfo(socket); real Kuma sends maintenanceList first,
+        // the fake sends it here, and the CLI does not rely on the order
+        const info = state.info;
+        if (info !== null && !state.infoBeforeLoginAck) {
+          push("info", () => {
+            if (state.infoDelayMs === 0) socket.emit("info", structuredClone(info));
+            else setTimeout(() => socket.emit("info", structuredClone(info)), state.infoDelayMs);
+          });
+        }
         push("maintenanceList", () => socket.emit("maintenanceList", maintenanceListJSON()));
         push("notificationList", () =>
           socket.emit(
