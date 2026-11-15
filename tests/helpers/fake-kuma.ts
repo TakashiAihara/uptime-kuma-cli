@@ -40,6 +40,17 @@ export type ProxyRow = {
   created_date: string;
 };
 export type Call = { event: string; args: unknown[] };
+export type TagRow = { id: number; name: string; color: string };
+// monitor.toJSON sends monitor.tags as the monitor_tag⋈tag join:
+// mt.* (id, monitor_id, tag_id, value) plus tag.name and tag.color
+export type MonitorTagRow = {
+  id: number;
+  monitor_id: number;
+  tag_id: number;
+  value: string | null;
+  name: string;
+  color: string;
+};
 
 export type FakeState = {
   username: string;
@@ -48,6 +59,8 @@ export type FakeState = {
   beats: Record<number, Beat[]>;
   notifications: NotificationRow[];
   proxies: ProxyRow[];
+  // rows returned by getTags; Kuma 1.23 does not push a tag list after login
+  tags: TagRow[];
   // rows pushed as dockerHostList after login; the CLI checks docker_host ids against them
   dockerHosts: { id: number }[];
   // event name -> msg; the next call to that event answers { ok: false, msg }
@@ -160,6 +173,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     beats: {},
     notifications: [],
     proxies: [],
+    tags: [],
     dockerHosts: [],
     fail: {},
     silentHeartbeat: [],
@@ -175,11 +189,27 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
   const http = createServer();
   const io = new Server(http);
 
+  // monitor.toJSON always carries tags (the monitor_tag⋈tag join, [] when none)
+  const tagsOf = (m: Monitor): MonitorTagRow[] =>
+    Array.isArray(m.tags) ? (m.tags as MonitorTagRow[]) : [];
+
+  // Monitor.getTags orders the join by tag.name
+  const monitorTags = (m: Monitor): MonitorTagRow[] =>
+    [...tagsOf(m)].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+
   const monitorList = () => {
     const out: Record<string, Monitor> = {};
-    for (const m of state.monitors) out[String(m.id)] = structuredClone(m);
+    for (const m of state.monitors) {
+      out[String(m.id)] = structuredClone({ ...m, tags: monitorTags(m) });
+    }
     return out;
   };
+
+  const nextMonitorTagId = () =>
+    Math.max(
+      0,
+      ...state.monitors.flatMap((m) => tagsOf(m).map((t) => (typeof t.id === "number" ? t.id : 0))),
+    ) + 1;
 
   io.on("connection", (socket) => {
     let loggedIn = false;
@@ -252,7 +282,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     handle("getMonitor", (id: number) => {
       const m = state.monitors.find((x) => x.id === Number(id));
       if (!m) throw new Error("Cannot read properties of null (reading 'toJSON')");
-      return { ok: true, monitor: structuredClone(m) };
+      return { ok: true, monitor: structuredClone({ ...m, tags: monitorTags(m) }) };
     });
 
     handle("add", (monitor: Monitor) => {
@@ -402,6 +432,88 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
         state.proxies.map((p) => structuredClone(p)),
       );
       return { ok: true, msg: "Deleted" };
+    });
+
+    handle("getTags", () => ({ ok: true, tags: structuredClone(state.tags) }));
+
+    handle("addTag", (tag: { name: string; color: string }) => {
+      const row: TagRow = {
+        id: Math.max(0, ...state.tags.map((t) => t.id)) + 1,
+        name: tag.name,
+        color: tag.color,
+      };
+      state.tags.push(row);
+      return { ok: true, tag: structuredClone(row) };
+    });
+
+    handle("editTag", (tag: { id: number; name: string; color: string }) => {
+      const row = state.tags.find((t) => t.id === Number(tag.id));
+      if (!row) return { ok: false, msg: "Tag not found" };
+      row.name = tag.name;
+      row.color = tag.color;
+      // the monitor_tag⋈tag join reads name/color live
+      for (const m of state.monitors) {
+        for (const t of tagsOf(m)) {
+          if (t.tag_id === row.id) {
+            t.name = row.name;
+            t.color = row.color;
+          }
+        }
+      }
+      return { ok: true, msg: "Saved", tag: structuredClone(row) };
+    });
+
+    // Kuma 1.23 answers ok even for an unknown id: the DELETE affects 0 rows;
+    // monitor_tag rows cascade with the tag
+    handle("deleteTag", (id: number) => {
+      state.tags = state.tags.filter((t) => t.id !== Number(id));
+      for (const m of state.monitors) {
+        m.tags = tagsOf(m).filter((t) => t.tag_id !== Number(id));
+      }
+      return { ok: true, msg: "Deleted Successfully." };
+    });
+
+    // monitor_tag has no unique constraint: the same tag+value can be attached twice
+    handle("addMonitorTag", (tagID: number, monitorID: number, value: string | null) => {
+      const tag = state.tags.find((t) => t.id === Number(tagID));
+      const monitor = state.monitors.find((m) => m.id === Number(monitorID));
+      // foreign keys are on, so an unknown tag or monitor fails inside SQLite
+      if (!tag || !monitor) throw new Error("FOREIGN KEY constraint failed");
+      const rows = tagsOf(monitor);
+      rows.push({
+        id: nextMonitorTagId(),
+        monitor_id: monitor.id,
+        tag_id: tag.id,
+        value: value ?? null,
+        name: tag.name,
+        color: tag.color,
+      });
+      monitor.tags = rows;
+      return { ok: true, msg: "Added Successfully." };
+    });
+
+    // UPDATE ... WHERE tag_id AND monitor_id rewrites the value on every row of
+    // that tag on the monitor and answers ok even when nothing matches
+    handle("editMonitorTag", (tagID: number, monitorID: number, value: string | null) => {
+      const monitor = state.monitors.find((m) => m.id === Number(monitorID));
+      if (monitor) {
+        for (const t of tagsOf(monitor)) {
+          if (t.tag_id === Number(tagID)) t.value = value ?? null;
+        }
+      }
+      return { ok: true, msg: "Edited Successfully." };
+    });
+
+    // DELETE ... WHERE tag_id AND monitor_id AND value answers ok even when
+    // nothing matches; `value = ?` never matches a stored NULL
+    handle("deleteMonitorTag", (tagID: number, monitorID: number, value: string | null) => {
+      const monitor = state.monitors.find((m) => m.id === Number(monitorID));
+      if (monitor && value != null) {
+        monitor.tags = tagsOf(monitor).filter(
+          (t) => !(t.tag_id === Number(tagID) && t.value === value),
+        );
+      }
+      return { ok: true, msg: "Deleted Successfully." };
     });
   });
 

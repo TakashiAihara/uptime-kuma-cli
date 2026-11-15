@@ -555,6 +555,33 @@ function validateFinalMonitor(
   }
 }
 
+// monitor.tags rows are the monitor_tag⋈tag join the server sends:
+// { id, monitor_id, tag_id, value, name, color }
+type MonitorTagRow = {
+  tag_id?: unknown;
+  value?: unknown;
+  name?: unknown;
+};
+
+function monitorTags(monitor: Record<string, unknown>): MonitorTagRow[] {
+  const tags = monitor.tags;
+  return Array.isArray(tags) ? (tags as MonitorTagRow[]) : [];
+}
+
+const tagJson = (t: MonitorTagRow) => ({
+  tagId: t.tag_id ?? null,
+  name: t.name ?? null,
+  value: t.value ?? null,
+});
+
+// --tag takes <tagId> or <tagId>:<value>; the value may contain colons and
+// defaults to "" like monitors tag --value.
+function parseMonitorTag(raw: string): { tagId: number; value: string } {
+  const colon = raw.indexOf(":");
+  const idPart = colon === -1 ? raw : raw.slice(0, colon);
+  return { tagId: parseId(idPart, "--tag"), value: colon === -1 ? "" : raw.slice(colon + 1) };
+}
+
 const summarize = (m: Monitor) => ({
   id: m.id,
   name: m.name,
@@ -566,6 +593,7 @@ const summarize = (m: Monitor) => ({
   interval: m.interval ?? null,
   parent: m.parent ?? null,
   notificationIDList: notificationIdArray(m.notificationIDList),
+  tags: monitorTags(m).map(tagJson),
 });
 
 export function registerMonitors(program: Command): void {
@@ -575,10 +603,18 @@ export function registerMonitors(program: Command): void {
     .command("list")
     .description("List monitors")
     .option("--name <substring>", "filter by name (case-insensitive)")
+    .option("--tag <name>", "filter by tag name (exact, case-sensitive)")
     .action(async (opts) => {
       const s = await connect();
       const needle = typeof opts.name === "string" ? opts.name.toLowerCase() : undefined;
-      const items = s.monitors().filter((m) => !needle || m.name.toLowerCase().includes(needle));
+      const tagName = typeof opts.tag === "string" ? opts.tag : undefined;
+      const items = s
+        .monitors()
+        .filter(
+          (m) =>
+            (!needle || m.name.toLowerCase().includes(needle)) &&
+            (tagName === undefined || monitorTags(m).some((t) => t.name === tagName)),
+        );
       printJson(items.map(summarize));
     });
 
@@ -593,6 +629,7 @@ export function registerMonitors(program: Command): void {
       printJson({
         ...redactSecrets(m),
         notificationIDList: notificationIdArray(m.notificationIDList),
+        tags: monitorTags(m).map(tagJson),
       });
     });
 
@@ -659,6 +696,7 @@ export function registerMonitors(program: Command): void {
     .option("--parent <groupId>", "parent group monitor id")
     .option("--paused", "create the monitor paused")
     .option("--push-token <token>", "push token (push type)")
+    .option("--tag <tagId[:value]>", "attach a tag (repeatable)", collect, [])
     .option("--set <key=value>", "set a monitor field (repeatable)", collect, [])
     .option("--config-file <path>", "JSON file of monitor fields")
     .action(async (opts) => {
@@ -837,6 +875,7 @@ export function registerMonitors(program: Command): void {
         opts.notificationsFrom === undefined
           ? undefined
           : parseId(opts.notificationsFrom, "--notifications-from");
+      const tagSpecs = ((opts.tag ?? []) as string[]).map(parseMonitorTag);
 
       const s = await connect();
       const name = opts.name as string;
@@ -844,6 +883,15 @@ export function registerMonitors(program: Command): void {
       if (existing) {
         printJson({ id: existing.id, name: existing.name, skipped: true });
         fail(3, "");
+      }
+      const tagNames = new Map<number, string>();
+      if (tagSpecs.length > 0) {
+        const available = await s.tags();
+        for (const spec of tagSpecs) {
+          const tag = available.find((t) => t.id === spec.tagId);
+          if (!tag) fail(1, `tag ${spec.tagId} not found`);
+          tagNames.set(spec.tagId, tag.name);
+        }
       }
 
       const ids: number[] = s
@@ -983,6 +1031,25 @@ export function registerMonitors(program: Command): void {
         out.pushToken = pushToken;
         out.pushUrl = `${pushBase}/api/push/${encodeURIComponent(pushToken)}?status=up&msg=OK&ping=`;
       }
+      if (tagSpecs.length > 0) {
+        const attached: Record<string, unknown>[] = [];
+        try {
+          for (const spec of tagSpecs) {
+            await s.request("addMonitorTag", [spec.tagId, out.id, spec.value]);
+            attached.push({
+              tagId: spec.tagId,
+              name: tagNames.get(spec.tagId) ?? null,
+              value: spec.value,
+            });
+          }
+        } catch (err) {
+          // The monitor exists; report which tags were attached before failing.
+          out.tags = attached;
+          printJson(out);
+          throw err;
+        }
+        out.tags = attached;
+      }
       printJson(out);
     });
 
@@ -1061,6 +1128,7 @@ export function registerMonitors(program: Command): void {
       printJson({
         ...redactSecrets(saved),
         notificationIDList: notificationIdArray(saved.notificationIDList),
+        tags: monitorTags(saved).map(tagJson),
       });
     });
 
@@ -1091,6 +1159,75 @@ export function registerMonitors(program: Command): void {
       if (!s.monitorById(id)) fail(1, `monitor ${id} not found`);
       await s.request("deleteMonitor", [id]);
       printJson({ id, deleted: true });
+    });
+
+  monitors
+    .command("tag <id>")
+    .description("Attach a tag to a monitor")
+    .requiredOption("--tag <tagId>", "tag id")
+    .option("--value <value>", "tag value")
+    .action(async (rawId, opts) => {
+      const id = parseId(rawId, "monitor id");
+      const tagId = parseId(opts.tag, "--tag");
+      const value = opts.value ?? "";
+      const s = await connect();
+      const monitor = s.monitorById(id);
+      if (!monitor) fail(1, `monitor ${id} not found`);
+      if (!(await s.tags()).some((t) => t.id === tagId)) fail(1, `tag ${tagId} not found`);
+      // addMonitorTag has no unique constraint, but the same tag+value twice is meaningless
+      if (monitorTags(monitor).some((t) => t.tag_id === tagId && t.value === value)) {
+        printJson({ id, tagId, value, skipped: true });
+        fail(3, "");
+      }
+      await s.request("addMonitorTag", [tagId, id, value]);
+      printJson({ id, tagId, value });
+    });
+
+  monitors
+    .command("untag <id>")
+    .description("Detach a tag from a monitor")
+    .requiredOption("--tag <tagId>", "tag id")
+    .option("--value <value>", "tag value")
+    .action(async (rawId, opts) => {
+      const id = parseId(rawId, "monitor id");
+      const tagId = parseId(opts.tag, "--tag");
+      const value = opts.value ?? "";
+      const s = await connect();
+      const monitor = s.monitorById(id);
+      if (!monitor) fail(1, `monitor ${id} not found`);
+      const attached = monitorTags(monitor).filter((t) => t.tag_id === tagId);
+      if (!attached.some((t) => t.value === value)) {
+        // deleteMonitorTag matches with `value = ?`, which never matches a stored
+        // NULL; only the default "" request can be aiming at such a row
+        if (value === "" && attached.some((t) => t.value === null)) {
+          fail(
+            1,
+            `tag ${tagId} on monitor ${id} has a null value; deleteMonitorTag cannot match it`,
+          );
+        }
+        fail(1, `monitor ${id} does not have tag ${tagId} with value ${JSON.stringify(value)}`);
+      }
+      await s.request("deleteMonitorTag", [tagId, id, value]);
+      printJson({ id, tagId, value, removed: true });
+    });
+
+  monitors
+    .command("retag <id>")
+    .description("Change the value of a tag on a monitor")
+    .requiredOption("--tag <tagId>", "tag id")
+    .requiredOption("--value <value>", "new tag value")
+    .action(async (rawId, opts) => {
+      const id = parseId(rawId, "monitor id");
+      const tagId = parseId(opts.tag, "--tag");
+      const value = opts.value as string;
+      const s = await connect();
+      const monitor = s.monitorById(id);
+      if (!monitor) fail(1, `monitor ${id} not found`);
+      if (!monitorTags(monitor).some((t) => t.tag_id === tagId)) {
+        fail(1, `monitor ${id} does not have tag ${tagId}`);
+      }
+      await s.request("editMonitorTag", [tagId, id, value]);
+      printJson({ id, tagId, value });
     });
 }
 

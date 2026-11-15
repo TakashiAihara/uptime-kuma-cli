@@ -193,7 +193,7 @@ describe("meta", () => {
   test("--help lists the command groups", async () => {
     const r = await run(sb, ["--help"]);
     expect(r.code).toBe(0);
-    for (const word of ["monitors", "beats", "events", "notifications", "proxies"])
+    for (const word of ["monitors", "beats", "events", "notifications", "proxies", "tags"])
       expect(r.stdout).toContain(word);
   });
 
@@ -202,7 +202,7 @@ describe("meta", () => {
     expect(r.code).toBe(2);
   });
 
-  test.each([[[]], [["monitors"]], [["notifications"]], [["proxies"]]])(
+  test.each([[[]], [["monitors"]], [["notifications"]], [["proxies"]], [["tags"]]])(
     "no subcommand %p exits 2 with help on stderr",
     async (args) => {
       const r = await run(sb, args, creds(kuma.url));

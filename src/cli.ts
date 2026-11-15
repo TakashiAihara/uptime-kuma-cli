@@ -4,6 +4,7 @@ import { registerBeats, registerEvents } from "./commands/beats.ts";
 import { registerMonitors } from "./commands/monitors.ts";
 import { registerNotifications } from "./commands/notifications.ts";
 import { registerProxies } from "./commands/proxies.ts";
+import { registerTags } from "./commands/tags.ts";
 import { disconnect } from "./kuma.ts";
 import { CliError } from "./lib.ts";
 import { VERSION } from "./version.ts";
@@ -20,6 +21,7 @@ registerBeats(program);
 registerEvents(program);
 registerNotifications(program);
 registerProxies(program);
+registerTags(program);
 
 let exitCode = 0;
 try {

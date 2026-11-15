@@ -1,6 +1,6 @@
 # uptime-kuma-cli
 
-CLI for Uptime Kuma 1.23 over its Socket.IO API: monitors, beats, status changes, notifications and proxies.
+CLI for Uptime Kuma 1.23 over its Socket.IO API: monitors, beats, status changes, notifications, proxies and tags.
 
 Existing CLIs cover monitors but not proxies, notification tests, or status changes; see `docs/design/cli.md` for the comparison and the full specification.
 
@@ -49,6 +49,7 @@ All output is JSON on stdout.
 
 ```sh
 uptime-kuma-cli monitors list --name taba
+uptime-kuma-cli monitors list --tag prod
 uptime-kuma-cli monitors get 14
 uptime-kuma-cli monitors add --type http --name "docs" --url https://docs.example.com --notifications-from 14
 uptime-kuma-cli monitors add --type keyword --name "login page" --url https://example.com/login --keyword "Sign in"
@@ -69,6 +70,9 @@ uptime-kuma-cli monitors edit 14 --parent none
 uptime-kuma-cli monitors pause 14
 uptime-kuma-cli monitors resume 14
 uptime-kuma-cli monitors delete 14 --yes
+uptime-kuma-cli monitors tag 14 --tag 3 --value eu
+uptime-kuma-cli monitors untag 14 --tag 3 --value eu
+uptime-kuma-cli monitors retag 14 --tag 3 --value us
 
 uptime-kuma-cli beats 14 --hours 6 --limit 20
 uptime-kuma-cli beats latest
@@ -84,9 +88,14 @@ uptime-kuma-cli proxies list
 uptime-kuma-cli proxies add --protocol socks5 --host 10.0.0.9 --port 1080
 uptime-kuma-cli proxies edit 2 --set port=1081 --password-file proxy-pw
 uptime-kuma-cli proxies delete 2 --yes
+
+uptime-kuma-cli tags list
+uptime-kuma-cli tags add --name prod --color "#22c55e"
+uptime-kuma-cli tags edit 3 --name production
+uptime-kuma-cli tags delete 3 --yes
 ```
 
-- `monitors add` exits 3 and sends nothing when a monitor with the same name exists
+- `monitors add` and `tags add` exit 3 and send nothing when the same name exists; `monitors tag` exits 3 when the same tag+value is already attached. `monitors add --tag <id[:value]>` attaches tags at creation
 - Push monitors get their token in the same `add` call; the output carries `pushToken` and `pushUrl`
 - `--paused` creates the monitor without starting it (push to a paused monitor returns HTTP 404, so resume before the pusher starts)
 - Kuma only notifies on status changes; with `resendInterval` 0 a monitor that stays down does not notify again
@@ -102,7 +111,7 @@ uptime-kuma-cli proxies delete 2 --yes
 | 0 | Done |
 | 1 | Kuma answered no (`ok: false`, unknown id) |
 | 2 | Configuration, usage, connection, login or timeout failure |
-| 3 | `monitors add` skipped: same name exists |
+| 3 | A create or attach was skipped: same name / same tag+value exists |
 | 70 | Unexpected error |
 
 ## Integration tests

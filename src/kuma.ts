@@ -103,6 +103,12 @@ export interface DockerHostRow extends Record<string, unknown> {
   id: number;
 }
 
+export interface TagRow extends Record<string, unknown> {
+  id: number;
+  name: string;
+  color: string;
+}
+
 type BeatRow = Record<string, unknown>;
 
 let currentSocket: Socket | undefined;
@@ -183,6 +189,14 @@ export class KumaSession {
 
   dockerHosts(): DockerHostRow[] {
     return [...this.dockerHostList].sort((a, b) => a.id - b.id);
+  }
+
+  // getTags is a request event: Kuma 1.23 does not push a tag list after login.
+  async tags(): Promise<TagRow[]> {
+    const res = await this.request("getTags");
+    const tags = res?.tags;
+    if (!Array.isArray(tags)) fail(70, "unexpected getTags response");
+    return tags as TagRow[];
   }
 
   heartbeat(id: number): BeatRow[] | undefined {
