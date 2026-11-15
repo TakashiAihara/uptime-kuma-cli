@@ -160,6 +160,10 @@ export type FakeState = {
   // monitor ids that exist but stay out of the login monitorList push, like
   // monitors created after this socket logged in
   unlistedMonitors: number[];
+  // which Kuma the fake mimics: "1.23" is the 1.23.17 wire behaviour, "2.x"
+  // the 2.5.11 one (versioned info before the login answer, NOT NULL
+  // conditions on add)
+  profile: "1.23" | "2.x";
   // the info payload: sent on connection with the version fields (and 2.x's
   // dbType / runtime) hidden, and in full after login; null sends no info at all
   info: Record<string, unknown> | null;
@@ -315,6 +319,7 @@ const ADD_KEYS = new Set([
 ]);
 
 export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<FakeKuma> {
+  const profile2x = init.profile === "2.x";
   const state: FakeState = {
     username: "admin",
     password: "pw-from-test",
@@ -339,14 +344,26 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     maintenanceStatusPages: {},
     skipLists: [],
     unlistedMonitors: [],
-    info: {
-      version: "1.23.17",
-      latestVersion: "1.23.17",
-      primaryBaseURL: null,
-      serverTimezone: "UTC",
-      serverTimezoneOffset: "+00:00",
-    },
-    infoBeforeLoginAck: false,
+    profile: "1.23",
+    info: profile2x
+      ? {
+          version: "2.5.11",
+          latestVersion: "2.5.11",
+          primaryBaseURL: null,
+          serverTimezone: "UTC",
+          serverTimezoneOffset: "+00:00",
+          isContainer: true,
+          dbType: "sqlite",
+          runtime: { platform: "linux", arch: "x64" },
+        }
+      : {
+          version: "1.23.17",
+          latestVersion: "1.23.17",
+          primaryBaseURL: null,
+          serverTimezone: "UTC",
+          serverTimezoneOffset: "+00:00",
+        },
+    infoBeforeLoginAck: profile2x,
     infoDelayMs: 0,
     fail: {},
     silentHeartbeat: [],
@@ -760,6 +777,15 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     });
 
     handle("add", (monitor: Monitor) => {
+      // 2.x's monitor.conditions is NOT NULL and the handler stringifies it
+      // before storing, so a missing value fails the insert ahead of the
+      // unknown-column check below
+      if (
+        state.profile === "2.x" &&
+        (monitor.conditions === undefined || monitor.conditions === null)
+      ) {
+        throw new Error("SQLITE_CONSTRAINT: NOT NULL constraint failed: monitor.conditions");
+      }
       const unknown = Object.keys(monitor).filter((k) => !ADD_KEYS.has(k));
       if (unknown.length)
         throw new Error(`SQLITE_ERROR: table monitor has no column named ${unknown[0]}`);

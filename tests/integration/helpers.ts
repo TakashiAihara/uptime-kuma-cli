@@ -1,4 +1,10 @@
+import { parseMajorVersion } from "../../src/kuma";
 import { run, type Result, type Sandbox } from "../helpers/run";
+
+// Tests that 2.x breaks until the named issue lands are skipped with
+// skipIf(on2x); the fix removes the skip.
+export const itMajor = parseMajorVersion(process.env.UPTIME_KUMA_IT_KUMA_VERSION);
+export const on2x = itMajor >= 2;
 
 // Every CLI invocation logs in once and Kuma 1.23 allows 20 logins per minute
 // for the whole instance, so invocation starts are paced to stay under it.

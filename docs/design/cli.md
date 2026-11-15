@@ -216,7 +216,7 @@
 ## Tests
 
 - `bun test` runs the unit tests in `tests/` against `tests/helpers/fake-kuma.ts`, an in-process Socket.IO server that mimics Kuma 1.23.17
-- `bun run test:integration` (`scripts/integration.ts`) runs `tests/integration/` — the same CLI — against a real `louislam/uptime-kuma:1.23.17` container from `tests/integration/compose.yaml`; it needs Docker
+- `bun run test:integration` (`scripts/integration.ts`) runs `tests/integration/` — the same CLI — against a real `louislam/uptime-kuma:1.23.17` container from `tests/integration/compose.yaml` (or the image in `UPTIME_KUMA_IT_IMAGE`; CI also runs 2.5.11, where tests marked `skipIf(on2x)` with their issue number are skipped); it needs Docker
 
 ## Not in scope
 
