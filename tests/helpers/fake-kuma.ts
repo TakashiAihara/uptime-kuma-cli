@@ -122,6 +122,8 @@ export type FakeState = {
   // the route caches per req.url for 5 minutes like apicache; requests after
   // the first N answer 500 (0 disables) so tests can fail a later read
   statusPageApiFailAfter: number;
+  // answers the requests after the first N with a body missing publicGroupList
+  statusPageApiMalformedAfter: number;
   // req.url values the route saw, in order
   apiRequests: string[];
   // postIncident answer override; null uses the stored-incident answer
@@ -271,6 +273,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     statusPageApiStatus: 200,
     statusPageApiBody: undefined,
     statusPageApiFailAfter: 0,
+    statusPageApiMalformedAfter: 0,
     apiRequests: [],
     postIncidentResult: null,
     maintenances: [],
@@ -1160,6 +1163,11 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     if (page === undefined || status !== 200) {
       status = page === undefined ? 404 : status;
       body = JSON.stringify({ status: "fail", msg: "Not Found" });
+    } else if (
+      state.statusPageApiMalformedAfter > 0 &&
+      state.apiRequests.length > state.statusPageApiMalformedAfter
+    ) {
+      body = JSON.stringify({ config: {}, incident: null });
     } else if (state.statusPageApiBody !== undefined) {
       body = JSON.stringify(state.statusPageApiBody);
     } else {

@@ -841,7 +841,10 @@ describe("status-pages", () => {
     test("a failed getStatusPage read-back exits 0 with a warning", async () => {
       // the first getStatusPage (pre-save) passes, the read-back fails
       kuma.state.fail.getStatusPage = [null, "Read-back failed"];
-      const f = writeJson("page.json", { title: "x" });
+      const f = writeJson("page.json", {
+        title: "x",
+        publicGroupList: [{ name: "Core", monitorList: [{ id: 5 }] }],
+      });
       const r = await run(
         sb,
         ["status-pages", "save", "status", "--config-file", f],
@@ -851,9 +854,24 @@ describe("status-pages", () => {
       const j = r.json();
       expect(j.title).toBe("x");
       expect(j.slug).toBe("status");
-      expect(j.publicGroupList).toEqual([]);
+      // the save response's groups carry the ids Kuma assigned
+      expect(j.publicGroupList).toHaveLength(1);
+      expect(j.publicGroupList[0].name).toBe("Core");
+      expect(typeof j.publicGroupList[0].id).toBe("number");
       expect(j.incident).toBeNull();
       expect(r.stderr).toContain("Read-back failed");
+    });
+
+    test("an unexpected read-back shape after the save still exits 70", async () => {
+      kuma.state.statusPageApiMalformedAfter = 1;
+      const f = writeJson("page.json", { title: "x" });
+      const r = await run(
+        sb,
+        ["status-pages", "save", "status", "--config-file", f],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(70);
+      expect(callsOf("saveStatusPage")).toHaveLength(1);
     });
 
     test("a failed public-route read-back exits 0 with a warning", async () => {

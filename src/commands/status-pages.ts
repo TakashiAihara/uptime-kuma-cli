@@ -384,7 +384,8 @@ export function registerStatusPages(program: Command): void {
         const { publicGroupList, incident } = await fetchPublicStatusPage(s, newSlug);
         printJson({ ...config, publicGroupList, incident });
       } catch (e) {
-        if (!(e instanceof CliError)) throw e;
+        // exit 70 is an unexpected response shape, not a failed read: keep it loud
+        if (!(e instanceof CliError) || e.exitCode === 70) throw e;
         printJson({ ...merged, publicGroupList: savedGroups, incident: null });
         console.error(
           `warning: status page ${newSlug} was saved, but reading it back failed: ${e.message}`,
