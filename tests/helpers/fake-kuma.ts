@@ -100,6 +100,12 @@ export type FakeState = {
   // monitor_maintenance and maintenance_status_page join tables)
   maintenanceMonitors: Record<number, number[]>;
   maintenanceStatusPages: Record<number, number[]>;
+  // login push names withheld from this socket; proves commands only wait for
+  // the lists they read
+  skipLists: string[];
+  // monitor ids that exist but stay out of the login monitorList push, like
+  // monitors created after this socket logged in
+  unlistedMonitors: number[];
   // event name -> msg; the next call to that event answers { ok: false, msg }.
   // an array arms one outcome per call in order; a null entry lets that call through
   fail: Record<string, string | (string | null)[]>;
@@ -221,6 +227,8 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     maintenances: [],
     maintenanceMonitors: {},
     maintenanceStatusPages: {},
+    skipLists: [],
+    unlistedMonitors: [],
     fail: {},
     silentHeartbeat: [],
     testNotificationResult: { ok: true, msg: "Sent Successfully." },
@@ -248,6 +256,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
   const monitorList = () => {
     const out: Record<string, Monitor> = {};
     for (const m of state.monitors) {
+      if (state.unlistedMonitors.includes(m.id)) continue;
       out[String(m.id)] = structuredClone({ ...m, tags: monitorTags(m) });
     }
     return out;
@@ -444,25 +453,36 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
           socket.disconnect(true);
           return;
         }
-        socket.emit("monitorList", monitorList());
-        socket.emit("maintenanceList", maintenanceListJSON());
-        socket.emit(
-          "notificationList",
-          state.notifications.map((n) => structuredClone(n)),
+        const push = (name: string, emit: () => void) => {
+          if (!state.skipLists.includes(name)) emit();
+        };
+        push("monitorList", () => socket.emit("monitorList", monitorList()));
+        push("maintenanceList", () => socket.emit("maintenanceList", maintenanceListJSON()));
+        push("notificationList", () =>
+          socket.emit(
+            "notificationList",
+            state.notifications.map((n) => structuredClone(n)),
+          ),
         );
-        socket.emit(
-          "proxyList",
-          state.proxies.map((p) => structuredClone(p)),
+        push("proxyList", () =>
+          socket.emit(
+            "proxyList",
+            state.proxies.map((p) => structuredClone(p)),
+          ),
         );
-        socket.emit(
-          "dockerHostList",
-          state.dockerHosts.map((h) => structuredClone(h)),
+        push("dockerHostList", () =>
+          socket.emit(
+            "dockerHostList",
+            state.dockerHosts.map((h) => structuredClone(h)),
+          ),
         );
         // Kuma pushes this one ~500ms after the other lists (afterLogin sleeps
         // first); the fake sends it in the same batch, the CLI waits either way
-        socket.emit(
-          "statusPageList",
-          Object.fromEntries(state.statusPages.map((p) => [String(p.id), structuredClone(p)])),
+        push("statusPageList", () =>
+          socket.emit(
+            "statusPageList",
+            Object.fromEntries(state.statusPages.map((p) => [String(p.id), structuredClone(p)])),
+          ),
         );
         for (const m of state.monitors) {
           if (state.silentHeartbeat.includes(m.id)) continue;

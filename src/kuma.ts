@@ -155,11 +155,11 @@ export class KumaSession {
     readonly url: string,
     private readonly timeoutMs: number,
     readonly monitorList: Record<string, Monitor>,
-    readonly maintenanceList: Record<string, MaintenanceRow>,
+    readonly maintenanceList: Record<string, MaintenanceRow> | undefined,
     readonly notificationList: NotificationRow[],
     readonly proxyList: ProxyRow[],
     readonly dockerHostList: DockerHostRow[],
-    readonly statusPageList: Record<string, StatusPageRow>,
+    readonly statusPageList: Record<string, StatusPageRow> | undefined,
     readonly heartbeats: Map<number, BeatRow[]>,
     private readonly disconnected: Promise<never>,
   ) {}
@@ -182,7 +182,9 @@ export class KumaSession {
   }
 
   maintenances(): MaintenanceRow[] {
-    return Object.values(this.maintenanceList).sort((a, b) => a.id - b.id);
+    const list = this.maintenanceList;
+    if (list === undefined) fail(70, "maintenanceList was not awaited");
+    return Object.values(list).sort((a, b) => a.id - b.id);
   }
 
   maintenanceById(id: number): MaintenanceRow | undefined {
@@ -210,7 +212,9 @@ export class KumaSession {
   }
 
   statusPages(): StatusPageRow[] {
-    return Object.values(this.statusPageList).sort((a, b) => a.id - b.id);
+    const list = this.statusPageList;
+    if (list === undefined) fail(70, "statusPageList was not awaited");
+    return Object.values(list).sort((a, b) => a.id - b.id);
   }
 
   statusPageById(id: number): StatusPageRow | undefined {
@@ -243,7 +247,15 @@ export class KumaSession {
   }
 }
 
-export async function connect(): Promise<KumaSession> {
+// monitorList, notificationList, proxyList and dockerHostList are pushed in
+// the same tick right after login, so every command waits for them. The
+// maintenance commands additionally name the lists they read: maintenanceList
+// for the window itself and statusPageList for the status-pages attach —
+// statusPageList arrives ~500ms later (afterLogin sleeps first), so waiting
+// for it unconditionally would add that latency to every command.
+export async function connect(
+  extraLists: readonly ("maintenanceList" | "statusPageList")[] = [],
+): Promise<KumaSession> {
   const timeoutMs = socketTimeoutMs();
   const { url, username, password } = await resolveCredentials();
   const socket = io(url, {
@@ -327,37 +339,38 @@ export async function connect(): Promise<KumaSession> {
     fail(2, msg);
   }
 
-  // statusPageList is pushed ~500ms after the other lists (afterLogin sleeps
-  // first), so it gets the same wait.
+  const wanted = new Set<keyof typeof pushed>([
+    "monitorList",
+    "notificationList",
+    "proxyList",
+    "dockerHostList",
+    ...extraLists,
+  ]);
   const listsDeadline = Date.now() + timeoutMs;
-  while (
-    !pushed.monitorList ||
-    !pushed.maintenanceList ||
-    !pushed.notificationList ||
-    !pushed.proxyList ||
-    !pushed.dockerHostList ||
-    !pushed.statusPageList
-  ) {
+  for (;;) {
+    const missing = [...wanted].filter((name) => pushed[name] === undefined);
+    if (missing.length === 0) break;
     if (Date.now() >= listsDeadline) {
-      fail(
-        2,
-        "timed out waiting for pushed monitor/maintenance/notification/proxy/docker host/status page lists",
-      );
+      fail(2, `timed out waiting for pushed lists: ${missing.join(", ")}`);
     }
     await Promise.race([sleep(10), disconnected]);
   }
-  const lists = pushed as Required<typeof pushed>;
+  const present = <K extends keyof typeof pushed>(name: K): NonNullable<(typeof pushed)[K]> => {
+    const value = pushed[name];
+    if (value === undefined) fail(70, `pushed ${name} missing after the wait`);
+    return value;
+  };
 
   return new KumaSession(
     socket,
     url,
     timeoutMs,
-    lists.monitorList,
-    lists.maintenanceList,
-    lists.notificationList,
-    lists.proxyList,
-    lists.dockerHostList,
-    lists.statusPageList,
+    present("monitorList"),
+    wanted.has("maintenanceList") ? present("maintenanceList") : undefined,
+    present("notificationList"),
+    present("proxyList"),
+    present("dockerHostList"),
+    wanted.has("statusPageList") ? present("statusPageList") : undefined,
     heartbeats,
     disconnected,
   );

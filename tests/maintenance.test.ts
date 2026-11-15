@@ -26,7 +26,7 @@ beforeEach(async () => {
         strategy: "single",
         intervalDay: 1,
         active: true,
-        dateRange: ["2030-01-01T02:00:00Z", "2030-01-01T04:00:00Z"],
+        dateRange: ["2030-01-01T02:00:00", "2030-01-01T04:00:00"],
         timezoneOption: "SAME_AS_SERVER",
       },
       {
@@ -76,6 +76,13 @@ describe("maintenance", () => {
       const r = await run(sb, ["maintenance", "list"], creds(kuma.url));
       expect(r.code).toBe(0);
       expect(r.json()).toEqual([]);
+    });
+
+    test("waits for the maintenanceList push", async () => {
+      kuma.state.skipLists = ["maintenanceList"];
+      const r = await run(sb, ["maintenance", "list"], creds(kuma.url));
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("maintenanceList");
     });
   });
 
@@ -196,9 +203,9 @@ describe("maintenance", () => {
           "--strategy",
           "single",
           "--start",
-          "2031-05-05T10:00:00Z",
+          "2031-05-05T10:00:00",
           "--end",
-          "2031-05-05T12:30:00Z",
+          "2031-05-05T12:30:00",
           "--timezone",
           "Asia/Tokyo",
           "--description",
@@ -210,7 +217,7 @@ describe("maintenance", () => {
       expect(r.code).toBe(0);
       expect(r.json()).toEqual({ id: 3, title: "Window", strategy: "single", active: false });
       const sent = callsOf("addMaintenance")[0]!.args[0] as Record<string, unknown>;
-      expect(sent.dateRange).toEqual(["2031-05-05T10:00:00Z", "2031-05-05T12:30:00Z"]);
+      expect(sent.dateRange).toEqual(["2031-05-05T10:00:00", "2031-05-05T12:30:00"]);
       expect(sent.timezoneOption).toBe("Asia/Tokyo");
       expect(sent.description).toBe("desc");
       expect(sent.active).toBe(false);
@@ -249,7 +256,7 @@ describe("maintenance", () => {
           "--strategy",
           "single",
           "--start",
-          "2031-05-05T10:00:00Z",
+          "2031-05-05T10:00:00",
         ],
         creds(kuma.url),
       );
@@ -280,9 +287,9 @@ describe("maintenance", () => {
           "--strategy",
           "single",
           "--start",
-          "2031-05-05T12:00:00Z",
+          "2031-05-05T12:00:00",
           "--end",
-          "2031-05-05T10:00:00Z",
+          "2031-05-05T10:00:00",
         ],
         creds(kuma.url),
       );
@@ -291,7 +298,7 @@ describe("maintenance", () => {
       expect(kuma.calls).toHaveLength(0);
     });
 
-    test.each(["tomorrow", "2031-05-05", "2031-05-05 10:00", "2031-13-05T10:00:00Z"])(
+    test.each(["tomorrow", "2031-05-05", "2031-05-05 10:00", "2031-13-05T10:00:00"])(
       "single rejects --start %p with exit 2 before connecting",
       async (start) => {
         const r = await run(
@@ -306,7 +313,7 @@ describe("maintenance", () => {
             "--start",
             start,
             "--end",
-            "2031-05-06T10:00:00Z",
+            "2031-05-06T10:00:00",
           ],
           creds(kuma.url),
         );
@@ -326,12 +333,123 @@ describe("maintenance", () => {
           "--strategy",
           "manual",
           "--start",
-          "2031-05-05T10:00:00Z",
+          "2031-05-05T10:00:00",
         ],
         creds(kuma.url),
       );
       expect(r.code).toBe(2);
-      expect(r.stderr).toContain("only apply to --strategy single");
+      expect(r.stderr).toContain("do not apply to --strategy manual");
+      expect(kuma.calls).toHaveLength(0);
+    });
+
+    test.each(["2031-05-05T10:00:00Z", "2031-05-05T10:00:00+09:00", "2031-05-05T10:00:00-0500"])(
+      "--start %p with an offset exits 2 before connecting",
+      async (start) => {
+        const r = await run(
+          sb,
+          [
+            "maintenance",
+            "add",
+            "--title",
+            "w",
+            "--strategy",
+            "single",
+            "--start",
+            start,
+            "--end",
+            "2031-05-06T10:00:00",
+          ],
+          creds(kuma.url),
+        );
+        expect(r.code).toBe(2);
+        expect(r.stderr).toContain("local time in the maintenance timezone");
+        expect(r.stderr).toContain(start);
+        expect(kuma.calls).toHaveLength(0);
+      },
+    );
+
+    test("--end with an offset exits 2 before connecting", async () => {
+      const r = await run(
+        sb,
+        [
+          "maintenance",
+          "add",
+          "--title",
+          "w",
+          "--strategy",
+          "single",
+          "--start",
+          "2031-05-05T10:00:00",
+          "--end",
+          "2031-05-06T10:00:00Z",
+        ],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("local time in the maintenance timezone");
+      expect(r.stderr).toContain("2031-05-06T10:00:00Z");
+      expect(kuma.calls).toHaveLength(0);
+    });
+
+    test("an impossible --start date exits 2 before connecting", async () => {
+      const r = await run(
+        sb,
+        [
+          "maintenance",
+          "add",
+          "--title",
+          "w",
+          "--strategy",
+          "single",
+          "--start",
+          "2026-13-40T10:00",
+          "--end",
+          "2030-01-01T10:00:00",
+        ],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("ISO 8601 local datetime");
+      expect(kuma.calls).toHaveLength(0);
+    });
+
+    test("--start alone is accepted for a non-manual strategy", async () => {
+      const r = await run(
+        sb,
+        [
+          "maintenance",
+          "add",
+          "--title",
+          "w",
+          "--strategy",
+          "cron",
+          "--start",
+          "2032-06-01T10:00:00",
+        ],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(0);
+      const sent = callsOf("addMaintenance")[0]!.args[0] as Record<string, unknown>;
+      expect(sent.dateRange).toEqual(["2032-06-01T10:00:00"]);
+    });
+
+    test("--end alone exits 2 before connecting", async () => {
+      const r = await run(
+        sb,
+        [
+          "maintenance",
+          "add",
+          "--title",
+          "w",
+          "--strategy",
+          "cron",
+          "--end",
+          "2032-06-01T10:00:00",
+        ],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("--end requires --start");
       expect(kuma.calls).toHaveLength(0);
     });
 
@@ -476,17 +594,17 @@ describe("maintenance", () => {
           "edit",
           "2",
           "--start",
-          "2032-01-01T00:00:00Z",
+          "2032-01-01T00:00:00",
           "--end",
-          "2032-01-01T01:00:00Z",
+          "2032-01-01T01:00:00",
         ],
         creds(kuma.url),
       );
       expect(r.code).toBe(0);
       const sent = callsOf("editMaintenance")[0]!.args[0] as Record<string, unknown>;
-      expect(sent.dateRange).toEqual(["2032-01-01T00:00:00Z", "2032-01-01T01:00:00Z"]);
+      expect(sent.dateRange).toEqual(["2032-01-01T00:00:00", "2032-01-01T01:00:00"]);
       const stored = kuma.state.maintenances.find((m) => m.id === 2)!;
-      expect(stored.dateRange).toEqual(["2032-01-01T00:00:00Z", "2032-01-01T01:00:00Z"]);
+      expect(stored.dateRange).toEqual(["2032-01-01T00:00:00", "2032-01-01T01:00:00"]);
       expect(r.json().status).toBe("scheduled");
     });
 
@@ -525,17 +643,35 @@ describe("maintenance", () => {
           "edit",
           "1",
           "--set",
-          'dateRange=["2033-01-01T00:00:00Z","2033-01-01T01:00:00Z"]',
+          'dateRange=["2033-01-01T00:00:00","2033-01-01T01:00:00"]',
         ],
         creds(kuma.url),
       );
       expect(r.code).toBe(0);
       const sent = callsOf("editMaintenance")[0]!.args[0] as Record<string, unknown>;
-      expect(sent.dateRange).toEqual(["2033-01-01T00:00:00Z", "2033-01-01T01:00:00Z"]);
+      expect(sent.dateRange).toEqual(["2033-01-01T00:00:00", "2033-01-01T01:00:00"]);
       expect(kuma.state.maintenances.find((m) => m.id === 1)!.dateRange).toEqual([
-        "2033-01-01T00:00:00Z",
-        "2033-01-01T01:00:00Z",
+        "2033-01-01T00:00:00",
+        "2033-01-01T01:00:00",
       ]);
+    });
+
+    test("--set dateRange with an offset exits 2 without sending editMaintenance", async () => {
+      const r = await run(
+        sb,
+        [
+          "maintenance",
+          "edit",
+          "1",
+          "--set",
+          'dateRange=["2033-01-01T00:00:00Z","2033-01-02T00:00:00"]',
+        ],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("local time in the maintenance timezone");
+      expect(r.stderr).toContain("2033-01-01T00:00:00Z");
+      expect(callsOf("editMaintenance")).toHaveLength(0);
     });
 
     test("a flag wins over a --set of the same field", async () => {
@@ -555,15 +691,43 @@ describe("maintenance", () => {
       expect(kuma.calls).toHaveLength(0);
     });
 
-    test("only --start exits 2 before connecting", async () => {
+    test("--start alone on a manual window exits 2 without sending editMaintenance", async () => {
       const r = await run(
         sb,
-        ["maintenance", "edit", "1", "--start", "2032-01-01T00:00:00Z"],
+        ["maintenance", "edit", "1", "--start", "2032-01-01T00:00:00"],
         creds(kuma.url),
       );
       expect(r.code).toBe(2);
-      expect(r.stderr).toContain("--start and --end");
-      expect(kuma.calls).toHaveLength(0);
+      expect(r.stderr).toContain("do not apply to --strategy manual");
+      expect(callsOf("editMaintenance")).toHaveLength(0);
+    });
+
+    test("--start alone on a single window exits 2 without sending editMaintenance", async () => {
+      const r = await run(
+        sb,
+        ["maintenance", "edit", "2", "--start", "2032-01-01T00:00:00"],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain('strategy "single" requires "dateRange"');
+      expect(callsOf("editMaintenance")).toHaveLength(0);
+    });
+
+    test("--start alone is accepted on a non-manual non-single window", async () => {
+      kuma.state.maintenances[0] = {
+        ...kuma.state.maintenances[0]!,
+        strategy: "cron",
+        cron: "0 4 * * *",
+        duration: 3600,
+      };
+      const r = await run(
+        sb,
+        ["maintenance", "edit", "2", "--start", "2032-06-01T10:00:00"],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(0);
+      const sent = callsOf("editMaintenance")[0]!.args[0] as Record<string, unknown>;
+      expect(sent.dateRange).toEqual(["2032-06-01T10:00:00"]);
     });
 
     test("--set id exits 2 before connecting", async () => {
@@ -573,7 +737,7 @@ describe("maintenance", () => {
       expect(kuma.calls).toHaveLength(0);
     });
 
-    test("--set dateRange to a non-array exits 2 before connecting", async () => {
+    test("--set dateRange to a non-array exits 2 without sending editMaintenance", async () => {
       const r = await run(
         sb,
         ["maintenance", "edit", "1", "--set", "dateRange=5"],
@@ -581,7 +745,7 @@ describe("maintenance", () => {
       );
       expect(r.code).toBe(2);
       expect(r.stderr).toContain("dateRange");
-      expect(kuma.calls).toHaveLength(0);
+      expect(callsOf("editMaintenance")).toHaveLength(0);
     });
 
     test("an unknown id exits 1 without sending getMaintenance or editMaintenance", async () => {
@@ -601,7 +765,7 @@ describe("maintenance", () => {
     test("a bad --start exits 2 before connecting", async () => {
       const r = await run(
         sb,
-        ["maintenance", "edit", "1", "--start", "nope", "--end", "2032-01-01T00:00:00Z"],
+        ["maintenance", "edit", "1", "--start", "nope", "--end", "2032-01-01T00:00:00"],
         creds(kuma.url),
       );
       expect(r.code).toBe(2);
@@ -616,9 +780,9 @@ describe("maintenance", () => {
           "edit",
           "1",
           "--start",
-          "2032-01-02T00:00:00Z",
+          "2032-01-02T00:00:00",
           "--end",
-          "2032-01-01T00:00:00Z",
+          "2032-01-01T00:00:00",
         ],
         creds(kuma.url),
       );
@@ -982,7 +1146,27 @@ describe("maintenance", () => {
       );
       expect(r.code).toBe(2);
       expect(r.stderr).toContain("dateRange");
-      expect(kuma.calls).toHaveLength(0);
+      expect(callsOf("editMaintenance")).toHaveLength(0);
+    });
+
+    test("--set dateRange repairs a bad --config-file dateRange", async () => {
+      const f = writeJson("badrange.json", { dateRange: ["soon", "2030-01-01T00:00:00"] });
+      const r = await run(
+        sb,
+        [
+          "maintenance",
+          "edit",
+          "1",
+          "--config-file",
+          f,
+          "--set",
+          'dateRange=["2033-01-01T00:00:00","2033-01-02T00:00:00"]',
+        ],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(0);
+      const sent = callsOf("editMaintenance")[0]!.args[0] as Record<string, unknown>;
+      expect(sent.dateRange).toEqual(["2033-01-01T00:00:00", "2033-01-02T00:00:00"]);
     });
 
     test("changing the strategy validates the new strategy's fields", async () => {
@@ -1032,6 +1216,17 @@ describe("maintenance", () => {
       expect(callsOf("editMaintenance")).toHaveLength(0);
     });
 
+    test("an empty timezoneOption is accepted", async () => {
+      const r = await run(
+        sb,
+        ["maintenance", "edit", "1", "--set", "timezoneOption="],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(0);
+      const sent = callsOf("editMaintenance")[0]!.args[0] as Record<string, unknown>;
+      expect(sent.timezoneOption).toBe("");
+    });
+
     test("an empty cron expression exits 2 before connecting", async () => {
       const f = writeJson("empty-cron.json", { cron: "", durationMinutes: 30 });
       const r = await run(
@@ -1041,6 +1236,126 @@ describe("maintenance", () => {
       );
       expect(r.code).toBe(2);
       expect(r.stderr).toContain('non-empty "cron"');
+      expect(kuma.calls).toHaveLength(0);
+    });
+
+    test.each(["* * * *", "* * * * * * *", "0 4 * * *!"])(
+      "a malformed cron %p exits 2 before connecting",
+      async (cron) => {
+        const f = writeJson("badshape.json", { cron, durationMinutes: 30 });
+        const r = await run(
+          sb,
+          ["maintenance", "add", "--title", "w", "--strategy", "cron", "--config-file", f],
+          creds(kuma.url),
+        );
+        expect(r.code).toBe(2);
+        expect(r.stderr).toContain("5 or 6 whitespace-separated cron fields");
+        expect(kuma.calls).toHaveLength(0);
+      },
+    );
+
+    test("lastDay1 is accepted in daysOfMonth", async () => {
+      const f = writeJson("lastday.json", { daysOfMonth: ["lastDay1"] });
+      const r = await run(
+        sb,
+        [
+          "maintenance",
+          "add",
+          "--title",
+          "w",
+          "--strategy",
+          "recurring-day-of-month",
+          "--config-file",
+          f,
+        ],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(0);
+      const sent = callsOf("addMaintenance")[0]!.args[0] as Record<string, unknown>;
+      expect(sent.daysOfMonth).toEqual(["lastDay1"]);
+    });
+
+    test.each([[60], [-1]])("a timeRange seconds of %p exits 2 before connecting", async (s) => {
+      const f = writeJson("badsec.json", {
+        timeRange: [
+          { hours: 2, minutes: 0, seconds: s },
+          { hours: 3, minutes: 0 },
+        ],
+      });
+      const r = await run(
+        sb,
+        [
+          "maintenance",
+          "add",
+          "--title",
+          "w",
+          "--strategy",
+          "recurring-interval",
+          "--config-file",
+          f,
+        ],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("timeRange");
+      expect(kuma.calls).toHaveLength(0);
+    });
+
+    test("recurring-interval requires intervalDay", async () => {
+      const f = writeJson("nointerval.json", { intervalDay: null });
+      const r = await run(
+        sb,
+        [
+          "maintenance",
+          "add",
+          "--title",
+          "w",
+          "--strategy",
+          "recurring-interval",
+          "--config-file",
+          f,
+        ],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("intervalDay");
+      expect(kuma.calls).toHaveLength(0);
+    });
+
+    test("intervalDay above the UI cap of 3650 exits 2 before connecting", async () => {
+      const f = writeJson("biginterval.json", { intervalDay: 4000 });
+      const r = await run(
+        sb,
+        [
+          "maintenance",
+          "add",
+          "--title",
+          "w",
+          "--strategy",
+          "recurring-interval",
+          "--config-file",
+          f,
+        ],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("intervalDay");
+      expect(kuma.calls).toHaveLength(0);
+    });
+
+    test("a dateRange with an offset in --config-file exits 2 before connecting", async () => {
+      const f = writeJson("offrange.json", {
+        strategy: "single",
+        dateRange: ["2030-01-01T10:00:00Z", "2030-01-02T10:00:00"],
+      });
+      const r = await run(
+        sb,
+        ["maintenance", "add", "--title", "w", "--strategy", "manual", "--config-file", f],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("local time in the maintenance timezone");
+      expect(r.stderr).toContain("2030-01-01T10:00:00Z");
       expect(kuma.calls).toHaveLength(0);
     });
 
@@ -1134,7 +1449,7 @@ describe("maintenance", () => {
     test("strategy single via --config-file rejects a reversed dateRange", async () => {
       const f = writeJson("sdr-rev.json", {
         strategy: "single",
-        dateRange: ["2030-01-02T00:00:00Z", "2030-01-01T00:00:00Z"],
+        dateRange: ["2030-01-02T00:00:00", "2030-01-01T00:00:00"],
       });
       const r = await run(
         sb,
@@ -1149,7 +1464,7 @@ describe("maintenance", () => {
     test("strategy single via --config-file rejects a non-ISO dateRange", async () => {
       const f = writeJson("sdr-bad.json", {
         strategy: "single",
-        dateRange: ["soon", "2030-01-01T00:00:00Z"],
+        dateRange: ["soon", "2030-01-01T00:00:00"],
       });
       const r = await run(
         sb,
@@ -1157,7 +1472,7 @@ describe("maintenance", () => {
         creds(kuma.url),
       );
       expect(r.code).toBe(2);
-      expect(r.stderr).toContain('strategy "single" requires "dateRange"');
+      expect(r.stderr).toContain('"dateRange" entries must be ISO 8601 local datetimes');
       expect(kuma.calls).toHaveLength(0);
     });
   });
@@ -1332,6 +1647,25 @@ describe("maintenance", () => {
       expect(r.code).toBe(1);
       expect(r.stderr).toContain("monitor 99 not found");
     });
+
+    test("an id missing from the pushed list prints a null name after a write", async () => {
+      kuma.state.monitors.push({ id: 99, name: "late", type: "http", active: true });
+      kuma.state.unlistedMonitors = [99];
+      kuma.state.maintenanceMonitors[1] = [99];
+      const r = await run(sb, ["maintenance", "monitors", "1", "--add", "5"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      expect(r.json()).toEqual([
+        { id: 5, name: "web" },
+        { id: 99, name: null },
+      ]);
+    });
+
+    test("does not wait for the statusPageList push", async () => {
+      kuma.state.skipLists = ["statusPageList"];
+      const r = await run(sb, ["maintenance", "monitors", "1"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      expect(r.json()).toEqual([]);
+    });
   });
 
   describe("status-pages", () => {
@@ -1452,6 +1786,13 @@ describe("maintenance", () => {
       const r = await run(sb, ["maintenance", "status-pages", "1"], creds(kuma.url));
       expect(r.code).toBe(1);
       expect(r.stderr).toContain("read failed");
+    });
+
+    test("waits for the statusPageList push", async () => {
+      kuma.state.skipLists = ["statusPageList"];
+      const r = await run(sb, ["maintenance", "status-pages", "1"], creds(kuma.url));
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("statusPageList");
     });
   });
 });
