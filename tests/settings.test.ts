@@ -4,6 +4,14 @@ import { io as ioc } from "socket.io-client";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { type FakeKuma, type StatusPageRow, startFakeKuma } from "./helpers/fake-kuma";
 import { creds, run, type Sandbox, sandbox } from "./helpers/run";
+import { KUMA_TIMEZONES } from "../src/timezones";
+
+// the list scripts/kuma-timezones.js measured: UTC + 423 UI names, no repeats
+test("the Kuma timezone list keeps its measured 424 unique names", () => {
+  expect(KUMA_TIMEZONES).toHaveLength(424);
+  expect(new Set(KUMA_TIMEZONES).size).toBe(424);
+  expect(KUMA_TIMEZONES[0]).toBe("UTC");
+});
 
 let kuma: FakeKuma;
 let sb: Sandbox;
@@ -195,38 +203,39 @@ describe("settings set", () => {
   test.each([
     [
       "serverTimezone=Not/AZone",
-      '"serverTimezone" must be one of the timezone names Uptime Kuma 1.23.17 offers (case-sensitive)',
+      '"serverTimezone" must be a timezone name the Uptime Kuma 1.23.17 UI offers and Kuma accepts (case-sensitive)',
     ],
     [
       "serverTimezone=",
-      '"serverTimezone" must be one of the timezone names Uptime Kuma 1.23.17 offers (case-sensitive)',
+      '"serverTimezone" must be a timezone name the Uptime Kuma 1.23.17 UI offers and Kuma accepts (case-sensitive)',
     ],
     // Intl's DateTimeFormat accepts these, but the UI's fixed list does not
     [
       "serverTimezone=asia/tokyo",
-      '"serverTimezone" must be one of the timezone names Uptime Kuma 1.23.17 offers (case-sensitive)',
+      '"serverTimezone" must be a timezone name the Uptime Kuma 1.23.17 UI offers and Kuma accepts (case-sensitive)',
     ],
     [
       "serverTimezone=+09:00",
-      '"serverTimezone" must be one of the timezone names Uptime Kuma 1.23.17 offers (case-sensitive)',
+      '"serverTimezone" must be a timezone name the Uptime Kuma 1.23.17 UI offers and Kuma accepts (case-sensitive)',
     ],
     [
       "serverTimezone=Japan",
-      '"serverTimezone" must be one of the timezone names Uptime Kuma 1.23.17 offers (case-sensitive)',
+      '"serverTimezone" must be a timezone name the Uptime Kuma 1.23.17 UI offers and Kuma accepts (case-sensitive)',
     ],
     // in the UI's list, but Kuma 1.23.17's checkTimezone refuses it after storing
     [
       "serverTimezone=Europe/Zaporizhzhia",
-      '"serverTimezone" must be one of the timezone names Uptime Kuma 1.23.17 offers (case-sensitive)',
+      '"serverTimezone" must be a timezone name the Uptime Kuma 1.23.17 UI offers and Kuma accepts (case-sensitive)',
     ],
     // in Bun's ICU but not Kuma's
     [
       "serverTimezone=America/Coyhaique",
-      '"serverTimezone" must be one of the timezone names Uptime Kuma 1.23.17 offers (case-sensitive)',
+      '"serverTimezone" must be a timezone name the Uptime Kuma 1.23.17 UI offers and Kuma accepts (case-sensitive)',
     ],
+    // Kuma itself accepts it, but the UI's list does not offer it
     [
       "serverTimezone=Etc/GMT+5",
-      '"serverTimezone" must be one of the timezone names Uptime Kuma 1.23.17 offers (case-sensitive)',
+      '"serverTimezone" must be a timezone name the Uptime Kuma 1.23.17 UI offers and Kuma accepts (case-sensitive)',
     ],
     ["searchEngineIndex=yes", '"searchEngineIndex" must be a boolean'],
     ["entryPage=foo", '"entryPage" must be "dashboard" or "statusPage-<slug>"'],

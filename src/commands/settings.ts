@@ -13,8 +13,9 @@ const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const ENTRY_PAGE_PREFIX = "statusPage-";
 
 // Kuma stores the whole settings object before checkTimezone refuses a bad
-// serverTimezone, so the CLI checks against the names Kuma 1.23.17 itself
-// takes (src/timezones.ts), compared case-sensitively.
+// serverTimezone, so the CLI checks against the names the 1.23.17 UI offers
+// that Kuma also takes (src/timezones.ts), compared case-sensitively. Kuma
+// itself would also take some names the UI does not offer (Japan, Etc/GMT+5).
 const TIMEZONES = new Set(KUMA_TIMEZONES);
 
 // The keys the 1.23.17 settings components write through the shared `settings`
@@ -29,7 +30,7 @@ const SETTING_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unkn
     if (typeof value !== "string" || !TIMEZONES.has(value)) {
       fail(
         2,
-        `"${key}" must be one of the timezone names Uptime Kuma 1.23.17 offers (case-sensitive)`,
+        `"${key}" must be a timezone name the Uptime Kuma 1.23.17 UI offers and Kuma accepts (case-sensitive)`,
       );
     }
     return value;

@@ -1,12 +1,14 @@
-// Regenerates the name list in src/timezones.ts. Run it inside the Kuma image
+// Measures the name list in src/timezones.ts. Run it inside the Kuma image
 // so the check is Kuma's own dayjs and ICU, with timezones-list 3.0.3 (the
 // package General.vue uses) unpacked at /chk/timezones-list:
 //
-//   mkdir -p tl && curl -fsSL https://registry.npmjs.org/timezones-list/-/timezones-list-3.0.3.tgz | tar -xz -C tl
-//   docker run --rm -v "$PWD/tl/package:/chk/timezones-list:ro" -v "$PWD/scripts:/chk/scripts:ro" \
+//   TL=$(mktemp -d) && curl -fsSL https://registry.npmjs.org/timezones-list/-/timezones-list-3.0.3.tgz | tar -xz -C "$TL"
+//   docker run --rm -v "$TL/package:/chk/timezones-list:ro" -v "$PWD/scripts:/chk/scripts:ro" \
 //     --entrypoint node louislam/uptime-kuma:1.23.17 /chk/scripts/kuma-timezones.js
 //
-// It prints { node, icu, total, accepted, refused } as JSON; accepted is the list.
+// It prints { node, icu, listed, accepted, refused } as JSON, where listed is
+// the size of the UI list and accepted/refused also count the leading "UTC".
+// accepted is what src/timezones.ts holds; paste it there by hand.
 const dayjs = require("/app/node_modules/dayjs");
 dayjs.extend(require("/app/node_modules/dayjs/plugin/utc"));
 dayjs.extend(require("/app/node_modules/dayjs/plugin/timezone"));
@@ -29,7 +31,7 @@ console.log(
   JSON.stringify({
     node: process.version,
     icu: process.versions.icu,
-    total: names.length,
+    listed: names.length,
     accepted,
     refused,
   }),
