@@ -159,6 +159,9 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
       const e = await cliRun(sb, ["monitors", "edit", String(id), "--set", "description=it"]);
       expect(e.code).toBe(0);
       expect(e.json()).toMatchObject({ description: "it", jsonPathOperator: "==", conditions: [] });
+      const op = await cliRun(sb, ["monitors", "edit", String(id), "--json-path-operator", "!="]);
+      expect(op.code).toBe(0);
+      expect(op.json().jsonPathOperator).toBe("!=");
     } else {
       expect(g.json()).not.toHaveProperty("jsonPathOperator");
     }

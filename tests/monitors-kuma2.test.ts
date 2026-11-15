@@ -301,6 +301,30 @@ describe("monitors edit on Kuma 2.x", () => {
     expect(stored(k, "h").jsonPathOperator).toBe("==");
   });
 
+  test("edit gives a fetched json-query monitor with a null operator ==", async () => {
+    // a real 2.x server returns null, not a missing key, for an unset operator
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [jsonQuery(7, "jq", { jsonPathOperator: null })],
+    });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "description=x"], creds(k.url));
+    expect(r.code).toBe(0);
+    expect(stored(k, "jq").jsonPathOperator).toBe("==");
+  });
+
+  test("edit --config-file jsonPathOperator wins over --json-path-operator", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [jsonQuery(7, "jq")] });
+    const f = join(sb.dir, "op.json");
+    writeFileSync(f, JSON.stringify({ jsonPathOperator: "contains" }));
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--json-path-operator", "<", "--config-file", f],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "jq").jsonPathOperator).toBe("contains");
+  });
+
   test("edit keeps a fetched json-query operator", async () => {
     const k = await useFake({
       profile: "2.x",
@@ -323,7 +347,11 @@ describe("monitors edit on Kuma 2.x", () => {
   });
 
   test("edit --json-path-operator is ignored on a non-json-query monitor", async () => {
-    const k = await useFake({ profile: "2.x", monitors: [http(7, "h")] });
+    // a real 2.x http monitor carries the "==" the add defaults gave it
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [http(7, "h", { jsonPathOperator: "==" })],
+    });
     const r = await run(
       sb,
       ["monitors", "edit", "7", "--json-path-operator", "!=", "--set", "description=x"],
@@ -331,7 +359,7 @@ describe("monitors edit on Kuma 2.x", () => {
     );
     expect(r.code).toBe(0);
     const sent = editCalls(k)[0]!.args[0] as Record<string, unknown>;
-    expect(sent).not.toHaveProperty("jsonPathOperator");
+    expect(sent.jsonPathOperator).toBe("==");
   });
 
   test.each([
