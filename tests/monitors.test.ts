@@ -198,6 +198,24 @@ describe("monitors get", () => {
     expect(r.json().tlsKey).toBeNull();
   });
 
+  test("redacts databaseConnectionString and the mysql radiusPassword", async () => {
+    kuma.state.monitors.push({
+      ...http(50, "mydb"),
+      type: "mysql",
+      url: null,
+      databaseConnectionString: "mysql://u:fixture-hidden-db@db/x",
+      radiusPassword: "fixture-hidden-mysql-pw",
+    });
+    const r = await run(sb, ["monitors", "get", "50"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.stdout).not.toContain("fixture-hidden-db");
+    expect(r.stdout).not.toContain("fixture-hidden-mysql-pw");
+    const m = r.json();
+    expect(m.type).toBe("mysql");
+    expect(m.databaseConnectionString).toBe("***");
+    expect(m.radiusPassword).toBe("***");
+  });
+
   test("an unknown id exits 1", async () => {
     const r = await run(sb, ["monitors", "get", "404"], creds(kuma.url));
     expect(r.code).toBe(1);
@@ -3217,6 +3235,136 @@ describe("monitors add", () => {
     const sent = addCalls()[0]!.args[0] as Record<string, any>;
     expect(sent.dns_resolve_server).toBeNull();
   });
+
+  test.each([
+    ["sqlserver", "Server=db,1433;Database=x;User Id=u;Password=p;"],
+    ["postgres", "postgres://u:p@db:5432/x"],
+    ["mysql", "mysql://u:p@db:3306/x"],
+    ["mongodb", "mongodb://u:p@db:27017/x"],
+    ["redis", "redis://:p@cache:6379"],
+  ])("database type %s sends the connection string from --config-file", async (type, conn) => {
+    const f = join(sb.dir, `db-${type}.json`);
+    writeFileSync(f, JSON.stringify({ databaseConnectionString: conn }));
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", type, "--name", `db-${type}`, "--config-file", f],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.type).toBe(type);
+    expect(sent.databaseConnectionString).toBe(conn);
+    expect(sent.databaseQuery).toBeUndefined();
+  });
+
+  test.each(["sqlserver", "postgres", "mysql"])("%s: --database-query is sent", async (type) => {
+    const f = join(sb.dir, `dbq-${type}.json`);
+    writeFileSync(f, JSON.stringify({ databaseConnectionString: "conn" }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        type,
+        "--name",
+        `dbq-${type}`,
+        "--database-query",
+        "SELECT 1",
+        "--config-file",
+        f,
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.databaseConnectionString).toBe("conn");
+    expect(sent.databaseQuery).toBe("SELECT 1");
+  });
+
+  test.each(["redis", "mongodb"])(
+    "%s: --database-query is ignored like the other type-specific flags",
+    async (type) => {
+      const f = join(sb.dir, `dbnq-${type}.json`);
+      writeFileSync(f, JSON.stringify({ databaseConnectionString: "conn" }));
+      const r = await run(
+        sb,
+        [
+          "monitors",
+          "add",
+          "--type",
+          type,
+          "--name",
+          `dbnq-${type}`,
+          "--database-query",
+          "SELECT 1",
+          "--config-file",
+          f,
+        ],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(0);
+      const sent = addCalls()[0]!.args[0] as Record<string, any>;
+      expect(sent.databaseQuery).toBeUndefined();
+    },
+  );
+
+  test("mysql: the password field radiusPassword comes from --config-file", async () => {
+    const f = join(sb.dir, "mysql-pw.json");
+    writeFileSync(
+      f,
+      JSON.stringify({ databaseConnectionString: "mysql://u@db/x", radiusPassword: "mysql-pw" }),
+    );
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "mysql", "--name", "my1", "--config-file", f],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.radiusPassword).toBe("mysql-pw");
+  });
+
+  test.each(["sqlserver", "postgres", "mysql", "mongodb", "redis"])(
+    "%s without databaseConnectionString exits 2 and sends no add",
+    async (type) => {
+      const r = await run(
+        sb,
+        ["monitors", "add", "--type", type, "--name", `db-${type}`],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("databaseConnectionString");
+      expect(r.stderr).toContain("--config-file");
+      expect(addCalls()).toHaveLength(0);
+    },
+  );
+
+  test("postgres: --config-file with an empty databaseConnectionString exits 2", async () => {
+    const f = join(sb.dir, "pg-empty.json");
+    writeFileSync(f, JSON.stringify({ databaseConnectionString: "" }));
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "postgres", "--name", "x", "--config-file", f],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("databaseConnectionString");
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test("postgres: --config-file with a non-string databaseConnectionString exits 2", async () => {
+    const f = join(sb.dir, "pg-num.json");
+    writeFileSync(f, JSON.stringify({ databaseConnectionString: 5432 }));
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "postgres", "--name", "x", "--config-file", f],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("databaseConnectionString");
+    expect(addCalls()).toHaveLength(0);
+  });
 });
 
 describe("monitors edit", () => {
@@ -3771,11 +3919,41 @@ describe("monitors edit", () => {
     expect(sent.mqttTopic).toBe("sensors/#");
   });
 
-  test("edit --set type=postgres is accepted for a type add cannot create yet", async () => {
+  test("edit --set type=postgres without a connection string exits 2", async () => {
     const r = await run(sb, ["monitors", "edit", "7", "--set", "type=postgres"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("databaseConnectionString");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit --set type=postgres with databaseConnectionString via --config-file is sent", async () => {
+    const f = join(sb.dir, "edit-pg.json");
+    writeFileSync(f, JSON.stringify({ databaseConnectionString: "postgres://u:p@db/x" }));
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=postgres", "--config-file", f],
+      creds(kuma.url),
+    );
     expect(r.code).toBe(0);
     const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
     expect(sent.type).toBe("postgres");
+    expect(sent.databaseConnectionString).toBe("postgres://u:p@db/x");
+  });
+
+  test("edit postgres with --config-file clearing databaseConnectionString exits 2", async () => {
+    kuma.state.monitors.push({
+      ...http(61, "pg"),
+      type: "postgres",
+      url: null,
+      databaseConnectionString: "postgres://u:p@db/x",
+      databaseQuery: null,
+    });
+    const f = join(sb.dir, "edit-pg-empty.json");
+    writeFileSync(f, JSON.stringify({ databaseConnectionString: "" }));
+    const r = await run(sb, ["monitors", "edit", "61", "--config-file", f], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("databaseConnectionString");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
   });
 
   test("edit --set type=mqtt without the required fields exits 2", async () => {
@@ -4276,6 +4454,21 @@ describe("monitors edit", () => {
     expect(r.code).toBe(0);
     const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
     expect(sent.parent).toBe(2);
+  });
+
+  test("edit name-only on a postgres monitor keeps a stored null databaseConnectionString", async () => {
+    kuma.state.monitors.push({
+      ...http(60, "pgnull"),
+      type: "postgres",
+      url: null,
+      databaseConnectionString: null,
+      databaseQuery: null,
+    });
+    const r = await run(sb, ["monitors", "edit", "60", "--set", "name=pg2"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.type).toBe("postgres");
+    expect(sent.databaseConnectionString).toBeNull();
   });
 
   test("edit --set proxyId naming an unknown proxy exits 1", async () => {
