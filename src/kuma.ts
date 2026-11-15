@@ -161,6 +161,10 @@ export class KumaSession {
     readonly dockerHostList: DockerHostRow[],
     readonly statusPageList: Record<string, StatusPageRow> | undefined,
     readonly heartbeats: Map<number, BeatRow[]>,
+    // setSettings takes the login password again as currentPassword when the
+    // request would disable auth; it is the same secret resolveCredentials
+    // already produced for the login, kept here so no command re-resolves it.
+    readonly loginPassword: string,
     private readonly disconnected: Promise<never>,
   ) {}
 
@@ -372,6 +376,7 @@ export async function connect(
     present("dockerHostList"),
     wanted.has("statusPageList") ? present("statusPageList") : undefined,
     heartbeats,
+    password,
     disconnected,
   );
 }

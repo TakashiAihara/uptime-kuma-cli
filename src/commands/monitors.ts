@@ -143,7 +143,8 @@ export function redactUrl(value: unknown): unknown {
   try {
     parsed = new URL(value);
   } catch {
-    return value;
+    // unparseable: the userinfo boundary is unknown, so hide the whole value
+    return value.includes("@") ? "***" : value;
   }
   if (parsed.password === "") return value;
   parsed.password = "***";

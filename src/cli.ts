@@ -5,6 +5,7 @@ import { registerMaintenance } from "./commands/maintenance.ts";
 import { registerMonitors } from "./commands/monitors.ts";
 import { registerNotifications } from "./commands/notifications.ts";
 import { registerProxies } from "./commands/proxies.ts";
+import { registerSettings } from "./commands/settings.ts";
 import { registerStatusPages } from "./commands/status-pages.ts";
 import { registerTags } from "./commands/tags.ts";
 import { disconnect } from "./kuma.ts";
@@ -26,6 +27,7 @@ registerProxies(program);
 registerTags(program);
 registerMaintenance(program);
 registerStatusPages(program);
+registerSettings(program);
 
 let exitCode = 0;
 try {
