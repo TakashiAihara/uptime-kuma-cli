@@ -4,13 +4,21 @@ import { io as ioc } from "socket.io-client";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { type FakeKuma, type StatusPageRow, startFakeKuma } from "./helpers/fake-kuma";
 import { creds, run, type Sandbox, sandbox } from "./helpers/run";
-import { KUMA_TIMEZONES } from "../src/timezones";
+import { KUMA_2X_TIMEZONES, KUMA_TIMEZONES } from "../src/timezones";
 
 // the list scripts/kuma-timezones.js measured: UTC + 423 UI names, no repeats
 test("the Kuma timezone list keeps its measured 424 unique names", () => {
   expect(KUMA_TIMEZONES).toHaveLength(424);
   expect(new Set(KUMA_TIMEZONES).size).toBe(424);
   expect(KUMA_TIMEZONES[0]).toBe("UTC");
+});
+
+// the list scripts/kuma-timezones-2x.js measured inside the 2.5.11 image:
+// UTC + the 315 @vvo/tzdb names its UI offers, all accepted, no repeats
+test("the Kuma 2.x timezone list keeps its measured 316 unique names", () => {
+  expect(KUMA_2X_TIMEZONES).toHaveLength(316);
+  expect(new Set(KUMA_2X_TIMEZONES).size).toBe(316);
+  expect(KUMA_2X_TIMEZONES[0]).toBe("UTC");
 });
 
 let kuma: FakeKuma;
@@ -106,12 +114,27 @@ describe("settings get", () => {
     expect(r.json().steamAPIKey).toBe("");
   });
 
-  test("globalpingApiToken is not editable yet (#41)", async () => {
+  test("globalpingApiToken on a 1.x server exits 2 after connecting", async () => {
     const f = writeJson("gp.json", { globalpingApiToken: ["g", "x"].join("-") });
     const r = await run(sb, ["settings", "set", "--config-file", f], creds(kuma.url));
     expect(r.code).toBe(2);
-    expect(r.stderr).toContain('"globalpingApiToken" is not a setting the Uptime Kuma UI edits');
-    expect(kuma.calls).toHaveLength(0);
+    expect(r.stderr).toContain('"globalpingApiToken" needs Uptime Kuma 2.x');
+    expect(r.stderr).toContain("1.23.17");
+    // the refusal lands after connect but before the settings are read or sent
+    expect(callsOf("getSettings")).toHaveLength(0);
+    expect(callsOf("setSettings")).toHaveLength(0);
+  });
+
+  test("domainExpiryNotifyDays on a 1.x server exits 2 after connecting", async () => {
+    const r = await run(
+      sb,
+      ["settings", "set", "--set", "domainExpiryNotifyDays=[7,14]"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('"domainExpiryNotifyDays" needs Uptime Kuma 2.x');
+    expect(callsOf("getSettings")).toHaveLength(0);
+    expect(callsOf("setSettings")).toHaveLength(0);
   });
 
   test("globalpingApiToken prints as *** when non-empty and stays empty", async () => {
@@ -232,39 +255,39 @@ describe("settings set", () => {
   test.each([
     [
       "serverTimezone=Not/AZone",
-      '"serverTimezone" must be a timezone name the Uptime Kuma 1.23.17 UI offers and Kuma accepts (case-sensitive)',
+      '"serverTimezone" must be a timezone name the Uptime Kuma UI offers and Kuma accepts (case-sensitive)',
     ],
     [
       "serverTimezone=",
-      '"serverTimezone" must be a timezone name the Uptime Kuma 1.23.17 UI offers and Kuma accepts (case-sensitive)',
+      '"serverTimezone" must be a timezone name the Uptime Kuma UI offers and Kuma accepts (case-sensitive)',
     ],
     // Intl's DateTimeFormat accepts these, but the UI's fixed list does not
     [
       "serverTimezone=asia/tokyo",
-      '"serverTimezone" must be a timezone name the Uptime Kuma 1.23.17 UI offers and Kuma accepts (case-sensitive)',
+      '"serverTimezone" must be a timezone name the Uptime Kuma UI offers and Kuma accepts (case-sensitive)',
     ],
     [
       "serverTimezone=+09:00",
-      '"serverTimezone" must be a timezone name the Uptime Kuma 1.23.17 UI offers and Kuma accepts (case-sensitive)',
+      '"serverTimezone" must be a timezone name the Uptime Kuma UI offers and Kuma accepts (case-sensitive)',
     ],
     [
       "serverTimezone=Japan",
-      '"serverTimezone" must be a timezone name the Uptime Kuma 1.23.17 UI offers and Kuma accepts (case-sensitive)',
+      '"serverTimezone" must be a timezone name the Uptime Kuma UI offers and Kuma accepts (case-sensitive)',
     ],
     // in the UI's list, but Kuma 1.23.17's checkTimezone refuses it after storing
     [
       "serverTimezone=Europe/Zaporizhzhia",
-      '"serverTimezone" must be a timezone name the Uptime Kuma 1.23.17 UI offers and Kuma accepts (case-sensitive)',
+      '"serverTimezone" must be a timezone name the Uptime Kuma UI offers and Kuma accepts (case-sensitive)',
     ],
-    // in Bun's ICU but not Kuma's
+    // in Bun's ICU but in neither version's UI list
     [
       "serverTimezone=America/Coyhaique",
-      '"serverTimezone" must be a timezone name the Uptime Kuma 1.23.17 UI offers and Kuma accepts (case-sensitive)',
+      '"serverTimezone" must be a timezone name the Uptime Kuma UI offers and Kuma accepts (case-sensitive)',
     ],
     // Kuma itself accepts it, but the UI's list does not offer it
     [
       "serverTimezone=Etc/GMT+5",
-      '"serverTimezone" must be a timezone name the Uptime Kuma 1.23.17 UI offers and Kuma accepts (case-sensitive)',
+      '"serverTimezone" must be a timezone name the Uptime Kuma UI offers and Kuma accepts (case-sensitive)',
     ],
     ["searchEngineIndex=yes", '"searchEngineIndex" must be a boolean'],
     ["entryPage=foo", '"entryPage" must be "dashboard" or "statusPage-<slug>"'],
@@ -534,6 +557,24 @@ describe("settings set", () => {
     expect(r.code).toBe(0);
     expect(sentSettings().serverTimezone).toBe("UTC");
   });
+
+  // these names are in the 2.x UI list but not the 1.23.17 one: they pass
+  // the pre-connect union check and are refused once the version is known
+  test.each(["America/Nuuk", "America/Ciudad_Juarez", "Pacific/Kanton"])(
+    "serverTimezone %p on a 1.x server exits 2 after connecting",
+    async (tz) => {
+      const r = await run(
+        sb,
+        ["settings", "set", "--set", `serverTimezone=${tz}`],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain('"serverTimezone" must be a timezone name');
+      expect(r.stderr).toContain("1.23.17");
+      expect(callsOf("getSettings")).toHaveLength(0);
+      expect(callsOf("setSettings")).toHaveLength(0);
+    },
+  );
 
   test("a password in primaryBaseURL prints as *** in get and set output", async () => {
     // built at runtime so no literal user:pass URL sits in the test file

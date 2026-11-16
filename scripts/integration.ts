@@ -29,7 +29,10 @@ const PASSWORD = "it-Passw0rd-1234";
 const CALL_TIMEOUT_MS = 30_000;
 const COMPOSE_UP_TIMEOUT_MS = 300_000;
 const COMPOSE_DOWN_TIMEOUT_MS = 60_000;
-const TEST_LIMIT_MS = 8 * 60_000;
+// cliRun paces invocations to 15 logins/min, so the suite's floor grows with
+// its call count; 12 min leaves headroom for the tests still to come while
+// still catching a genuinely hung run well under the CI job's 20 min.
+const TEST_LIMIT_MS = 12 * 60_000;
 const KEEP = process.env.UPTIME_KUMA_IT_KEEP === "1";
 // An empty value (a mistyped CI matrix key) would make compose fall back to
 // 1.23.17 while the job claims another image.

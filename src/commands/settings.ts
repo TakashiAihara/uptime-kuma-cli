@@ -1,7 +1,7 @@
 import { type Command } from "commander";
 import { CliError, fail, parseSets, printJson, readJsonFile } from "../lib.ts";
 import { connect, type KumaSession } from "../kuma.ts";
-import { KUMA_TIMEZONES } from "../timezones.ts";
+import { KUMA_2X_TIMEZONES, KUMA_TIMEZONES } from "../timezones.ts";
 import { redactUrl } from "./monitors.ts";
 
 const collect = (value: string, previous: string[]): string[] => [...previous, value];
@@ -13,24 +13,61 @@ const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const ENTRY_PAGE_PREFIX = "statusPage-";
 
 // Kuma stores the whole settings object before checkTimezone refuses a bad
-// serverTimezone, so the CLI checks against the names the 1.23.17 UI offers
-// that Kuma also takes (src/timezones.ts), compared case-sensitively. Kuma
-// itself would also take some names the UI does not offer (Japan, Etc/GMT+5).
-const TIMEZONES = new Set(KUMA_TIMEZONES);
+// serverTimezone, so the CLI checks the name before connecting — against the
+// union of the names either version's UI offers that Kuma also takes
+// (src/timezones.ts), compared case-sensitively — and against the connected
+// server's own list after connect(). Kuma itself would also take some names
+// the UI does not offer (Japan, Etc/GMT+5).
+const TIMEZONES_ANY = new Set([...KUMA_TIMEZONES, ...KUMA_2X_TIMEZONES]);
+const TIMEZONES_1X = new Set(KUMA_TIMEZONES);
+const TIMEZONES_2X = new Set(KUMA_2X_TIMEZONES);
 
-// The keys the 1.23.17 settings components write through the shared `settings`
-// object that saveSettings posts whole to setSettings: General.vue
+// dnsCache is 1.x-only: 2.x dropped it from the UI and no server code reads
+// it. domainExpiryNotifyDays and globalpingApiToken are 2.x-only: 1.23's
+// settings components do not write them.
+const KUMA_1X_ONLY_SETTING_KEYS = new Set(["dnsCache"]);
+const KUMA_2X_ONLY_SETTING_KEYS = new Set(["domainExpiryNotifyDays", "globalpingApiToken"]);
+
+// get prints a stored secret as "***"; feeding that output back through
+// --config-file would store the placeholder itself
+function secretString(value: unknown, key: string): unknown {
+  if (typeof value !== "string") fail(2, `"${key}" must be a string`);
+  if (value === "***") {
+    fail(
+      2,
+      `"${key}" is the redacted placeholder from settings get output; omit the key to keep the stored value`,
+    );
+  }
+  return value;
+}
+
+// Notifications.vue accepts only positive integers and keeps the list sorted
+// and duplicate-free
+function expiryNotifyDays(value: unknown, key: string): unknown {
+  if (
+    !Array.isArray(value) ||
+    value.some((d) => typeof d !== "number" || !Number.isInteger(d) || d <= 0)
+  ) {
+    fail(2, `"${key}" must be an array of positive integers`);
+  }
+  return [...new Set(value as number[])].sort((a, b) => a - b);
+}
+
+// The keys the settings components write through the shared `settings` object
+// that saveSettings posts whole to setSettings. 1.23.17: General.vue
 // (serverTimezone, searchEngineIndex, entryPage, primaryBaseURL, steamAPIKey,
 // nscd, dnsCache, chromeExecutable), About.vue (checkUpdate, checkBeta),
 // ReverseProxy.vue (trustProxy), MonitorHistory.vue (keepDataPeriodDays),
 // Notifications.vue (tlsExpiryNotifyDays) and Security.vue (disableAuth).
-// cloudflaredTunnelToken is not one: it goes through the cloudflared_* events.
+// 2.x drops dnsCache and adds domainExpiryNotifyDays (Notifications.vue) and
+// globalpingApiToken (General.vue). cloudflaredTunnelToken is not one: it
+// goes through the cloudflared_* events.
 const SETTING_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unknown> = {
   serverTimezone: (value, key) => {
-    if (typeof value !== "string" || !TIMEZONES.has(value)) {
+    if (typeof value !== "string" || !TIMEZONES_ANY.has(value)) {
       fail(
         2,
-        `"${key}" must be a timezone name the Uptime Kuma 1.23.17 UI offers and Kuma accepts (case-sensitive)`,
+        `"${key}" must be a timezone name the Uptime Kuma UI offers and Kuma accepts (case-sensitive)`,
       );
     }
     return value;
@@ -82,18 +119,7 @@ const SETTING_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unkn
     }
     return value;
   },
-  steamAPIKey: (value, key) => {
-    if (typeof value !== "string") fail(2, `"${key}" must be a string`);
-    // get prints a stored key as "***"; feeding that output back through
-    // --config-file would store the placeholder itself
-    if (value === "***") {
-      fail(
-        2,
-        `"${key}" is the redacted placeholder from settings get output; omit the key to keep the stored value`,
-      );
-    }
-    return value;
-  },
+  steamAPIKey: secretString,
   nscd: (value, key) => {
     if (typeof value !== "boolean") fail(2, `"${key}" must be a boolean`);
     return value;
@@ -127,16 +153,12 @@ const SETTING_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unkn
     return value;
   },
   // Notifications.vue accepts only positive integers and keeps the list
-  // sorted and duplicate-free
-  tlsExpiryNotifyDays: (value, key) => {
-    if (
-      !Array.isArray(value) ||
-      value.some((d) => typeof d !== "number" || !Number.isInteger(d) || d <= 0)
-    ) {
-      fail(2, `"${key}" must be an array of positive integers`);
-    }
-    return [...new Set(value as number[])].sort((a, b) => a - b);
-  },
+  // sorted and duplicate-free; the 2.x domainExpiryNotifyDays input has the
+  // same rules
+  tlsExpiryNotifyDays: expiryNotifyDays,
+  domainExpiryNotifyDays: expiryNotifyDays,
+  // the second masked secret; same "***" placeholder refusal as steamAPIKey
+  globalpingApiToken: secretString,
   disableAuth: (value, key) => {
     if (typeof value !== "boolean") fail(2, `"${key}" must be a boolean`);
     return value;
@@ -149,15 +171,21 @@ const SETTING_KEYS = new Set(Object.keys(SETTING_VALUE_CHECKS));
 // save, so the object posted to setSettings always carries them. They are not
 // cosmetic: with nscd absent the handler reads data.nscd as undefined, which
 // differs from the stored null and stops the nscd service on containers.
-const UI_DEFAULTS: Record<string, unknown> = {
+// dnsCache is 1.x-only and domainExpiryNotifyDays is 2.x-only, so each major
+// version gets its own set.
+const UI_DEFAULTS_COMMON: Record<string, unknown> = {
   checkUpdate: true,
   searchEngineIndex: false,
   entryPage: "dashboard",
   nscd: true,
-  dnsCache: false,
   keepDataPeriodDays: 180,
   tlsExpiryNotifyDays: [7, 14, 21],
   trustProxy: false,
+};
+const UI_DEFAULTS_1X: Record<string, unknown> = { ...UI_DEFAULTS_COMMON, dnsCache: false };
+const UI_DEFAULTS_2X: Record<string, unknown> = {
+  ...UI_DEFAULTS_COMMON,
+  domainExpiryNotifyDays: [7, 14, 21],
 };
 
 async function fetchSettings(s: KumaSession): Promise<Record<string, unknown>> {
@@ -191,11 +219,48 @@ function checkSettingKeys(fields: Record<string, unknown>, source: string): void
 }
 
 // Runs before connecting so a bad value exits 2 with nothing sent; the
-// normalized result (tlsExpiryNotifyDays sorted/deduped) is written back.
+// normalized result (the notify-day lists sorted/deduped) is written back.
 function validateSettingValues(fields: Record<string, unknown>): void {
   for (const [key, value] of Object.entries(fields)) {
     // checkSettingKeys ran on this object first, so the lookup cannot miss
     fields[key] = SETTING_VALUE_CHECKS[key]!(value, key);
+  }
+}
+
+// Which keys a version edits can only be refused once the version is known:
+// 1.23's setSettings would store dnsCache as a dead key and the two 2.x keys
+// as unknown ones, and 2.x stores dnsCache the same dead way. Like the
+// monitor fields, the refusal exits 2 before anything is sent.
+function checkSettingVersionKeys(s: KumaSession, fields: Record<string, unknown>): void {
+  if (s.majorVersion >= 2) {
+    for (const key of Object.keys(fields)) {
+      if (KUMA_1X_ONLY_SETTING_KEYS.has(key)) {
+        fail(2, `"${key}" is not read on Uptime Kuma 2.x; the server reports ${s.serverVersion}`);
+      }
+    }
+    return;
+  }
+  for (const key of Object.keys(fields)) {
+    if (KUMA_2X_ONLY_SETTING_KEYS.has(key)) {
+      fail(
+        2,
+        s.serverVersion === undefined
+          ? `"${key}" needs Uptime Kuma 2.x; the server sent no version, so 1.x was assumed`
+          : `"${key}" needs Uptime Kuma 2.x; the server reports ${s.serverVersion}`,
+      );
+    }
+  }
+}
+
+// The pre-connect check only knows the union of both versions' lists; the
+// connected server's own list decides, like the version key check above.
+function checkServerTimezone(s: KumaSession, value: unknown): void {
+  const accepted = s.majorVersion >= 2 ? TIMEZONES_2X : TIMEZONES_1X;
+  if (typeof value !== "string" || !accepted.has(value)) {
+    fail(
+      2,
+      `"serverTimezone" must be a timezone name the Uptime Kuma ${s.serverVersion ?? "1.x"} UI offers and Kuma accepts (case-sensitive)`,
+    );
   }
 }
 
@@ -209,9 +274,11 @@ function mergeSettings(
   fetched: Record<string, unknown>,
   fileConfig: Record<string, unknown>,
   sets: Record<string, unknown>,
+  s: KumaSession,
 ): Record<string, unknown> {
   const base = { ...fetched };
-  for (const [key, value] of Object.entries(UI_DEFAULTS)) {
+  const defaults = s.majorVersion >= 2 ? UI_DEFAULTS_2X : UI_DEFAULTS_1X;
+  for (const [key, value] of Object.entries(defaults)) {
     if (base[key] === undefined) base[key] = structuredClone(value);
   }
   return { ...base, ...fileConfig, ...sets };
@@ -242,12 +309,14 @@ export function registerSettings(program: Command): void {
       }
       checkSettingKeys(sets, "--set");
       checkSettingKeys(fileConfig, "--config-file");
-      // --set lands in argv; the Steam key only goes through --config-file
-      if (sets.steamAPIKey !== undefined) {
-        fail(
-          2,
-          "--set steamAPIKey=... would put a secret in the command line; use --config-file instead",
-        );
+      // --set lands in argv; the secret keys only go through --config-file
+      for (const key of ["steamAPIKey", "globalpingApiToken"] as const) {
+        if (sets[key] !== undefined) {
+          fail(
+            2,
+            `--set ${key}=... would put a secret in the command line; use --config-file instead`,
+          );
+        }
       }
       validateSettingValues(sets);
       validateSettingValues(fileConfig);
@@ -270,7 +339,13 @@ export function registerSettings(program: Command): void {
           ? entryPageOverride.slice(ENTRY_PAGE_PREFIX.length)
           : undefined;
       const s = await connect(entryPageSlug === undefined ? [] : ["statusPageList"]);
-      const merged = mergeSettings(await fetchSettings(s), fileConfig, sets);
+      // the version decides which keys are editable and which timezone list
+      // applies; both refusals exit 2 before the settings are even read
+      checkSettingVersionKeys(s, { ...fileConfig, ...sets });
+      const timezoneOverride =
+        sets.serverTimezone !== undefined ? sets.serverTimezone : fileConfig.serverTimezone;
+      if (timezoneOverride !== undefined) checkServerTimezone(s, timezoneOverride);
+      const merged = mergeSettings(await fetchSettings(s), fileConfig, sets, s);
 
       // entryPage=statusPage-<slug> redirects / to /status/<slug>; a slug with
       // no page would 404, so it is refused before saving like `status-pages`

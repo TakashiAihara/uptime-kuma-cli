@@ -2,7 +2,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { sandbox, type Sandbox } from "../helpers/run";
-import { cliRun } from "./helpers";
+import { cliRun, on2x } from "./helpers";
 
 // Runs only when scripts/integration.ts provides UPTIME_KUMA_IT_*; a plain
 // `bun test` skips the whole file.
@@ -115,4 +115,101 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("settings (real Kuma)", () => {
       expect(restore.json().steamAPIKey).toBe("");
     }
   }, 300_000);
+
+  test("version-scoped keys are refused for the other version", async () => {
+    if (on2x) {
+      // dnsCache is dead on 2.x; refused after connect, before anything is sent
+      const dns = await cliRun(sb, ["settings", "set", "--set", "dnsCache=true"]);
+      expect(dns.code).toBe(2);
+      expect(dns.stderr).toContain('"dnsCache" is not read on Uptime Kuma 2.x');
+      return;
+    }
+    const days = await cliRun(sb, ["settings", "set", "--set", "domainExpiryNotifyDays=[7,14]"]);
+    expect(days.code).toBe(2);
+    expect(days.stderr).toContain('"domainExpiryNotifyDays" needs Uptime Kuma 2.x');
+    // --set cannot carry a secret, so the token goes through --config-file
+    const tokenFile = join(sb.dir, "gp.json");
+    writeFileSync(tokenFile, JSON.stringify({ globalpingApiToken: "it-token" }));
+    const token = await cliRun(sb, ["settings", "set", "--config-file", tokenFile]);
+    expect(token.code).toBe(2);
+    expect(token.stderr).toContain('"globalpingApiToken" needs Uptime Kuma 2.x');
+  }, 300_000);
+
+  test("serverTimezone follows the connected version's list", async () => {
+    if (!on2x) {
+      // the mirror image on 1.23: the 2.x-only name is refused, nothing changes
+      const refused = await cliRun(sb, ["settings", "set", "--set", "serverTimezone=America/Nuuk"]);
+      expect(refused.code).toBe(2);
+      expect(refused.stderr).toContain('"serverTimezone" must be a timezone name');
+      return;
+    }
+    const before = await cliRun(sb, ["settings", "get"]);
+    expect(before.code).toBe(0);
+    const originalTz = before.json().serverTimezone as string;
+    try {
+      // in the 2.x UI list but not 1.23's: accepted and applied for real
+      const ok = await cliRun(sb, ["settings", "set", "--set", "serverTimezone=America/Nuuk"]);
+      expect(ok.code).toBe(0);
+      expect(ok.json().serverTimezone).toBe("America/Nuuk");
+      // in 1.23's list but not the 2.x one: refused after connect
+      const refused = await cliRun(sb, [
+        "settings",
+        "set",
+        "--set",
+        "serverTimezone=America/Rainy_River",
+      ]);
+      expect(refused.code).toBe(2);
+      expect(refused.stderr).toContain('"serverTimezone" must be a timezone name');
+    } finally {
+      const restore = await cliRun(sb, [
+        "settings",
+        "set",
+        "--set",
+        `serverTimezone=${originalTz}`,
+      ]);
+      expect(restore.code).toBe(0);
+    }
+  }, 300_000);
+
+  test.skipIf(!on2x)(
+    "2.x: domainExpiryNotifyDays and globalpingApiToken round-trip",
+    async () => {
+      // a fixture token, not a real Globalping key; it only has to be non-empty
+      const token = `it-gp-${Date.now().toString(36)}`;
+      const setFile = join(sb.dir, "k2x.json");
+      writeFileSync(
+        setFile,
+        JSON.stringify({
+          domainExpiryNotifyDays: [30, 7, 14, 7],
+          globalpingApiToken: token,
+        }),
+      );
+      const before = await cliRun(sb, ["settings", "get"]);
+      expect(before.code).toBe(0);
+      const originalDays = before.json().domainExpiryNotifyDays ?? [7, 14, 21];
+      try {
+        const set = await cliRun(sb, ["settings", "set", "--config-file", setFile]);
+        expect(set.code).toBe(0);
+        // sorted and de-duplicated like the UI keeps the list; the set answer
+        // is already a fresh getSettings read, so no second get is needed
+        expect(set.json().domainExpiryNotifyDays).toEqual([7, 14, 30]);
+        expect(set.json().globalpingApiToken).toBe("***");
+        expect(set.stdout).not.toContain(token);
+        // a 2.x set must not inject the dead 1.x dnsCache key
+        expect(set.json()).not.toHaveProperty("dnsCache");
+      } finally {
+        const restoreFile = join(sb.dir, "k2x-restore.json");
+        writeFileSync(
+          restoreFile,
+          JSON.stringify({
+            domainExpiryNotifyDays: originalDays,
+            globalpingApiToken: "",
+          }),
+        );
+        const restore = await cliRun(sb, ["settings", "set", "--config-file", restoreFile]);
+        expect(restore.code).toBe(0);
+      }
+    },
+    300_000,
+  );
 });
