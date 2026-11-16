@@ -1,8 +1,8 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
-const CLI = join(import.meta.dir, "..", "..", "src", "cli.ts");
+import { format } from "node:util";
+import { runCli } from "../../src/cli.ts";
 
 export type Result = { code: number; stdout: string; stderr: string; json: () => any };
 
@@ -23,7 +23,10 @@ export function writeConfig(sb: Sandbox, toml: string) {
   writeFileSync(join(d, "config.toml"), toml);
 }
 
-// The env is rebuilt from scratch so real UPTIME_KUMA_* values or the user's config never leak in.
+// In-process equivalent of spawning `bun src/cli.ts`: same clean env, same
+// captured stdout/stderr and exit code, but the run stays inside the test
+// process so `bun test --coverage` instruments src/commands too. console.*
+// bypasses process.stdout.write under Bun, so both are patched.
 export async function run(
   sb: Sandbox,
   args: string[],
@@ -39,17 +42,62 @@ export async function run(
     if (v === undefined) delete base[k];
     else base[k] = v;
   }
-  const p = Bun.spawn(["bun", CLI, ...args], {
-    env: base,
-    stdout: "pipe",
-    stderr: "pipe",
-    cwd: sb.dir,
-  });
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(p.stdout).text(),
-    new Response(p.stderr).text(),
-    p.exited,
-  ]);
+
+  const savedEnv = { ...process.env };
+  const savedWrite = {
+    stdout: process.stdout.write,
+    stderr: process.stderr.write,
+  };
+  const savedConsole = {
+    log: console.log,
+    info: console.info,
+    debug: console.debug,
+    warn: console.warn,
+    error: console.error,
+  };
+  let stdout = "";
+  let stderr = "";
+  const decoder = new TextDecoder();
+  const makeWrite =
+    (append: (s: string) => void) =>
+    (chunk: unknown, ...rest: unknown[]) => {
+      append(typeof chunk === "string" ? chunk : decoder.decode(chunk as Uint8Array));
+      const cb = rest.find((a) => typeof a === "function");
+      if (typeof cb === "function") cb();
+      return true;
+    };
+  process.stdout.write = makeWrite((s) => {
+    stdout += s;
+  }) as typeof process.stdout.write;
+  process.stderr.write = makeWrite((s) => {
+    stderr += s;
+  }) as typeof process.stderr.write;
+  const toOut = (...a: unknown[]) => {
+    stdout += `${format(...a)}\n`;
+  };
+  const toErr = (...a: unknown[]) => {
+    stderr += `${format(...a)}\n`;
+  };
+  console.log = toOut;
+  console.info = toOut;
+  console.debug = toOut;
+  console.warn = toErr;
+  console.error = toErr;
+
+  let code: number;
+  try {
+    // The spawned CLI saw exactly `base` as its environment; reproduce that by
+    // emptying process.env for the duration of the call.
+    for (const k of Object.keys(process.env)) delete process.env[k];
+    Object.assign(process.env, base);
+    code = await runCli(args);
+  } finally {
+    for (const k of Object.keys(process.env)) delete process.env[k];
+    Object.assign(process.env, savedEnv);
+    process.stdout.write = savedWrite.stdout;
+    process.stderr.write = savedWrite.stderr;
+    Object.assign(console, savedConsole);
+  }
   return { code, stdout, stderr, json: () => JSON.parse(stdout) };
 }
 
