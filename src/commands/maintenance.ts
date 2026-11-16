@@ -165,15 +165,18 @@ const isDayOfMonthList = (value: unknown): value is unknown[] =>
 // rejects a step over 31.
 const MAX_INTERVAL_DAY = 3650;
 
-// croner 6.0.7 shape check, mirroring CronPattern.parse up to
-// throwAtIllegalCharacters: a nickname expands first, the pattern splits on
+// Shape check mirroring CronPattern.parse up to throwAtIllegalCharacters,
+// which is the same in croner 6.0.7 (Kuma 1.23) and 8.1.2 (Kuma 2.x) except
+// the day-of-week charset: a nickname expands first, the pattern splits on
 // whitespace into 5 or 6 parts (5 gets a leading seconds "0"), the first "L"
 // is stripped from day-of-month and day-of-week, month and day-of-week parts
 // of 3+ chars get the JAN-DEC / SUN-SAT names replaced, the first "?" of each
-// part becomes a number, and what remains may only contain [0-9*/,-]. Ranges and
-// values are still croner's job; Kuma 1.23.17 calls the async validateCron
-// without await, so a bad expression is stored anyway and the rejection
-// goes unhandled — only the shape is checked up front.
+// part becomes a number, and what remains may only contain [0-9*/,-] — plus
+// "#" and "L" in day-of-week on 2.x. Ranges and values are still croner's
+// job; Kuma 1.23.17 calls the async validateCron without await, so a bad
+// expression is stored anyway and the rejection goes unhandled — only the
+// shape is checked up front. On 2.x validateCron is synchronous, so a value
+// the shape check lets through is refused by the server instead.
 const CRON_NICKNAMES = new Map([
   ["@yearly", "0 0 1 1 *"],
   ["@annually", "0 0 1 1 *"],
@@ -184,6 +187,11 @@ const CRON_NICKNAMES = new Map([
 ]);
 
 const CRON_LEGAL = /^[0-9*,/-]*$/;
+
+// croner 8.1.2's throwAtIllegalCharacters gives the day-of-week part the
+// wider charset [^/*0-9,\-#L]+ so "#" nth-weekday and "L" last-weekday forms
+// parse; every other part keeps the 6.0.7 charset.
+const CRON_LEGAL_DOW_2X = /^[0-9*,/#L-]*$/;
 
 // croner's replaceAlphaMonths / replaceAlphaDays are substring replacements,
 // so a name only survives the charset check when it converts fully to digits
@@ -213,15 +221,16 @@ const alphaDays = (value: string): string =>
     .replace(/fri/gi, "5")
     .replace(/sat/gi, "6");
 
-function isCronExpression(value: string): boolean {
+function isCronExpression(value: string, kuma2: boolean): boolean {
   let pattern = value;
   if (pattern.includes("@")) {
     pattern = (CRON_NICKNAMES.get(pattern.trim().toLowerCase()) ?? pattern).trim();
   }
   const fields = pattern.replace(/\s+/g, " ").split(" ");
   if (fields.length !== 5 && fields.length !== 6) return false;
-  // croner 6.0.7 parses an empty part (surrounding whitespace) or a bare
-  // day-of-week "L", but nextRun() is then null: the window would never run
+  // an empty part or a bare day-of-week "L" would never schedule a run:
+  // croner 6.0.7 leaves the field all-zero so nextRun() is null, and
+  // croner 8.1.2 throws on both
   if (fields.includes("")) return false;
   const [second, minute, hour, day, month, dayOfWeek] = (
     fields.length === 5 ? ["0", ...fields] : fields
@@ -238,21 +247,28 @@ function isCronExpression(value: string): boolean {
     dow.length >= 3 ? alphaDays(dow) : dow,
   ];
   // croner substitutes the first "?" of each part with a number; leftovers fail
-  return parts.every((part) => CRON_LEGAL.test(part.replace("?", "0")));
+  return parts.every((part, i) =>
+    (i === 5 && kuma2 ? CRON_LEGAL_DOW_2X : CRON_LEGAL).test(part.replace("?", "0")),
+  );
 }
 
-// Maintenance.jsonToBean of Kuma 1.23.17 writes title, description, strategy,
-// intervalDay, timezoneOption, active and dateRange unconditionally, then the
-// schedule fields of the strategy: cron + durationMinutes for cron,
-// timeRange + weekdays + daysOfMonth for recurring-* (generateCron also reads
-// intervalDay for recurring-interval). Checking the merged object keeps a
-// missing or malformed field from failing inside Kuma.
+// Maintenance.jsonToBean writes title, description, strategy, intervalDay,
+// timezoneOption, active and dateRange unconditionally, then the schedule
+// fields of the strategy: cron + durationMinutes for cron, timeRange +
+// weekdays + daysOfMonth for recurring-* (generateCron also reads intervalDay
+// for recurring-interval). Checking the merged object keeps a missing or
+// malformed field from failing inside Kuma. kuma2 selects the server's cron
+// grammar and bounds; the rules that differ are the croner major (6 on 1.x,
+// 8 on 2.x), the recurring-interval intervalDay cap (31 on 1.x because
+// generateCron emits "*/N" in day-of-month, 3650 on 2.x where the interval is
+// gated by last_start_date instead) and the cron/recurring end-date refusal
+// (a 1.23.17 run() bug 2.x's inferDuration does not have).
 // full judges every field (add, or an edit that changes strategy); otherwise
 // only the touched keys plus the always-read dateRange are judged, the same
 // scoping monitors edit uses for its touched/typeChanged rule.
 function validateMaintenance(
   m: Record<string, unknown>,
-  opts: { full: boolean; touched?: ReadonlySet<string>; edit?: boolean },
+  opts: { full: boolean; touched?: ReadonlySet<string>; edit?: boolean; kuma2: boolean },
 ): void {
   const need = (key: string) => opts.full || opts.touched?.has(key) === true;
   if (!Array.isArray(m.dateRange)) fail(2, "dateRange must be an array");
@@ -288,18 +304,21 @@ function validateMaintenance(
   const strategy = typeof m.strategy === "string" ? m.strategy : undefined;
   if (need("intervalDay")) {
     // recurring-interval feeds interval_day into "*/N" in day-of-month where
-    // croner 6.0.7 rejects steps over 31; the other strategies only store it,
-    // so null stays acceptable there
+    // croner 6.0.7 rejects steps over 31; on 2.x generateCron emits a plain
+    // daily cron and the interval is gated by last_start_date, so the cap is
+    // the UI's 3650. The other strategies only store it, so null stays
+    // acceptable there
     const required = strategy === "recurring-interval";
+    const cap = required && !opts.kuma2 ? 31 : MAX_INTERVAL_DAY;
     const v = m.intervalDay;
     const ok = required
-      ? isPosInt(v) && v <= 31
+      ? isPosInt(v) && v <= cap
       : v === null || v === undefined || (isPosInt(v) && v <= MAX_INTERVAL_DAY);
     if (!ok) {
       fail(
         2,
         `intervalDay must be a positive integer no greater than ${
-          required ? "31 for recurring-interval" : "3650"
+          required ? `${cap} for recurring-interval` : MAX_INTERVAL_DAY
         }`,
       );
     }
@@ -321,7 +340,7 @@ function validateMaintenance(
       if (typeof cron !== "string" || cron === "") {
         fail(2, 'strategy "cron" requires a non-empty "cron" expression');
       }
-      if (!isCronExpression(cron)) {
+      if (!isCronExpression(cron, opts.kuma2)) {
         fail(2, 'strategy "cron" requires "cron" as 5 or 6 whitespace-separated cron fields');
       }
     }
@@ -375,8 +394,10 @@ function validateMaintenance(
   // Kuma 1.23.17 bug: Maintenance.run leaves duration undefined when a
   // cron/recurring window has an end_date far enough out, so the timeslot
   // timeout fires at once and the maintenance ends immediately. Those
-  // strategies may carry a start but never an end.
+  // strategies may carry a start but never an end on 1.x; 2.x's inferDuration
+  // falls back to duration * 1000, so the end date is valid there.
   if (
+    !opts.kuma2 &&
     strategy !== undefined &&
     (strategy === "cron" || strategy.startsWith("recurring-")) &&
     need("dateRange")
@@ -599,8 +620,13 @@ export function registerMaintenance(program: Command): void {
       if (range !== undefined && payload.strategy === "manual") {
         fail(2, "--start and --end do not apply to --strategy manual");
       }
-      validateMaintenance(payload, { full: true });
+      // Before connecting the version is unknown, so the check applies the
+      // union of both versions' rules — which is the 2.x set: every value 1.x
+      // accepts, 2.x accepts too. Once connected the same check runs again
+      // under the server's own version, adding the 1.x restrictions back.
+      validateMaintenance(payload, { full: true, kuma2: true });
       const s = await connect(["maintenanceList"]);
+      validateMaintenance(payload, { full: true, kuma2: s.majorVersion >= 2 });
       const existing = s.maintenances().find((m) => m.title === payload.title);
       if (existing) {
         printJson({ id: existing.id, title: existing.title, skipped: true });
@@ -704,6 +730,7 @@ export function registerMaintenance(program: Command): void {
         full: merged.strategy !== fetched.strategy,
         touched,
         edit: true,
+        kuma2: s.majorVersion >= 2,
       });
       await s.request("editMaintenance", [merged]);
       // Print what Kuma stored, like the UI does after its save.

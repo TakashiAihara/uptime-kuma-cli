@@ -1,0 +1,304 @@
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { type FakeKuma, startFakeKuma } from "./helpers/fake-kuma";
+import { creds, run, type Sandbox, sandbox } from "./helpers/run";
+
+let kuma: FakeKuma | undefined;
+let sb: Sandbox;
+
+beforeEach(() => {
+  sb = sandbox();
+});
+
+afterEach(async () => {
+  await kuma?.close();
+  kuma = undefined;
+  sb.cleanup();
+});
+
+// Every test here runs the 2.5.11 profile unless it overrides init.
+async function useFake(init: Parameters<typeof startFakeKuma>[0] = {}): Promise<FakeKuma> {
+  kuma = await startFakeKuma({ profile: "2.x", ...init });
+  return kuma;
+}
+
+const callsOf = (k: FakeKuma, event: string) => k.calls.filter((c) => c.event === event);
+
+const sentAdd = (k: FakeKuma): Record<string, unknown> =>
+  callsOf(k, "addMaintenance")[0]!.args[0] as Record<string, unknown>;
+
+const sentEdit = (k: FakeKuma): Record<string, unknown> =>
+  callsOf(k, "editMaintenance")[0]!.args[0] as Record<string, unknown>;
+
+const writeJson = (name: string, value: Record<string, unknown>) => {
+  const path = join(sb.dir, name);
+  writeFileSync(path, JSON.stringify(value));
+  return path;
+};
+
+describe("maintenance on Kuma 2.x", () => {
+  describe("add", () => {
+    test("cron accepts --start and --end", async () => {
+      const k = await useFake();
+      const r = await run(
+        sb,
+        [
+          "maintenance",
+          "add",
+          "--title",
+          "w",
+          "--strategy",
+          "cron",
+          "--start",
+          "2032-06-01T10:00:00",
+          "--end",
+          "2032-06-02T10:00:00",
+        ],
+        creds(k.url),
+      );
+      expect(r.code).toBe(0);
+      expect(sentAdd(k).dateRange).toEqual(["2032-06-01T10:00:00", "2032-06-02T10:00:00"]);
+    });
+
+    test.each([
+      ["recurring-interval", { intervalDay: 2 }],
+      ["recurring-weekday", { weekdays: [1, 3] }],
+      ["recurring-day-of-month", { daysOfMonth: [15, "lastDay1"] }],
+    ])("%s accepts --start and --end", async (strategy, fields) => {
+      const k = await useFake();
+      const f = writeJson("rec.json", fields);
+      const r = await run(
+        sb,
+        [
+          "maintenance",
+          "add",
+          "--title",
+          "w",
+          "--strategy",
+          strategy,
+          "--start",
+          "2032-06-01T10:00:00",
+          "--end",
+          "2032-06-02T10:00:00",
+          "--config-file",
+          f,
+        ],
+        creds(k.url),
+      );
+      expect(r.code).toBe(0);
+      expect(sentAdd(k).dateRange).toEqual(["2032-06-01T10:00:00", "2032-06-02T10:00:00"]);
+    });
+
+    test("a dateRange end via --config-file is accepted for cron", async () => {
+      const k = await useFake();
+      const f = writeJson("cron-end.json", {
+        cron: "0 4 * * *",
+        dateRange: ["2030-01-01T00:00:00", "2030-01-02T00:00:00"],
+      });
+      const r = await run(
+        sb,
+        ["maintenance", "add", "--title", "w", "--strategy", "cron", "--config-file", f],
+        creds(k.url),
+      );
+      expect(r.code).toBe(0);
+      expect(sentAdd(k).dateRange).toEqual(["2030-01-01T00:00:00", "2030-01-02T00:00:00"]);
+    });
+
+    test("recurring-interval accepts intervalDay above 31", async () => {
+      const k = await useFake();
+      const f = writeJson("interval400.json", { intervalDay: 400 });
+      const r = await run(
+        sb,
+        [
+          "maintenance",
+          "add",
+          "--title",
+          "w",
+          "--strategy",
+          "recurring-interval",
+          "--config-file",
+          f,
+        ],
+        creds(k.url),
+      );
+      expect(r.code).toBe(0);
+      expect(sentAdd(k).intervalDay).toBe(400);
+    });
+
+    test("recurring-interval accepts intervalDay 3650", async () => {
+      const k = await useFake();
+      const f = writeJson("interval3650.json", { intervalDay: 3650 });
+      const r = await run(
+        sb,
+        [
+          "maintenance",
+          "add",
+          "--title",
+          "w",
+          "--strategy",
+          "recurring-interval",
+          "--config-file",
+          f,
+        ],
+        creds(k.url),
+      );
+      expect(r.code).toBe(0);
+      expect(sentAdd(k).intervalDay).toBe(3650);
+    });
+
+    test("recurring-interval rejects intervalDay above 3650 before connecting", async () => {
+      const k = await useFake();
+      const f = writeJson("interval4000.json", { intervalDay: 4000 });
+      const r = await run(
+        sb,
+        [
+          "maintenance",
+          "add",
+          "--title",
+          "w",
+          "--strategy",
+          "recurring-interval",
+          "--config-file",
+          f,
+        ],
+        creds(k.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("no greater than 3650 for recurring-interval");
+      expect(k.calls).toHaveLength(0);
+    });
+
+    test.each(["0 9 * * 5#3", "0 9 * * 5#L", "0 9 * * MON#2", "0 9 * * 5L"])(
+      "cron accepts the croner 8 day-of-week form %p",
+      async (cron) => {
+        const k = await useFake();
+        const f = writeJson("cron8.json", { cron });
+        const r = await run(
+          sb,
+          ["maintenance", "add", "--title", "w", "--strategy", "cron", "--config-file", f],
+          creds(k.url),
+        );
+        expect(r.code).toBe(0);
+        expect(sentAdd(k).cron).toBe(cron);
+      },
+    );
+
+    test.each(["0 9 * * * * *", "0 9 * * L", "0 9 * * FOO"])(
+      "cron still rejects %p before connecting",
+      async (cron) => {
+        const k = await useFake();
+        const f = writeJson("badcron.json", { cron });
+        const r = await run(
+          sb,
+          ["maintenance", "add", "--title", "w", "--strategy", "cron", "--config-file", f],
+          creds(k.url),
+        );
+        expect(r.code).toBe(2);
+        expect(r.stderr).toContain("5 or 6 whitespace-separated cron fields");
+        expect(k.calls).toHaveLength(0);
+      },
+    );
+  });
+
+  describe("edit", () => {
+    test("--end on a cron window is accepted", async () => {
+      const k = await useFake({
+        maintenances: [
+          {
+            id: 1,
+            title: "cron win",
+            strategy: "cron",
+            cron: "0 4 * * *",
+            duration: 3600,
+            dateRange: ["2030-01-01T02:00:00"],
+          },
+        ],
+      });
+      const r = await run(
+        sb,
+        ["maintenance", "edit", "1", "--end", "2030-01-01T05:00:00"],
+        creds(k.url),
+      );
+      expect(r.code).toBe(0);
+      expect(sentEdit(k).dateRange).toEqual(["2030-01-01T02:00:00", "2030-01-01T05:00:00"]);
+    });
+
+    test("--set intervalDay above 31 on recurring-interval is accepted", async () => {
+      const k = await useFake({
+        maintenances: [
+          {
+            id: 1,
+            title: "every n days",
+            strategy: "recurring-interval",
+            intervalDay: 2,
+            timeRange: [
+              { hours: 2, minutes: 0 },
+              { hours: 3, minutes: 0 },
+            ],
+          },
+        ],
+      });
+      const r = await run(
+        sb,
+        ["maintenance", "edit", "1", "--set", "intervalDay=400"],
+        creds(k.url),
+      );
+      expect(r.code).toBe(0);
+      expect(sentEdit(k).intervalDay).toBe(400);
+    });
+
+    test("--set cron with a croner 8 day-of-week form is accepted", async () => {
+      const k = await useFake({
+        maintenances: [
+          {
+            id: 1,
+            title: "cron win",
+            strategy: "cron",
+            cron: "0 4 * * *",
+            duration: 3600,
+          },
+        ],
+      });
+      const r = await run(
+        sb,
+        ["maintenance", "edit", "1", "--set", "cron=0 9 * * 5#3"],
+        creds(k.url),
+      );
+      expect(r.code).toBe(0);
+      expect(sentEdit(k).cron).toBe("0 9 * * 5#3");
+    });
+
+    test("switching single to cron keeps the stored end date", async () => {
+      const k = await useFake({
+        maintenances: [
+          {
+            id: 1,
+            title: "one-off",
+            strategy: "single",
+            dateRange: ["2030-01-01T02:00:00", "2030-01-01T04:00:00"],
+          },
+        ],
+      });
+      const r = await run(
+        sb,
+        [
+          "maintenance",
+          "edit",
+          "1",
+          "--set",
+          "strategy=cron",
+          "--set",
+          "cron=0 4 * * *",
+          "--set",
+          "durationMinutes=60",
+        ],
+        creds(k.url),
+      );
+      expect(r.code).toBe(0);
+      const sent = sentEdit(k);
+      expect(sent.strategy).toBe("cron");
+      expect(sent.dateRange).toEqual(["2030-01-01T02:00:00", "2030-01-01T04:00:00"]);
+    });
+  });
+});
