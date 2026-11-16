@@ -30,8 +30,12 @@ async function spawnCli(
   });
   const stdoutP = new Response(proc.stdout).text();
   const stderrP = new Response(proc.stderr).text();
-  const timer = new Promise<"timeout">((r) => setTimeout(() => r("timeout"), TIMEOUT_MS));
-  const code = await Promise.race([proc.exited, timer]);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutP = new Promise<"timeout">((r) => {
+    timer = setTimeout(() => r("timeout"), TIMEOUT_MS);
+  });
+  const code = await Promise.race([proc.exited, timeoutP]);
+  clearTimeout(timer);
   if (code === "timeout") {
     proc.kill();
     await Promise.allSettled([stdoutP, stderrP, proc.exited]);
@@ -56,11 +60,17 @@ afterEach(async () => {
 });
 
 describe("cli as a real process", () => {
-  test("a command that connects exits 0 instead of hanging on the socket", async () => {
-    const r = await spawnCli(sb, ["tags", "list"], creds(kuma.url));
-    expect(r.code).toBe(0);
-    expect(JSON.parse(r.stdout)).toEqual([{ id: 1, name: "staging", color: "#00ff00" }]);
-  });
+  // bun test's default per-test timeout is 5s, below spawnCli's own 20s
+  // watchdog, so the hang-detection branch needs a wider test timeout.
+  test(
+    "a command that connects exits 0 instead of hanging on the socket",
+    async () => {
+      const r = await spawnCli(sb, ["tags", "list"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      expect(JSON.parse(r.stdout)).toEqual([{ id: 1, name: "staging", color: "#00ff00" }]);
+    },
+    TIMEOUT_MS + 10_000,
+  );
 
   test("an unknown command exits 2", async () => {
     const r = await spawnCli(sb, ["not-a-command"]);

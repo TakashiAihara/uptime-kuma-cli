@@ -120,7 +120,8 @@ export function parseAddedLines(diff: string): AddedLines {
       file = undefined;
       inHunk = false;
     } else if (!inHunk && line.startsWith("+++ ")) {
-      const path = unquoteGitPath(line.slice(4));
+      // git appends a TAB after the path when the name contains a space
+      const path = unquoteGitPath(line.slice(4).replace(/\t$/, ""));
       file = path === "/dev/null" ? undefined : path.replace(/^b\//, "");
       inHunk = false;
     } else if (line.startsWith("@@ ")) {
@@ -289,7 +290,11 @@ function main(): void {
     }
     const added = gitAddedLines(base, root);
     if (added === null) process.exit(2);
-    const changedSrc = [...added.keys()].filter((f) => f.startsWith(SRC_PREFIX));
+    // same domain as listSrcFiles: only .ts files are required to appear in
+    // the report; other src/ additions have no coverable lines by definition
+    const changedSrc = [...added.keys()].filter(
+      (f) => f.startsWith(SRC_PREFIX) && f.endsWith(".ts"),
+    );
     const unmeasured = changedSrc.filter((f) => !lcov.has(f));
     if (unmeasured.length > 0) {
       console.error(

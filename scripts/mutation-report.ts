@@ -130,7 +130,12 @@ export function buildReport(input: {
     "Surviving mutants are informational and do not fail CI.",
   );
   if (total === 0) {
-    out.push("", "No high/medium mutants on the changed lines.");
+    out.push(
+      "",
+      input.errors.length > 0
+        ? "No mutants were tested — see Errors for the files that failed."
+        : "No high/medium mutants on the changed lines.",
+    );
     if (input.errors.length > 0) {
       out.push("", "### Errors", "");
       for (const e of input.errors) out.push(`- ${e}`);
@@ -218,7 +223,7 @@ function main(): void {
   const added = gitAddedLines(base, ROOT);
   if (added === null) process.exit(2);
   const changed = [...added.entries()].filter(
-    ([f]) => f.startsWith("src/") && existsSync(join(ROOT, f)),
+    ([f]) => f.startsWith("src/") && f.endsWith(".ts") && existsSync(join(ROOT, f)),
   );
   const head = gitHead(ROOT);
 

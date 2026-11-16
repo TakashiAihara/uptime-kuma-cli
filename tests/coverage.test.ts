@@ -94,6 +94,19 @@ index 1111111..2222222 100644
     expect(added.get("src/a.ts")).toEqual(new Set([2, 3, 4]));
     expect(added.size).toBe(1);
   });
+
+  test("strips the TAB git appends after a path containing a space", () => {
+    const diff = `diff --git a/src/my file.ts b/src/my file.ts
+index 1111111..2222222 100644
+--- a/src/my file.ts\t
++++ b/src/my file.ts\t
+@@ -1,0 +2 @@
++added
+`;
+    const added = parseAddedLines(diff);
+    expect(added.get("src/my file.ts")).toEqual(new Set([2]));
+    expect(added.size).toBe(1);
+  });
 });
 
 describe("unquoteGitPath", () => {
