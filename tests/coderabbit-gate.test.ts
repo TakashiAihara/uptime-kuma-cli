@@ -33,6 +33,12 @@ describe("gateState", () => {
     expect(gateState("").state).toBe("pending");
   });
 
+  test("tolerates detail CodeRabbit appends to a known outcome", () => {
+    expect(gateState("Review completed — 3 files reviewed").state).toBe("success");
+    expect(gateState("Review in progress: scripts/coderabbit-gate.ts").state).toBe("pending");
+    expect(gateState("Review queued: waiting for a free slot").state).toBe("pending");
+  });
+
   test("fails every other outcome and says what to do", () => {
     for (const description of [
       "Review paused",
@@ -150,6 +156,35 @@ describe("evaluate", () => {
 
     const body = JSON.parse(String(calls[1]!.body)) as Record<string, unknown>;
     expect(body.state).toBe("pending");
+  });
+
+  test("follows Link pagination until the CodeRabbit status is found", async () => {
+    const filler = Array.from({ length: 100 }, (_, i) =>
+      status({ id: i + 1, context: "ci/check", description: "build" }),
+    );
+    const page2 = `https://api.github.com/repos/${REPO}/commits/${SHA}/statuses?per_page=100&page=2`;
+    const calls: { url: string; method: string; body?: unknown }[] = [];
+    const impl = (async (url: string | URL | Request, init?: RequestInit) => {
+      const u = String(url);
+      calls.push({ url: u, method: init?.method ?? "GET", body: init?.body });
+      if (u === page2) {
+        return new Response(JSON.stringify([status({ description: "Review completed" })]), {
+          status: 200,
+        });
+      }
+      return new Response(JSON.stringify(filler), {
+        status: 200,
+        headers: {
+          link: `<${page2}>; rel="next", <https://api.github.com/repos/${REPO}/commits/${SHA}/statuses?per_page=100&page=3>; rel="last"`,
+        },
+      });
+    }) as typeof fetch;
+
+    await evaluate("tok", REPO, SHA, undefined, false, impl);
+
+    expect(calls.map((c) => c.method)).toEqual(["GET", "GET", "POST"]);
+    expect(calls[1]!.url).toBe(page2);
+    expect(JSON.parse(String(calls[2]!.body))).toMatchObject({ state: "success" });
   });
 
   test("dry-run prints the status it would post without calling the API for it", async () => {

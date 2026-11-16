@@ -40,13 +40,15 @@ export function gateState(description: string | null | undefined): {
   state: GateState;
   description: string;
 } {
-  if (description === "Review completed") {
+  // CodeRabbit's description is free text — match the known outcomes by prefix
+  // so added detail cannot wedge the gate; anything unrecognized still fails.
+  if (description?.startsWith("Review completed")) {
     return { state: "success", description: "CodeRabbit review completed" };
   }
-  if (description === "Review queued") {
+  if (description?.startsWith("Review queued")) {
     return { state: "pending", description: "CodeRabbit review queued" };
   }
-  if (description === "Review in progress") {
+  if (description?.startsWith("Review in progress")) {
     return { state: "pending", description: "CodeRabbit review in progress" };
   }
   if (description === undefined || description === null || description === "") {
@@ -72,21 +74,18 @@ export function latestCodeRabbitDescription(statuses: CommitStatus[]): string | 
 
 type Fetch = typeof fetch;
 
-async function api(
-  token: string,
-  path: string,
-  init: RequestInit | undefined,
-  fetchImpl: Fetch,
-): Promise<unknown> {
+function apiHeaders(token: string): Record<string, string> {
+  return {
+    Accept: "application/vnd.github+json",
+    Authorization: `Bearer ${token}`,
+    "X-GitHub-Api-Version": "2022-11-28",
+    "User-Agent": "uptime-kuma-cli-coderabbit-gate",
+  };
+}
+
+async function api(token: string, path: string, fetchImpl: Fetch): Promise<unknown> {
   const res = await fetchImpl(`https://api.github.com${path}`, {
-    ...init,
-    headers: {
-      Accept: "application/vnd.github+json",
-      Authorization: `Bearer ${token}`,
-      "X-GitHub-Api-Version": "2022-11-28",
-      "User-Agent": "uptime-kuma-cli-coderabbit-gate",
-      ...init?.headers,
-    },
+    headers: apiHeaders(token),
   });
   if (!res.ok) {
     const body = (await res.text()).slice(0, 500);
@@ -106,7 +105,6 @@ async function openPullsForCommit(
   const pulls = (await api(
     token,
     `/repos/${repo}/commits/${sha}/pulls?per_page=100`,
-    undefined,
     fetchImpl,
   )) as PullRequest[];
   return pulls.filter((p) => p.state === "open");
@@ -118,13 +116,23 @@ async function pullRequest(
   number: number,
   fetchImpl: Fetch,
 ): Promise<PullRequest | null> {
-  const pr = (await api(
-    token,
-    `/repos/${repo}/pulls/${number}`,
-    undefined,
-    fetchImpl,
-  )) as PullRequest;
+  const pr = (await api(token, `/repos/${repo}/pulls/${number}`, fetchImpl)) as PullRequest;
   return pr.state === "open" ? pr : null;
+}
+
+// The statuses endpoint pages at 100 and a busy PR can push the CodeRabbit
+// status past page one, so follow Link rel="next". The cap only bounds the
+// requests; pages arrive newest first, so the latest CodeRabbit status is in
+// the pages already fetched even if the cap is hit.
+const STATUS_PAGE_LIMIT = 10;
+
+function nextPageUrl(link: string | null): string | null {
+  if (link === null) return null;
+  for (const part of link.split(",")) {
+    const match = /<([^>]+)>\s*;\s*rel="next"/.exec(part.trim());
+    if (match !== null) return match[1]!;
+  }
+  return null;
 }
 
 async function statusesFor(
@@ -133,12 +141,19 @@ async function statusesFor(
   sha: string,
   fetchImpl: Fetch,
 ): Promise<CommitStatus[]> {
-  return (await api(
-    token,
-    `/repos/${repo}/commits/${sha}/statuses?per_page=100`,
-    undefined,
-    fetchImpl,
-  )) as CommitStatus[];
+  const statuses: CommitStatus[] = [];
+  let url: string | null =
+    `https://api.github.com/repos/${repo}/commits/${sha}/statuses?per_page=100`;
+  for (let page = 0; page < STATUS_PAGE_LIMIT && url !== null; page++) {
+    const res = await fetchImpl(url, { headers: apiHeaders(token) });
+    if (!res.ok) {
+      const body = (await res.text()).slice(0, 500);
+      throw new Error(`GET ${url} failed: ${res.status} ${body}`);
+    }
+    statuses.push(...((await res.json()) as CommitStatus[]));
+    url = nextPageUrl(res.headers.get("link"));
+  }
+  return statuses;
 }
 
 async function publishStatus(
@@ -163,13 +178,7 @@ async function publishStatus(
   }
   const res = await fetchImpl(`https://api.github.com/repos/${repo}/statuses/${sha}`, {
     method: "POST",
-    headers: {
-      Accept: "application/vnd.github+json",
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-      "X-GitHub-Api-Version": "2022-11-28",
-      "User-Agent": "uptime-kuma-cli-coderabbit-gate",
-    },
+    headers: { ...apiHeaders(token), "Content-Type": "application/json" },
     body,
   });
   if (!res.ok) {
