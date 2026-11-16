@@ -183,6 +183,38 @@ describe("status-pages get on Kuma 2.x", () => {
     expect(r.json().incident.title).toBe("Second");
   });
 
+  test("get folds a stored customUrl into the public url", async () => {
+    // the public monitor JSON emits url = customUrl ?? the monitor's url;
+    // a customUrl different from the monitor url must win
+    const k = await useFake({
+      statusPages: [structuredClone(STATUS)],
+      statusPageGroups: {
+        7: [
+          {
+            id: 3,
+            name: "Core",
+            weight: 1,
+            monitorList: [
+              {
+                id: 5,
+                name: "web",
+                sendUrl: 1,
+                type: "http",
+                customUrl: "https://status.example.com/health",
+                url: "https://example.com",
+              },
+            ],
+          },
+        ],
+      },
+    });
+    const r = await run(sb, ["status-pages", "get", "status"], creds(k.url));
+    expect(r.code).toBe(0);
+    const monitor = r.json().publicGroupList[0].monitorList[0];
+    expect(monitor.url).toBe("https://status.example.com/health");
+    expect(monitor).not.toHaveProperty("customUrl");
+  });
+
   test("incident is null and incidents empty when nothing is pinned", async () => {
     const k = await useFake({
       statusPages: [structuredClone(STATUS)],
