@@ -61,12 +61,11 @@ const ANALYTICS_TYPES = ["google", "umami", "plausible", "matomo", "rybbit"] as 
 const PNG_DATA_URL = "data:image/png;base64,";
 
 // The reduced shapes saveStatusPage reads: groups keep only id/name and
-// monitors only id/sendUrl; extra keys a `get` output carries (weight, type,
-// url, tags, ...) are allowed in the file and ignored. Dropping url is not
-// cosmetic on 2.x: its saveStatusPage stores a sent monitor url as
-// monitor_group.custom_url, and the public url it would feed back is the
-// redacted "***" form.
-type SaveMonitor = { id: number; sendUrl?: boolean | 0 | 1 };
+// monitors id/sendUrl, plus url on the auto-fetched 2.x path when the public
+// url is a custom one (toSaveGroup). A file's publicGroupList cannot express
+// custom URLs — its monitor url is ignored like every other extra key a
+// `get` output carries (weight, type, url, tags, ...).
+type SaveMonitor = { id: number; sendUrl?: boolean | 0 | 1; url?: string };
 type SaveGroup = { id?: number; name: string; monitorList: SaveMonitor[] };
 type SaveFile = {
   overrides: Record<string, unknown>;
@@ -157,6 +156,7 @@ function newestIncident(incidents: Record<string, unknown>[]): Record<string, un
 async function fetchPublicStatusPage(
   s: KumaSession,
   slug: string,
+  opts: { redactUrls?: boolean } = {},
 ): Promise<{ publicGroupList: unknown[]; incident: unknown; incidents: unknown[] }> {
   // slug is one from statusPageList, so Kuma's checkSlug charset needs no encoding
   const cacheBust = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
@@ -214,7 +214,14 @@ async function fetchPublicStatusPage(
     }
     incidents = incident === null ? [] : [incident];
   }
-  return { publicGroupList: redactGroupUrls(body.publicGroupList), incident, incidents };
+  // redactUrls is for internal callers that compare or echo the urls back to
+  // Kuma (status-pages save); anything printed keeps the redacted form
+  return {
+    publicGroupList:
+      opts.redactUrls === false ? body.publicGroupList : redactGroupUrls(body.publicGroupList),
+    incident,
+    incidents,
+  };
 }
 
 // Monitor.toPublicJSON adds the monitor url when sendUrl is on; a password in
@@ -376,7 +383,14 @@ function parseSaveFile(file: Record<string, unknown>): SaveFile {
 
 // The public route's groups are Group.toPublicJSON rows; only id, name and
 // the monitor id/sendUrl pairs survive the reduction saveStatusPage reads.
-function toSaveGroup(raw: unknown): SaveGroup {
+// On 2.x the public monitor url is customUrl ?? the monitor's own url, and
+// saveStatusPage rewrites monitor_group on every save: a url that differs
+// from the monitor's own is a stored custom_url and goes back or the save
+// clears it, while an equal one is not sent — storing it would pin the
+// monitor url as a custom url. A sendUrl-off monitor has no public url, so
+// a custom_url on it cannot be detected and is cleared; the UI cannot
+// preserve it either.
+function toSaveGroup(raw: unknown, s: KumaSession): SaveGroup {
   const g = raw as Record<string, unknown> | null;
   if (g === null || typeof g !== "object" || !Array.isArray(g.monitorList)) {
     fail(70, "unexpected /api/status-page response");
@@ -395,6 +409,10 @@ function toSaveGroup(raw: unknown): SaveGroup {
     const out: SaveMonitor = { id };
     if (mon?.sendUrl !== undefined) {
       out.sendUrl = mon.sendUrl as boolean | 0 | 1;
+    }
+    const url = mon?.url;
+    if (s.majorVersion >= 2 && typeof url === "string" && url !== s.monitorById(id)?.url) {
+      out.url = url;
     }
     return out;
   });
@@ -485,7 +503,12 @@ export function registerStatusPages(program: Command): void {
       const page = statusPageBySlug(s, slug);
       if (page === undefined) fail(1, `status page ${slug} not found`);
       const fetchedConfig = await fetchStatusPageConfig(s, slug);
-      const { publicGroupList: fetchedGroups } = await fetchPublicStatusPage(s, slug);
+      // this read feeds the save payload only, never stdout: it stays
+      // unredacted so toSaveGroup can tell a custom_url from the monitor's
+      // own url and send it back on 2.x
+      const { publicGroupList: fetchedGroups } = await fetchPublicStatusPage(s, slug, {
+        redactUrls: false,
+      });
       // saveStatusPage overwrites every column it reads, so the fetched
       // toJSON goes back with the file merged over it — like the UI, which
       // edits the fetched config and posts it whole
@@ -504,7 +527,7 @@ export function registerStatusPages(program: Command): void {
         });
         fail(3, "");
       }
-      const groups = file.groups ?? fetchedGroups.map(toSaveGroup);
+      const groups = file.groups ?? fetchedGroups.map((g) => toSaveGroup(g, s));
       const fetchedGroupIds = new Set(
         fetchedGroups.map((g) => Number((g as { id?: unknown })?.id)),
       );
@@ -535,7 +558,12 @@ export function registerStatusPages(program: Command): void {
       } catch (e) {
         // exit 70 is an unexpected response shape, not a failed read: keep it loud
         if (!(e instanceof CliError) || e.exitCode === 70) throw e;
-        printJson({ ...merged, publicGroupList: savedGroups, incident: null, incidents: [] });
+        printJson({
+          ...merged,
+          publicGroupList: redactGroupUrls(savedGroups),
+          incident: null,
+          incidents: [],
+        });
         console.error(
           `warning: status page ${newSlug} was saved, but reading it back failed: ${e.message}`,
         );

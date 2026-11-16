@@ -715,6 +715,31 @@ describe("status-pages", () => {
       ]);
     });
 
+    test("a differing public url sends no monitor url on 1.x", async () => {
+      kuma.state.statusPageGroups[7] = [
+        {
+          id: 3,
+          name: "Core",
+          weight: 1,
+          monitorList: [
+            // the public url differs from the monitor's own; the url
+            // round-trip is a 2.x custom_url feature, so 1.x keeps { id, sendUrl }
+            { id: 5, name: "web", sendUrl: 1, type: "http", url: "https://custom.example.com" },
+          ],
+        },
+      ];
+      const f = writeJson("page.json", { title: "x" });
+      const r = await run(
+        sb,
+        ["status-pages", "save", "status", "--config-file", f],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(0);
+      expect(callsOf("saveStatusPage")[0]!.args[3]).toEqual([
+        { id: 3, name: "Core", monitorList: [{ id: 5, sendUrl: 1 }] },
+      ]);
+    });
+
     test("an empty publicGroupList deletes every group", async () => {
       kuma.state.statusPageGroups[7] = [{ id: 3, name: "Core", weight: 1, monitorList: [] }];
       const f = writeJson("page.json", { publicGroupList: [] });

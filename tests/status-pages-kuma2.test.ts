@@ -476,8 +476,9 @@ describe("status-pages save on Kuma 2.x", () => {
                 name: "web",
                 sendUrl: 1,
                 type: "http",
-                url: "https://example.com",
-                tags: [{ name: "prod" }],
+                // a custom_url set in the UI folds into the public url
+                customUrl: "https://status.example.com/health",
+                url: "https://status.example.com/health",
               },
             ],
           },
@@ -487,7 +488,8 @@ describe("status-pages save on Kuma 2.x", () => {
     const got = await run(sb, ["status-pages", "get", "status"], creds(k.url));
     expect(got.code).toBe(0);
     // the public monitor url the get output carries is dropped on save: only
-    // id and sendUrl reach saveStatusPage, so no custom_url is stored
+    // id and sendUrl reach saveStatusPage, so the custom_url is cleared — an
+    // explicit publicGroupList cannot express custom URLs
     const f = writeJson("page.json", {
       title: "Round trip",
       publicGroupList: got.json().publicGroupList,
@@ -500,10 +502,11 @@ describe("status-pages save on Kuma 2.x", () => {
     const group = k.state.statusPageGroups[7]![0]!;
     const monitor = (group.monitorList as Record<string, unknown>[])[0]!;
     expect(monitor).not.toHaveProperty("customUrl");
+    // without a sent url the public url falls back to the monitor's own
     expect(monitor.url).toBe("https://example.com");
   });
 
-  test("groups fetched for the save send no monitor url either", async () => {
+  test("groups fetched for the save send a differing public url back", async () => {
     const k = await useFake({
       statusPages: [structuredClone(STATUS)],
       monitors: structuredClone(MONITORS),
@@ -531,14 +534,181 @@ describe("status-pages save on Kuma 2.x", () => {
     const f = writeJson("page.json", { title: "x" });
     const r = await run(sb, ["status-pages", "save", "status", "--config-file", f], creds(k.url));
     expect(r.code).toBe(0);
+    // the public url differs from the monitor's own, so it is a custom_url
+    // and goes back — otherwise the save would clear it
     expect(callsOf(k, "saveStatusPage")[0]!.args[3]).toEqual([
-      { id: 3, name: "Core", monitorList: [{ id: 5, sendUrl: 1 }] },
+      {
+        id: 3,
+        name: "Core",
+        monitorList: [{ id: 5, sendUrl: 1, url: "https://status.example.com/health" }],
+      },
     ]);
     const group = k.state.statusPageGroups[7]![0]!;
     const monitor = (group.monitorList as Record<string, unknown>[])[0]!;
+    expect(monitor.customUrl).toBe("https://status.example.com/health");
+  });
+
+  test("a public url equal to the monitor's own sends no url", async () => {
+    const k = await useFake({
+      statusPages: [structuredClone(STATUS)],
+      monitors: structuredClone(MONITORS),
+      statusPageGroups: {
+        7: [
+          {
+            id: 3,
+            name: "Core",
+            weight: 1,
+            monitorList: [
+              { id: 5, name: "web", sendUrl: 1, type: "http", url: "https://example.com" },
+            ],
+          },
+        ],
+      },
+    });
+    const f = writeJson("page.json", { title: "x" });
+    const r = await run(sb, ["status-pages", "save", "status", "--config-file", f], creds(k.url));
+    expect(r.code).toBe(0);
+    // no custom_url is stored and none is pinned: the payload stays { id, sendUrl }
+    expect(callsOf(k, "saveStatusPage")[0]!.args[3]).toEqual([
+      { id: 3, name: "Core", monitorList: [{ id: 5, sendUrl: 1 }] },
+    ]);
+    const monitor = (k.state.statusPageGroups[7]![0]!.monitorList as Record<string, unknown>[])[0]!;
     expect(monitor).not.toHaveProperty("customUrl");
-    // without a sent url the public url falls back to the monitor's own
-    expect(monitor.url).toBe("https://example.com");
+  });
+
+  test("a custom url on a sendUrl-off monitor cannot be detected and is cleared", async () => {
+    const k = await useFake({
+      statusPages: [structuredClone(STATUS)],
+      monitors: structuredClone(MONITORS),
+      statusPageGroups: {
+        7: [
+          {
+            id: 3,
+            name: "Core",
+            weight: 1,
+            monitorList: [
+              {
+                id: 5,
+                name: "web",
+                sendUrl: 0,
+                type: "http",
+                customUrl: "https://status.example.com/health",
+                url: "https://status.example.com/health",
+              },
+            ],
+          },
+        ],
+      },
+    });
+    const f = writeJson("page.json", { title: "x" });
+    const r = await run(sb, ["status-pages", "save", "status", "--config-file", f], creds(k.url));
+    expect(r.code).toBe(0);
+    // the public JSON carries no url when sendUrl is off, so nothing goes back
+    expect(callsOf(k, "saveStatusPage")[0]!.args[3]).toEqual([
+      { id: 3, name: "Core", monitorList: [{ id: 5, sendUrl: 0 }] },
+    ]);
+    const monitor = (k.state.statusPageGroups[7]![0]!.monitorList as Record<string, unknown>[])[0]!;
+    expect(monitor).not.toHaveProperty("customUrl");
+  });
+
+  test("a custom url on a monitor without its own url is sent back", async () => {
+    const k = await useFake({
+      statusPages: [structuredClone(STATUS)],
+      monitors: [...structuredClone(MONITORS), { id: 7, name: "ping-target", type: "ping" }],
+      statusPageGroups: {
+        7: [
+          {
+            id: 3,
+            name: "Core",
+            weight: 1,
+            monitorList: [
+              {
+                id: 7,
+                name: "ping-target",
+                sendUrl: 1,
+                type: "ping",
+                customUrl: "https://status.example.com/ping",
+                url: "https://status.example.com/ping",
+              },
+            ],
+          },
+        ],
+      },
+    });
+    const f = writeJson("page.json", { title: "x" });
+    const r = await run(sb, ["status-pages", "save", "status", "--config-file", f], creds(k.url));
+    expect(r.code).toBe(0);
+    // the monitor has no url of its own, so the public url can only be a
+    // custom_url and goes back
+    expect(callsOf(k, "saveStatusPage")[0]!.args[3]).toEqual([
+      {
+        id: 3,
+        name: "Core",
+        monitorList: [{ id: 7, sendUrl: 1, url: "https://status.example.com/ping" }],
+      },
+    ]);
+  });
+
+  test("a custom url with a password is sent back but never printed", async () => {
+    const custom = "https://probe:urlpw-custom@example.com/health";
+    const k = await useFake({
+      statusPages: [structuredClone(STATUS)],
+      monitors: structuredClone(MONITORS),
+      statusPageGroups: {
+        7: [
+          {
+            id: 3,
+            name: "Core",
+            weight: 1,
+            monitorList: [
+              { id: 5, name: "web", sendUrl: 1, type: "http", customUrl: custom, url: custom },
+            ],
+          },
+        ],
+      },
+    });
+    const f = writeJson("page.json", { title: "x" });
+    const r = await run(sb, ["status-pages", "save", "status", "--config-file", f], creds(k.url));
+    expect(r.code).toBe(0);
+    // the raw url goes to Kuma so custom_url survives...
+    expect(callsOf(k, "saveStatusPage")[0]!.args[3]).toEqual([
+      { id: 3, name: "Core", monitorList: [{ id: 5, sendUrl: 1, url: custom }] },
+    ]);
+    // ...but stdout only ever shows the redacted form
+    expect(r.stdout).not.toContain("urlpw-custom");
+    expect(r.json().publicGroupList[0].monitorList[0].url).toBe(
+      "https://probe:***@example.com/health",
+    );
+  });
+
+  test("the degraded read-back print redacts a sent custom url", async () => {
+    const custom = "https://probe:urlpw-custom@example.com/health";
+    const k = await useFake({
+      statusPages: [structuredClone(STATUS)],
+      monitors: structuredClone(MONITORS),
+      statusPageGroups: {
+        7: [
+          {
+            id: 3,
+            name: "Core",
+            weight: 1,
+            monitorList: [
+              { id: 5, name: "web", sendUrl: 1, type: "http", customUrl: custom, url: custom },
+            ],
+          },
+        ],
+      },
+    });
+    // the pre-save public read passes, the read-back fails
+    k.state.statusPageApiFailAfter = 1;
+    const f = writeJson("page.json", { title: "x" });
+    const r = await run(sb, ["status-pages", "save", "status", "--config-file", f], creds(k.url));
+    expect(r.code).toBe(0);
+    expect(r.stderr).toContain("/api/status-page/status");
+    expect(r.stdout).not.toContain("urlpw-custom");
+    expect(r.json().publicGroupList[0].monitorList[0].url).toBe(
+      "https://probe:***@example.com/health",
+    );
   });
 
   test("the save output carries incidents like get", async () => {
