@@ -78,6 +78,10 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+          # the PR head, not the merge commit: the diff and mutant line
+          # numbers then match the author's files, and the head SHA in the
+          # report is a real commit on the PR
+          ref: ${{ github.event.pull_request.head.sha }}
       - uses: jdx/mise-action@08ae2a091c038e1e05ec6f5115dc5c69d5a2a6b8 # v5.1.2
       # mewt publishes no builds for linux-arm64 or macOS-x64, so it stays out
       # of .mise.toml where `mise install` would fail on those platforms; -g
@@ -89,7 +93,9 @@ jobs:
       # Fork PRs get a read-only token, so the comment step only runs for
       # same-repo branches; the report stays in the job log there.
       - name: upsert PR comment
-        if: always() && github.event.pull_request.head.repo.full_name == github.repository
+        # cancelled runs are superseded by a newer push; posting the failure
+        # fallback for them would briefly show a stale "failed" comment
+        if: always() && github.event.pull_request.head.repo.full_name == github.repository && !cancelled()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.pull_request.number }}
