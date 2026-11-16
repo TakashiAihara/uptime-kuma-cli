@@ -2,7 +2,7 @@
 /**
  * Publish the `coderabbit-review` commit status that branch protection requires.
  *
- *   bun scripts/coderabbit-gate.ts (--pr <number> | --sha <commit>) [--repo o/r] [--dry-run]
+ *   bun scripts/coderabbit-gate.ts --sha <commit> [--repo o/r] [--dry-run]
  *
  * CodeRabbit reports through a commit status whose state is always `success` —
  * the outcome lives in the description ("Review completed", "Review paused",
@@ -26,12 +26,6 @@ export type CommitStatus = {
   state: string;
   description: string | null;
   created_at: string;
-};
-
-export type PullRequest = {
-  number: number;
-  state: string;
-  head: { sha: string };
 };
 
 export type GateState = "success" | "failure" | "pending";
@@ -75,9 +69,23 @@ export function latestCodeRabbitDescription(statuses: CommitStatus[]): string | 
 type Fetch = typeof fetch;
 
 // The gate is a required check and no event may come after a failed run, so a
-// transient API failure must not strand it: retry server errors, rate limits,
-// and network failures a few times before giving up.
+// transient API failure must not strand it: retry server errors, rate limits
+// (GitHub answers secondary limits with 403 + Retry-After, not just 429), and
+// network failures a few times before giving up.
 const MAX_ATTEMPTS = 3;
+
+function isRetryable(res: Response): boolean {
+  if (res.status >= 500 || res.status === 429) return true;
+  if (res.status !== 403) return false;
+  return (
+    res.headers.get("retry-after") !== null || res.headers.get("x-ratelimit-remaining") === "0"
+  );
+}
+
+function retryAfterMs(res: Response): number {
+  const seconds = Number(res.headers.get("retry-after"));
+  return Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds * 1000, 60_000) : 0;
+}
 
 async function fetchWithRetry(
   url: string,
@@ -85,15 +93,15 @@ async function fetchWithRetry(
   fetchImpl: Fetch,
 ): Promise<Response> {
   for (let attempt = 1; ; attempt++) {
+    let delay = 500 * 2 ** (attempt - 1);
     try {
       const res = await fetchImpl(url, init);
-      if (res.ok || attempt === MAX_ATTEMPTS || (res.status < 500 && res.status !== 429)) {
-        return res;
-      }
+      if (res.ok || attempt === MAX_ATTEMPTS || !isRetryable(res)) return res;
+      delay = Math.max(delay, retryAfterMs(res));
     } catch (err) {
       if (attempt === MAX_ATTEMPTS) throw err;
     }
-    await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** (attempt - 1)));
+    await new Promise((resolve) => setTimeout(resolve, delay));
   }
 }
 
@@ -104,29 +112,6 @@ function apiHeaders(token: string): Record<string, string> {
     "X-GitHub-Api-Version": "2022-11-28",
     "User-Agent": "uptime-kuma-cli-coderabbit-gate",
   };
-}
-
-async function api(token: string, path: string, fetchImpl: Fetch): Promise<unknown> {
-  const res = await fetchWithRetry(
-    `https://api.github.com${path}`,
-    { headers: apiHeaders(token) },
-    fetchImpl,
-  );
-  if (!res.ok) {
-    const body = (await res.text()).slice(0, 500);
-    throw new Error(`GET ${path} failed: ${res.status} ${body}`);
-  }
-  return res.json();
-}
-
-async function pullRequest(
-  token: string,
-  repo: string,
-  number: number,
-  fetchImpl: Fetch,
-): Promise<PullRequest | null> {
-  const pr = (await api(token, `/repos/${repo}/pulls/${number}`, fetchImpl)) as PullRequest;
-  return pr.state === "open" ? pr : null;
 }
 
 // The statuses endpoint pages at 100 and a busy PR can push the CodeRabbit
@@ -218,48 +203,26 @@ export async function evaluate(
   await publishStatus(token, repo, sha, gate.state, gate.description, targetUrl, dryRun, fetchImpl);
 }
 
-// The head SHAs a run must evaluate. --pr resolves the open PR's current head
-// (manual dispatch). --sha evaluates the commit itself: the workflow keys its
-// concurrency group on that same sha, so every writer of a commit's gate status
-// is serialized, and the status lands on the commit the triggering event
-// pointed at — on a stale or merged commit it is inert, on an open PR head it
-// is the required check.
-export async function resolveHeads(
-  token: string,
-  repo: string,
-  target: { pr: number } | { sha: string },
-  fetchImpl: Fetch = fetch,
-): Promise<string[]> {
-  if ("pr" in target) {
-    const pull = await pullRequest(token, repo, target.pr, fetchImpl);
-    return pull === null ? [] : [pull.head.sha];
-  }
-  return [target.sha];
-}
-
 function usage(): never {
   console.error(
-    "usage: bun scripts/coderabbit-gate.ts (--pr <number> | --sha <commit>) [--repo owner/name] [--dry-run]",
+    "usage: bun scripts/coderabbit-gate.ts --sha <commit> [--repo owner/name] [--dry-run]",
   );
   process.exit(2);
 }
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
-  let pr: number | undefined;
   let sha: string | undefined;
   let repo = process.env.GITHUB_REPOSITORY;
   let dryRun = false;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
-    if (arg === "--pr") pr = Number(args[++i]);
-    else if (arg === "--sha") sha = args[++i];
+    if (arg === "--sha") sha = args[++i];
     else if (arg === "--repo") repo = args[++i];
     else if (arg === "--dry-run") dryRun = true;
     else usage();
   }
-  if ((pr === undefined) === (sha === undefined) || repo === undefined || repo === "") usage();
-  if (pr !== undefined && (!Number.isInteger(pr) || pr <= 0)) usage();
+  if (sha === undefined || repo === undefined || repo === "") usage();
 
   const token = process.env.GH_TOKEN;
   if (token === undefined || token === "") {
@@ -272,15 +235,7 @@ async function main(): Promise<void> {
       ? undefined
       : `${process.env.GITHUB_SERVER_URL ?? "https://github.com"}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`;
 
-  const target = pr !== undefined ? { pr } : { sha: sha! };
-  const heads = await resolveHeads(token, repo, target, fetch);
-  if (heads.length === 0) {
-    console.log(`PR #${pr} is not open; nothing to do`);
-    return;
-  }
-  for (const head of heads) {
-    await evaluate(token, repo, head, targetUrl, dryRun);
-  }
+  await evaluate(token, repo, sha, targetUrl, dryRun);
 }
 
 if (import.meta.main) {

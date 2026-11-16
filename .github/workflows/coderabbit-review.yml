@@ -22,10 +22,10 @@ on:
   status: {}
   workflow_dispatch:
     inputs:
-      pr:
-        description: pull request number to evaluate
+      sha:
+        description: commit sha to evaluate, e.g. a PR head
         required: true
-        type: number
+        type: string
 
 jobs:
   gate:
@@ -33,7 +33,7 @@ jobs:
     # CodeRabbit's own context carries a review outcome
     if: github.event_name != 'status' || github.event.context == 'CodeRabbit'
     concurrency:
-      group: coderabbit-review-${{ github.event.pull_request.head.sha || github.event.sha || github.sha }}
+      group: coderabbit-review-${{ github.event.pull_request.head.sha || inputs.sha || github.event.sha }}
       cancel-in-progress: true
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -50,11 +50,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.sha }}
-          DISPATCH_PR: ${{ inputs.pr }}
+          EVENT_SHA: ${{ github.event.pull_request.head.sha || github.event.sha }}
+          DISPATCH_SHA: ${{ inputs.sha }}
         run: |
           case "$EVENT_NAME" in
-            pull_request_target|status) bun scripts/coderabbit-gate.ts --sha "$HEAD_SHA" ;;
-            workflow_dispatch) bun scripts/coderabbit-gate.ts --pr "$DISPATCH_PR" ;;
+            pull_request_target|status) bun scripts/coderabbit-gate.ts --sha "$EVENT_SHA" ;;
+            workflow_dispatch) bun scripts/coderabbit-gate.ts --sha "$DISPATCH_SHA" ;;
             *) exit 1 ;;
           esac

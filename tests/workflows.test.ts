@@ -183,6 +183,7 @@ describe("coderabbit-review.yml gate", () => {
 
     expect(concurrency?.["cancel-in-progress"]).toBe(true);
     expect(concurrency?.group).toContain("pull_request.head.sha");
+    expect(concurrency?.group).toContain("inputs.sha");
     expect(concurrency?.group).toContain("event.sha");
   });
 });

@@ -5,7 +5,6 @@ import {
   evaluate,
   gateState,
   latestCodeRabbitDescription,
-  resolveHeads,
   type CommitStatus,
 } from "../scripts/coderabbit-gate.ts";
 
@@ -214,7 +213,33 @@ describe("evaluate", () => {
     expect(calls).toEqual(["GET", "GET", "POST"]);
   });
 
-  test("does not retry a client error", async () => {
+  test("retries a rate-limit 403 and waits out Retry-After", async () => {
+    // GitHub answers secondary rate limits with 403 + Retry-After, not 429
+    let gets = 0;
+    const calls: string[] = [];
+    const impl = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push(init?.method ?? "GET");
+      if ((init?.method ?? "GET") === "GET") {
+        gets++;
+        if (gets === 1) {
+          return new Response("rate limited", {
+            status: 403,
+            headers: { "retry-after": "1" },
+          });
+        }
+        return new Response(JSON.stringify([status({ description: "Review completed" })]), {
+          status: 200,
+        });
+      }
+      return new Response("{}", { status: 201 });
+    }) as typeof fetch;
+
+    await evaluate("tok", REPO, SHA, undefined, false, impl);
+
+    expect(calls).toEqual(["GET", "GET", "POST"]);
+  });
+
+  test("does not retry a plain client error", async () => {
     let calls = 0;
     const impl = (async (_url: string | URL | Request, _init?: RequestInit) => {
       calls++;
@@ -239,47 +264,5 @@ describe("evaluate", () => {
     expect(calls).toHaveLength(1);
     expect(logs.join("\n")).toContain("[dry-run] POST");
     expect(logs.join("\n")).toContain('"state":"failure"');
-  });
-});
-
-describe("resolveHeads", () => {
-  const REPO = "o/r";
-  const SHA = "d1198426c550f14248c057ddd949ee40296b01c7";
-  const HEAD = "a".repeat(40);
-
-  // routes each request to a canned body by URL substring
-  const fakeFetch = (routes: [string, unknown][]) => {
-    const impl = (async (url: string | URL | Request) => {
-      const u = String(url);
-      for (const [needle, body] of routes) {
-        if (u.includes(needle)) return new Response(JSON.stringify(body), { status: 200 });
-      }
-      return new Response("not found", { status: 404 });
-    }) as typeof fetch;
-    return impl;
-  };
-
-  test("a --pr target yields the head sha of an open PR", async () => {
-    const impl = fakeFetch([[`/pulls/7`, { number: 7, state: "open", head: { sha: HEAD } }]]);
-    expect(await resolveHeads("tok", REPO, { pr: 7 }, impl)).toEqual([HEAD]);
-  });
-
-  test("a closed PR yields no heads, so nothing is published for it", async () => {
-    const impl = fakeFetch([[`/pulls/7`, { number: 7, state: "closed", head: { sha: HEAD } }]]);
-    expect(await resolveHeads("tok", REPO, { pr: 7 }, impl)).toEqual([]);
-  });
-
-  test("a --sha target evaluates the commit itself without any API lookup", async () => {
-    // the workflow's concurrency group is keyed on this same sha, so the run
-    // must publish exactly where the triggering event pointed — resolving to a
-    // different head would let two groups write the same status out of order
-    let calls = 0;
-    const impl = (async (_url: string | URL | Request, _init?: RequestInit) => {
-      calls++;
-      return new Response("{}", { status: 200 });
-    }) as typeof fetch;
-
-    expect(await resolveHeads("tok", REPO, { sha: SHA }, impl)).toEqual([SHA]);
-    expect(calls).toBe(0);
   });
 });
