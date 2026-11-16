@@ -42,3 +42,26 @@ describe("--version", () => {
     expect(r.stdout.toString()).toBe("9.8.7-rc.6\n");
   });
 });
+
+describe("--help", () => {
+  // Every register* call in cli.ts is otherwise only exercised by that
+  // command's own tests; a dropped registration would pass the whole suite.
+  test("lists every command group", async () => {
+    const r = await run(sb, ["--help"]);
+
+    expect(r.code).toBe(0);
+    for (const cmd of [
+      "monitors",
+      "beats",
+      "events",
+      "notifications",
+      "proxies",
+      "tags",
+      "maintenance",
+      "status-pages",
+      "settings",
+    ]) {
+      expect(r.stdout).toContain(cmd);
+    }
+  });
+});
