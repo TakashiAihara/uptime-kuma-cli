@@ -154,6 +154,28 @@ describe("pinning actions", () => {
   });
 });
 
+describe("coderabbit-review.yml gate concurrency", () => {
+  const gate = () =>
+    (
+      Bun.YAML.parse(read("coderabbit-review.yml")) as {
+        jobs: {
+          gate: { concurrency?: { group: string; "cancel-in-progress": boolean } };
+        };
+      }
+    ).jobs.gate;
+
+  // pull_request_target and the status events CodeRabbit triggers can evaluate the
+  // same head at once; without per-head serialization a stale run can overwrite a
+  // newer gate status and leave the required check pending forever
+  test("serializes runs per head SHA and lets the newest evaluation win", () => {
+    const concurrency = gate().concurrency;
+
+    expect(concurrency?.["cancel-in-progress"]).toBe(true);
+    expect(concurrency?.group).toContain("pull_request.head.sha");
+    expect(concurrency?.group).toContain("event.sha");
+  });
+});
+
 // publish-release.sh compares against main's head and checks who a tag checked out by
 // push / dispatch already belongs to. The checkout is shallow, so this only works once
 // the release step's fetch takes everything. Version comparison uses gh release list, so

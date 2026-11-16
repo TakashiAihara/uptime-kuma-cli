@@ -10,7 +10,10 @@ name: coderabbit-review
 # code, so the PR cannot edit the gate that judges it. The job only reads commit
 # statuses and publishes one fixed-context status — it runs no PR code, so a fork
 # PR gains nothing from it (opencode-review's plain pull_request event gives fork
-# PRs a read-only token its write steps cannot live with).
+# PRs a read-only token its write steps cannot live with). Runs for the same head
+# SHA are serialized with cancel-in-progress: a pull_request_target run and the
+# status-event runs CodeRabbit triggers can overlap, and without it a stale
+# evaluation could overwrite a newer gate status and stall the check.
 
 on:
   pull_request_target:
@@ -28,6 +31,9 @@ jobs:
     # the status event fires for every commit status in the repo; only
     # CodeRabbit's own context carries a review outcome
     if: github.event_name != 'status' || github.event.context == 'CodeRabbit'
+    concurrency:
+      group: coderabbit-review-${{ github.event.pull_request.head.sha || github.event.sha || github.sha }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
