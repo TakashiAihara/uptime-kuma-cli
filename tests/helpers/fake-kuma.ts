@@ -1557,15 +1557,21 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
       delete config.id;
       delete config.domainNameList;
       // monitor_group.custom_url is a column, not a public field: the public
-      // monitor JSON folds it into `url` (customUrl ?? url, only when
-      // sendUrl is on) and never emits the key, so stored rows lose it on
-      // the way out
+      // monitor JSON folds it into `url` (customUrl ?? the monitor's current
+      // url, only when sendUrl is on) and never emits the key, so stored rows
+      // lose it on the way out
       const publicGroupList = (state.statusPageGroups[page.id] ?? []).map((g) => ({
         ...g,
         monitorList: ((g.monitorList as Record<string, unknown>[]) ?? []).map((m) => {
           const row = { ...m };
-          if (row.sendUrl) row.url = row.customUrl ?? row.url;
-          else delete row.url;
+          if (row.sendUrl) {
+            // the monitor's url is read live like the real join, so an
+            // editMonitor after the group save shows through
+            const live = state.monitors.find((x) => x.id === row.id)?.url;
+            row.url = row.customUrl ?? live ?? row.url;
+          } else {
+            delete row.url;
+          }
           delete row.customUrl;
           return row;
         }),

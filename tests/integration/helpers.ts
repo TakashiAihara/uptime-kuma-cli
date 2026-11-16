@@ -1,3 +1,4 @@
+import { io, type Socket } from "socket.io-client";
 import { parseMajorVersion } from "../../src/kuma";
 import { run, type Result, type Sandbox } from "../helpers/run";
 
@@ -45,4 +46,63 @@ export async function cliRun(
     );
   }
   return r;
+}
+
+const SOCKET_TIMEOUT_MS = 30_000;
+
+function emitAck<T>(socket: Socket, event: string, args: unknown[]): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`timed out during ${event}`)),
+      SOCKET_TIMEOUT_MS,
+    );
+    socket.emit(event, ...args, (res: T) => {
+      clearTimeout(timer);
+      resolve(res);
+    });
+  });
+}
+
+// A logged-in Socket.IO session for state no CLI command can express — the
+// UI's monitor custom URL reaches Kuma only as monitor_group.custom_url,
+// which saveStatusPage stores from a sent monitor url.
+export async function withKuma<T>(
+  fn: (call: <R>(event: string, args?: unknown[]) => Promise<R>) => Promise<T>,
+): Promise<T> {
+  const socket = io(process.env.UPTIME_KUMA_IT_URL ?? "", {
+    transports: ["websocket"],
+    reconnection: false,
+    timeout: SOCKET_TIMEOUT_MS,
+  });
+  try {
+    // 2.x registers its login listener only after the pre-login sendInfo,
+    // whose last act is emitting info; 1.23 emits it right away too
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error("timed out waiting for info")),
+        SOCKET_TIMEOUT_MS,
+      );
+      socket.once("connect_error", (err: Error) => {
+        clearTimeout(timer);
+        reject(new Error(`failed to connect: ${err.message}`));
+      });
+      socket.once("info", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+    const login = await emitAck<{ ok?: boolean; msg?: string }>(socket, "login", [
+      {
+        username: process.env.UPTIME_KUMA_IT_USERNAME ?? "",
+        password: process.env.UPTIME_KUMA_IT_PASSWORD ?? "",
+        token: "",
+      },
+    ]);
+    if (login?.ok !== true) {
+      throw new Error(`Kuma login failed: ${login?.msg ?? "no answer"}`);
+    }
+    return await fn((event, args = []) => emitAck(socket, event, args));
+  } finally {
+    socket.disconnect();
+  }
 }

@@ -611,6 +611,33 @@ describe("status-pages save on Kuma 2.x", () => {
     expect(monitor).not.toHaveProperty("customUrl");
   });
 
+  test("a non-string public url is not sent back", async () => {
+    const k = await useFake({ statusPages: [structuredClone(STATUS)] });
+    k.state.monitors = structuredClone(MONITORS);
+    k.state.statusPageGroups = {
+      7: [{ id: 3, name: "Core", weight: 1, monitorList: [{ id: 5, name: "web" }] }],
+    };
+    k.state.statusPageApiBody = {
+      config: {},
+      incidents: [],
+      publicGroupList: [
+        {
+          id: 3,
+          name: "Core",
+          monitorList: [{ id: 5, name: "web", sendUrl: 1, url: null }],
+        },
+      ],
+      maintenanceList: [],
+    };
+    const f = writeJson("page.json", { title: "x" });
+    const r = await run(sb, ["status-pages", "save", "status", "--config-file", f], creds(k.url));
+    expect(r.code).toBe(0);
+    // only a string public url can be a custom_url
+    expect(callsOf(k, "saveStatusPage")[0]!.args[3]).toEqual([
+      { id: 3, name: "Core", monitorList: [{ id: 5, sendUrl: 1 }] },
+    ]);
+  });
+
   test("a custom url on a monitor without its own url is sent back", async () => {
     const k = await useFake({
       statusPages: [structuredClone(STATUS)],

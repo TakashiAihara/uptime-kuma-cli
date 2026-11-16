@@ -2,7 +2,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { sandbox, type Sandbox } from "../helpers/run";
-import { cliRun } from "./helpers";
+import { cliRun, on2x, withKuma } from "./helpers";
 
 // Runs only when scripts/integration.ts provides UPTIME_KUMA_IT_*; a plain
 // `bun test` skips the whole file.
@@ -177,4 +177,80 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("status-pages (real Kuma)", () 
     const del2 = await cliRun(sb, ["status-pages", "delete", slug, "--yes"]);
     expect(del2.code).toBe(0);
   }, 300_000);
+
+  // custom_url is a 2.x monitor_group column; 1.x has no such field
+  test.skipIf(!on2x)(
+    "a custom monitor URL set like the UI survives a title-only save",
+    async () => {
+      const cuSlug = `it-sp-cu-${Date.now().toString(36)}`;
+      const customUrl = "https://status.example.com/health";
+
+      const add = await cliRun(sb, [
+        "status-pages",
+        "add",
+        "--slug",
+        cuSlug,
+        "--title",
+        "it custom-url page",
+      ]);
+      expect(add.code).toBe(0);
+      const mon = await cliRun(sb, [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "it-sp-cu-mon",
+        "--url",
+        "https://monitor.example.com/",
+        "--paused",
+      ]);
+      expect(mon.code).toBe(0);
+      const monitorId = mon.json().id;
+
+      // the UI's only way to set a custom URL: saveStatusPage stores a sent
+      // monitor url as monitor_group.custom_url — no CLI command sends one
+      await withKuma(async (call) => {
+        const page = await call<{ ok?: boolean; config?: Record<string, unknown> }>(
+          "getStatusPage",
+          [cuSlug],
+        );
+        const config = page.config ?? {};
+        const res = await call<{ ok?: boolean; msg?: string }>("saveStatusPage", [
+          cuSlug,
+          config,
+          config.icon,
+          [
+            {
+              name: "Core",
+              monitorList: [{ id: monitorId, sendUrl: true, url: customUrl }],
+            },
+          ],
+        ]);
+        expect(res.ok).toBe(true);
+      });
+
+      // the public url now shows the custom one, folded over the monitor's own
+      const before = await cliRun(sb, ["status-pages", "get", cuSlug]);
+      expect(before.code).toBe(0);
+      expect(before.json().publicGroupList[0].monitorList[0].url).toBe(customUrl);
+
+      // a save that only changes the title must not clear the custom_url
+      const f = join(sb.dir, "cu-page.json");
+      writeFileSync(f, JSON.stringify({ title: "it custom-url page renamed" }));
+      const s = await cliRun(sb, ["status-pages", "save", cuSlug, "--config-file", f]);
+      expect(s.code).toBe(0);
+
+      const after = await cliRun(sb, ["status-pages", "get", cuSlug]);
+      expect(after.code).toBe(0);
+      expect(after.json().title).toBe("it custom-url page renamed");
+      expect(after.json().publicGroupList[0].monitorList[0].url).toBe(customUrl);
+
+      const monDel = await cliRun(sb, ["monitors", "delete", String(monitorId), "--yes"]);
+      expect(monDel.code).toBe(0);
+      const del = await cliRun(sb, ["status-pages", "delete", cuSlug, "--yes"]);
+      expect(del.code).toBe(0);
+    },
+    300_000,
+  );
 });
