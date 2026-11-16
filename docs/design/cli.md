@@ -229,9 +229,9 @@
 
 ## Mutation report (CI, report-only)
 
-- The `mutation` job runs `bun scripts/mutation-report.ts --base <base sha>` on pull requests: for each changed src/ file it generates mewt mutants (`mewt`, pinned in `.mise.toml`), keeps high/medium severity mutants whose line range intersects the PR's added lines, and runs the file's focused unit tests (`MUTATION_TESTS` in the script — `tests/mutation-report.test.ts` fails when a new src file lacks an entry)
+- The `mutation` job runs `bun scripts/mutation-report.ts --base <base sha>` on pull requests: for each changed src/ file it generates mewt mutants, keeps high/medium severity mutants whose line range intersects the PR's added lines, and runs the file's focused unit tests (`MUTATION_TESTS` in the script — `tests/mutation-report.test.ts` fails when a new src file lacks an entry). mewt 4.0.0 is installed inside the job only — it publishes no builds for linux-arm64 or macOS-x64, so it cannot live in `.mise.toml` where `mise install` would fail on those platforms
 - Surviving mutants (`Uncaught`) are upserted as a PR comment marked `<!-- mutation-testing -->`; the job is `continue-on-error` and never blocks merge — surviving mutants are a report, not a gate. A run that fails before producing a report still upserts a comment saying so (with the run URL), so a stale result never passes for the latest one
-- Locally: `mise exec -- mewt print mutants --target src/commands/tags.ts` to inspect mutants, or `bun scripts/mutation-report.ts --base origin/main` for the same report CI posts
+- Locally: `mise use -g github:trailofbits/mewt@4.0.0` once (needs linux-x64 or macOS-arm64), then `mise exec -- mewt print mutants --target src/commands/tags.ts` to inspect mutants, or `bun scripts/mutation-report.ts --base origin/main` for the same report CI posts; the script prints the full survivor list to stdout because the PR comment caps its list at GitHub's comment size limit
 
 ## Not in scope
 

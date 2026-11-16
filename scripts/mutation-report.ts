@@ -102,6 +102,44 @@ function clip(text: string): string {
   return flat.length > 120 ? `${flat.slice(0, 117)}...` : flat;
 }
 
+const GITHUB_COMMENT_LIMIT = 65536;
+// Room kept for the "… N more" note and for join newlines the per-line cost
+// estimate does not count exactly.
+const NOTE_RESERVE = 160;
+
+function survivorItem(s: Survivor): string {
+  return `- line ${s.line} — \`${s.slug}\` #${s.id}: \`${clip(s.oldText)}\` → \`${clip(s.newText)}\``;
+}
+
+// Spends the char budget on whole file blocks; a file header is only emitted
+// when at least one of its survivors fits, so no dangling "**file**" lines.
+function fitSurvivors(files: FileReport[], budget: number): { lines: string[]; omitted: number } {
+  const lines: string[] = [];
+  let omitted = 0;
+  let used = NOTE_RESERVE;
+  for (const f of files) {
+    const header = `**${f.file}**`;
+    const items = f.survivors.map(survivorItem);
+    // header line + k item lines + the blank separator line, newlines included
+    let cost = header.length + 2;
+    let k = 0;
+    while (k < items.length) {
+      const item = items[k];
+      if (item === undefined || used + cost + item.length + 1 > budget) break;
+      cost += item.length + 1;
+      k++;
+    }
+    if (k === 0) {
+      omitted += f.survivors.length;
+      continue;
+    }
+    lines.push(header, ...items.slice(0, k), "");
+    used += cost;
+    omitted += f.survivors.length - k;
+  }
+  return { lines, omitted };
+}
+
 export function buildReport(input: {
   base: string;
   head: string;
@@ -143,37 +181,26 @@ export function buildReport(input: {
     return `${out.join("\n")}\n`;
   }
   const withSurvivors = input.files.filter((f) => f.survivors.length > 0);
+  const errorsTail: string[] = [];
+  if (input.errors.length > 0) {
+    errorsTail.push("### Errors", "");
+    for (const e of input.errors) errorsTail.push(`- ${e}`);
+    errorsTail.push("");
+  }
   if (withSurvivors.length === 0) {
     out.push("", "No surviving mutants.");
   } else {
-    // GitHub rejects comment bodies over 65536 chars; cap the list so a
-    // mutant-heavy PR cannot silently keep a stale comment instead.
-    const MAX_SURVIVOR_LINES = 200;
-    let budget = MAX_SURVIVOR_LINES;
-    let overflow = 0;
+    // GitHub rejects comment bodies over 65536 chars; the survivors that do
+    // not fit are listed in full in the mutation job log instead.
     out.push("", "### Surviving mutants", "");
-    for (const f of withSurvivors) {
-      const take = Math.min(f.survivors.length, budget);
-      overflow += f.survivors.length - take;
-      budget -= take;
-      if (take === 0) continue;
-      out.push(`**${f.file}**`);
-      for (const s of f.survivors.slice(0, take)) {
-        out.push(
-          `- line ${s.line} — \`${s.slug}\` #${s.id}: \`${clip(s.oldText)}\` → \`${clip(s.newText)}\``,
-        );
-      }
-      out.push("");
-    }
-    if (overflow > 0) {
-      out.push(`… ${overflow} more surviving mutant(s) — see the mutation job log.`);
+    const fixed = out.join("\n").length + errorsTail.join("\n").length + 4;
+    const { lines, omitted } = fitSurvivors(withSurvivors, GITHUB_COMMENT_LIMIT - fixed);
+    out.push(...lines);
+    if (omitted > 0) {
+      out.push(`… ${omitted} more surviving mutant(s) — the full list is in the mutation job log.`);
     }
   }
-  if (input.errors.length > 0) {
-    out.push("### Errors", "");
-    for (const e of input.errors) out.push(`- ${e}`);
-    out.push("");
-  }
+  out.push(...errorsTail);
   return `${out.join("\n")}\n`;
 }
 
@@ -315,6 +342,19 @@ function main(): void {
       }
     }
     for (const f of files) f.survivors = byFile.get(f.file) ?? [];
+
+    // The PR comment caps its survivor list; the job log keeps all of them.
+    const survivorTotal = files.reduce((n, f) => n + f.survivors.length, 0);
+    if (survivorTotal > 0) {
+      console.log(`surviving mutants (full list, ${survivorTotal}):`);
+      for (const f of files) {
+        for (const s of f.survivors) {
+          console.log(
+            `${f.file}:${s.line} [${s.slug} #${s.id}] ${clip(s.oldText)} -> ${clip(s.newText)}`,
+          );
+        }
+      }
+    }
 
     const report = buildReport({
       base,

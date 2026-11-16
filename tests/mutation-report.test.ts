@@ -126,24 +126,58 @@ describe("buildReport", () => {
   });
 
   test("caps the survivor list below GitHub's comment size limit", () => {
+    // Long snippets across many files: a count cap alone can still overflow.
     const survivors = Array.from({ length: 250 }, (_, i) => ({
       id: i + 1,
       slug: "CR",
       line: i + 1,
-      oldText: "a",
-      newText: "b",
+      oldText: "x".repeat(200),
+      newText: "y".repeat(200),
+    }));
+    const files = Array.from({ length: 10 }, (_, i) => ({
+      file: `src/commands/file-${i}-with-a-rather-long-name.ts`,
+      selected: 25,
+      survivors: survivors.slice(0, 25),
     }));
     const md = buildReport({
       base: "abc1234",
       head: "def5678",
-      changedCount: 1,
-      files: [{ file: "src/a.ts", selected: 250, survivors }],
+      changedCount: 10,
+      files,
       counts: { caught: 0, uncaught: 250, other: 0 },
       errors: [],
     });
-    expect(md.match(/- line /g)).toHaveLength(200);
-    expect(md).toContain("50 more surviving mutant(s)");
+    const shown = md.match(/- line /g)?.length ?? 0;
+    expect(shown).toBeGreaterThan(0);
+    expect(shown).toBeLessThan(250);
+    expect(md).toContain("more surviving mutant(s)");
+    expect(md).toContain("mutation job log");
     expect(md.length).toBeLessThan(65536);
+  });
+
+  test("shows every survivor when they fit the comment budget", () => {
+    const md = buildReport({
+      base: "abc1234",
+      head: "def5678",
+      changedCount: 1,
+      files: [
+        {
+          file: "src/a.ts",
+          selected: 3,
+          survivors: [1, 2, 3].map((i) => ({
+            id: i,
+            slug: "CR",
+            line: i,
+            oldText: "a",
+            newText: "b",
+          })),
+        },
+      ],
+      counts: { caught: 0, uncaught: 3, other: 0 },
+      errors: [],
+    });
+    expect(md.match(/- line /g)).toHaveLength(3);
+    expect(md).not.toContain("more surviving mutant(s)");
   });
 });
 

@@ -151,7 +151,7 @@ uptime-kuma-cli settings set --config-file settings.json
 - `bun run check` runs typecheck, lint, format check and the unit tests — the same gate CI's `check` job runs
 - CI enforces line coverage on `src/`: the whole project must stay >= 90%, and on pull requests the lines the PR adds or changes must be >= 90% covered. A diff with no measurable src lines (docs, config, tests only) passes
 - Reproduce locally: `bun test --coverage --coverage-reporter=lcov --coverage-dir=coverage` then `bun scripts/coverage.ts whole` (and `bun scripts/coverage.ts diff --base origin/main` for the diff gate)
-- CI also runs mutation testing (`mewt`) on src lines changed by the PR and posts surviving mutants as a PR comment — report-only for now, it does not fail the build
+- CI also runs mutation testing (`mewt`) on src lines changed by the PR and posts surviving mutants as a PR comment — report-only for now, it does not fail the build; reproduce locally with `mise use -g github:trailofbits/mewt@4.0.0` then `bun scripts/mutation-report.ts --base origin/main`
 
 ## Integration tests
 
