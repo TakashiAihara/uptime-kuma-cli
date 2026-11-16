@@ -121,7 +121,8 @@ const MONITOR_2X_DEFAULTS: Record<string, unknown> = {
 };
 
 // The timeout default the 2.x UI picks per type (2.5.11 EditMonitor.vue);
-// every type not listed, and every type on 1.23, defaults to 48.
+// every other type the CLI can add, and every type on 1.23, defaults to 48
+// (the 2.x UI's snmp default of 5 does not apply: the picker has no snmp).
 const KUMA2_TIMEOUT_DEFAULTS: Record<string, number> = { ping: 10, "kafka-producer": 1 };
 
 const PUSH_TOKEN_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -335,7 +336,7 @@ function checkMonitorTiming(s: KumaSession, timing: MonitorTiming): void {
   }
   const retryInterval = timing.retryInterval;
   if (retryInterval !== undefined && retryInterval.value < 1) {
-    fail(2, "retryInterval must be at least 1 second on Uptime Kuma 2.x");
+    fail(2, `${retryInterval.name} must be at least 1 second on Uptime Kuma 2.x`);
   }
 }
 
@@ -533,20 +534,46 @@ function defaultTimeoutSeconds(s: KumaSession, type: string): number {
 // touches interval or timeout — a stored timeout of 0 is otherwise sent
 // back untouched, and Kuma 1.23.17 runs it as interval × 800 seconds on
 // HTTP checks.
-function deriveMonitorTiming(monitor: Record<string, unknown>, defaultTimeout: number): void {
+function deriveMonitorTiming(
+  monitor: Record<string, unknown>,
+  defaultTimeout: number,
+  capTimeout: boolean,
+): void {
   if (typeof monitor.interval !== "number") return;
   monitor.retryInterval = monitor.retryInterval ?? monitor.interval;
-  monitor.timeout = Math.min(
-    typeof monitor.timeout === "number" ? monitor.timeout : defaultTimeout,
-    Math.trunc(monitor.interval * 8) / 10,
-  );
+  const timeout = typeof monitor.timeout === "number" ? monitor.timeout : defaultTimeout;
+  monitor.timeout = capTimeout ? Math.min(timeout, Math.trunc(monitor.interval * 8) / 10) : timeout;
 }
+
+// The 2.x UI leaves a ping's timeout out of the 80% cap (EditMonitor.vue
+// "monitor.timeout" watcher) and the 2.x server refuses a ping timeout below
+// ping_per_request_timeout, so a capped ping timeout would fail to save.
+const capsTimeout = (s: KumaSession, type: unknown): boolean =>
+  !(s.majorVersion >= 2 && type === "ping");
 
 // The merged monitor is validated once on its final values, right before it is
 // sent. On add that is the whole monitor; on edit only the fields the edit
 // sets, plus every required field when the edit changes the type — a stored
 // value the edit does not touch (the UI may save timeout 0, a deleted docker
 // host as docker_host null, proxyId 0 or port 0) is sent back unchanged.
+// 2.5.11's Monitor.validate rounds a ping's timeout and refuses it outside
+// 1..300 or below ping_per_request_timeout, which the DB defaults to 2 when
+// the add leaves it unset. Checking the final values here turns that into an
+// exit 2 before sending, and keeps the CLI from storing a ping that every
+// later save would fail on.
+function checkKuma2Ping(s: KumaSession, monitor: Record<string, unknown>): void {
+  if (s.majorVersion < 2 || monitor.type !== "ping" || !monitor.timeout) return;
+  const timeout = Math.round(Number(monitor.timeout));
+  const perRequest =
+    typeof monitor.ping_per_request_timeout === "number" ? monitor.ping_per_request_timeout : 2;
+  if (timeout < 1 || timeout > 300 || timeout < perRequest) {
+    fail(
+      2,
+      `a ping monitor's timeout must be between 1 and 300 seconds and at least ping_per_request_timeout (${perRequest}) on Uptime Kuma 2.x, got ${String(monitor.timeout)}`,
+    );
+  }
+}
+
 function validateFinalMonitor(
   s: KumaSession,
   monitor: Record<string, unknown>,
@@ -1249,8 +1276,9 @@ export function registerMonitors(program: Command): void {
       };
       if (normalizedParent !== undefined) monitor.parent = normalizedParent;
       monitor.notificationIDList = notificationIdObject(monitor.notificationIDList);
-      deriveMonitorTiming(monitor, defaultTimeoutSeconds(s, type));
+      deriveMonitorTiming(monitor, defaultTimeoutSeconds(s, type), capsTimeout(s, type));
       validateFinalMonitor(s, monitor);
+      checkKuma2Ping(s, monitor);
 
       const res = await s.request("add", [monitor]);
       const out: Record<string, unknown> = {
@@ -1385,9 +1413,10 @@ export function registerMonitors(program: Command): void {
         fileConfig.timeout !== undefined;
       if (timingTouched) {
         const type = typeof monitor.type === "string" ? monitor.type : "";
-        deriveMonitorTiming(monitor, defaultTimeoutSeconds(s, type));
+        deriveMonitorTiming(monitor, defaultTimeoutSeconds(s, type), capsTimeout(s, type));
       }
       validateFinalMonitor(s, monitor, { touched, typeChanged: monitor.type !== fetched.type });
+      checkKuma2Ping(s, monitor);
       await s.request("editMonitor", [monitor]);
       // editMonitor ignores fields like `active`, so print what Kuma saved.
       const saved = await fetchMonitor(s, id);

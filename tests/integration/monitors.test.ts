@@ -82,6 +82,33 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
     expect(del.code).toBe(0);
   }, 180_000);
 
+  test.skipIf(!on2x)(
+    "2.x: a ping with interval 1 keeps a valid timeout and can be edited",
+    async () => {
+      const r = await cliRun(sb, [
+        "monitors",
+        "add",
+        "--type",
+        "ping",
+        "--name",
+        "it-ping1",
+        "--hostname",
+        "127.0.0.1",
+        "--interval",
+        "1",
+        "--paused",
+      ]);
+      expect(r.code).toBe(0);
+      const id = r.json().id;
+      const e = await cliRun(sb, ["monitors", "edit", String(id), "--set", "description=it"]);
+      expect(e.code).toBe(0);
+      expect(e.json()).toMatchObject({ interval: 1, timeout: 10, description: "it" });
+      const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
+      expect(del.code).toBe(0);
+    },
+    180_000,
+  );
+
   test("add with the same name exits 3 without creating a second monitor", async () => {
     const r = await cliRun(sb, ["monitors", "add", "--type", "push", "--name", "it-push"]);
     expect(r.code).toBe(3);
