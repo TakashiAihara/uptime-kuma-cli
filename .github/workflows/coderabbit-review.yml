@@ -8,8 +8,10 @@ name: coderabbit-review
 # the review without polling. pull_request_target is used on purpose: the workflow
 # and the script always come from the base branch and the job never runs PR
 # code, so the PR cannot edit the gate that judges it: checkout is pinned to
-# the default branch for every event, including status (whose payload sha is a
-# PR commit) and dispatch (which may run on any ref). The job only reads commit
+# the default branch, the status event's payload sha is a PR commit that must
+# not be checked out, and dispatch is limited to the default branch so a
+# maintainer cannot accidentally run a PR's copy of this workflow with
+# statuses: write. The job only reads commit
 # statuses and publishes one fixed-context status — it runs no PR code, so a
 # fork PR gains nothing from it (opencode-review's plain pull_request event
 # gives fork PRs a read-only token its write steps cannot live with). Every
@@ -32,8 +34,14 @@ on:
 jobs:
   gate:
     # the status event fires for every commit status in the repo; only
-    # CodeRabbit's own context carries a review outcome
-    if: github.event_name != 'status' || github.event.context == 'CodeRabbit'
+    # CodeRabbit's own context carries a review outcome. workflow_dispatch runs
+    # the workflow file of the ref it was started on, so it is limited to the
+    # default branch — from a PR ref the PR's own copy would run with
+    # statuses: write
+    if: >-
+      (github.event_name != 'status' || github.event.context == 'CodeRabbit')
+      && (github.event_name != 'workflow_dispatch'
+          || github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
     concurrency:
       group: coderabbit-review-${{ github.event.pull_request.head.sha || inputs.sha || github.event.sha }}
       cancel-in-progress: true

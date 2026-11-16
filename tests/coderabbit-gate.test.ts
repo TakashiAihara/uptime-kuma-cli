@@ -240,6 +240,36 @@ describe("evaluate", () => {
     expect(calls).toEqual(["GET", "GET", "POST"]);
   });
 
+  test("waits out a primary rate-limit window announced by x-ratelimit-reset", async () => {
+    // primary limits answer 403 + x-ratelimit-remaining: 0 + a reset epoch,
+    // without Retry-After — the wait must come from the reset timestamp
+    let gets = 0;
+    const calls: string[] = [];
+    const impl = (async (_url: string | URL | Request, init?: RequestInit) => {
+      calls.push(init?.method ?? "GET");
+      if ((init?.method ?? "GET") === "GET") {
+        gets++;
+        if (gets === 1) {
+          return new Response("rate limited", {
+            status: 403,
+            headers: {
+              "x-ratelimit-remaining": "0",
+              "x-ratelimit-reset": String(Math.floor(Date.now() / 1000) + 1),
+            },
+          });
+        }
+        return new Response(JSON.stringify([status({ description: "Review completed" })]), {
+          status: 200,
+        });
+      }
+      return new Response("{}", { status: 201 });
+    }) as typeof fetch;
+
+    await evaluate("tok", REPO, SHA, undefined, false, impl);
+
+    expect(calls).toEqual(["GET", "GET", "POST"]);
+  });
+
   test("does not retry a plain client error", async () => {
     let calls = 0;
     const impl = (async (_url: string | URL | Request, _init?: RequestInit) => {

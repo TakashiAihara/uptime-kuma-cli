@@ -194,8 +194,18 @@ describe("coderabbit-review.yml gate", () => {
   test("checkout is pinned to the default branch without persisted credentials", () => {
     const checkout = gate().steps?.find((s) => s.uses?.startsWith("actions/checkout@"));
 
-    expect(String(checkout?.with?.ref)).toContain("github.event.repository.default_branch");
+    expect(String(checkout?.with?.ref)).toBe("${{ github.event.repository.default_branch }}");
     expect(checkout?.with?.["persist-credentials"]).toBe(false);
+  });
+
+  // workflow_dispatch executes the workflow file of the ref it was started on;
+  // without the default-branch guard a maintainer re-evaluating a PR head could
+  // run the PR's own copy of this workflow — and script — with statuses: write
+  test("manual dispatch only runs from the default branch", () => {
+    const ifCondition = gate().if ?? "";
+
+    expect(ifCondition).toContain("workflow_dispatch");
+    expect(ifCondition).toContain("github.event.repository.default_branch");
   });
 });
 
