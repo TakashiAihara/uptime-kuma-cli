@@ -222,7 +222,11 @@ async function main(): Promise<void> {
     else if (arg === "--dry-run") dryRun = true;
     else usage();
   }
-  if (sha === undefined || repo === undefined || repo === "") usage();
+  // the concurrency group and the statuses POST both key on the full sha — a
+  // short sha or ref would silently escape serialization and fail the POST
+  if (sha === undefined || !/^[0-9a-f]{40}$/.test(sha) || repo === undefined || repo === "") {
+    usage();
+  }
 
   const token = process.env.GH_TOKEN;
   if (token === undefined || token === "") {
