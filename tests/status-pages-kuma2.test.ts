@@ -346,6 +346,21 @@ describe("status-pages incident on Kuma 2.x", () => {
     expect(k.state.incidents).toHaveLength(1);
     expect(k.state.incidents[0]!.pin).toBe(false);
   });
+
+  test("a dropped socket during the post keeps exit 2 and names the unpin", async () => {
+    const k = await useFake({
+      statusPages: [structuredClone(STATUS)],
+      incidents: [{ id: 1, statusPageId: 7, title: "Old", pin: true, active: true }],
+    });
+    k.state.disconnectOn = "postIncident";
+    const r = await run(
+      sb,
+      ["status-pages", "incident", "status", "--title", "New", "--content", "c"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("unpinned");
+  });
 });
 
 describe("status-pages save on Kuma 2.x", () => {

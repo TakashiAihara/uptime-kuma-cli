@@ -134,9 +134,8 @@ function newestIncident(incidents: Record<string, unknown>[]): Record<string, un
     const bd = best.createdDate;
     const cd = inc.createdDate;
     if (typeof bd === "string" && typeof cd === "string" && bd === cd) {
-      const bid = Number(best.id);
-      const iid = Number(inc.id);
-      if (Number.isInteger(bid) && Number.isInteger(iid) && iid < bid) continue;
+      // uncomparable ids make the comparison false, keeping the positional pick
+      if (Number(inc.id) < Number(best.id)) continue;
       best = inc;
       continue;
     }
