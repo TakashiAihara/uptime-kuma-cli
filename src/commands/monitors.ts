@@ -120,6 +120,11 @@ const MONITOR_2X_DEFAULTS: Record<string, unknown> = {
   jsonPathOperator: "==",
 };
 
+// The timeout default the 2.x UI picks per type (2.5.11 EditMonitor.vue);
+// every other type the CLI can add, and every type on 1.23, defaults to 48
+// (the 2.x UI's snmp default of 5 does not apply: the picker has no snmp).
+const KUMA2_TIMEOUT_DEFAULTS: Record<string, number> = { ping: 10, "kafka-producer": 1 };
+
 const PUSH_TOKEN_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
 function generatePushToken(): string {
@@ -276,6 +281,65 @@ function checkKuma2xFields(s: KumaSession, keys: Iterable<string>): void {
   }
 }
 
+type TimingField = { name: string; value: number };
+type MonitorTiming = { interval?: TimingField; timeout?: TimingField; retryInterval?: TimingField };
+
+// interval / timeout / retryInterval resolve like the payload merge —
+// --set beats --config-file beats the typed flag — and a hatch value is
+// already a number because validateHatchValues ran. Errors name the bare
+// key for a hatch source, like the pre-connect checks report it, or the
+// flag for a typed value; edit has no timing flags, so it passes {}.
+function timingFields(
+  sets: Record<string, unknown>,
+  fileConfig: Record<string, unknown>,
+  flags: Partial<Record<"interval" | "timeout" | "retryInterval", TimingField>>,
+): MonitorTiming {
+  const pick = (key: "interval" | "timeout" | "retryInterval"): TimingField | undefined => {
+    const hatch = sets[key] !== undefined ? sets[key] : fileConfig[key];
+    if (hatch !== undefined) return { name: key, value: hatch as number };
+    return flags[key];
+  };
+  return {
+    interval: pick("interval"),
+    timeout: pick("timeout"),
+    retryInterval: pick("retryInterval"),
+  };
+}
+
+// The timing bounds that differ between Kuma versions, checked after
+// connect() on the values the command sets: 1.23's Monitor.validate wants
+// interval within 20..2073600 and its check code turns a timeout of 0 into
+// interval × 800 seconds; 2.x wants retryInterval >= 1 (its interval >= 1
+// and timeout >= 0 already are the pre-connect union). On edit only the
+// values the edit sets are passed, so a stored timeout of 0 goes back
+// untouched like before.
+function checkMonitorTiming(s: KumaSession, timing: MonitorTiming): void {
+  if (s.majorVersion < 2) {
+    const interval = timing.interval;
+    if (
+      interval !== undefined &&
+      (interval.value < MIN_INTERVAL_SECOND || interval.value > MAX_INTERVAL_SECOND)
+    ) {
+      fail(
+        2,
+        `${interval.name} must be between ${MIN_INTERVAL_SECOND} and ${MAX_INTERVAL_SECOND} seconds, got "${interval.value}"`,
+      );
+    }
+    const timeout = timing.timeout;
+    if (timeout !== undefined && timeout.value <= 0) {
+      fail(
+        2,
+        `${timeout.name} must be a positive number of seconds, got "${timeout.value}"; Kuma 1.23 turns 0 into interval × 800 seconds`,
+      );
+    }
+    return;
+  }
+  const retryInterval = timing.retryInterval;
+  if (retryInterval !== undefined && retryInterval.value < 1) {
+    fail(2, `${retryInterval.name} must be at least 1 second on Uptime Kuma 2.x`);
+  }
+}
+
 // --set lands in argv; the secret fields only go through --config-file.
 function refuseSecretSets(sets: Record<string, unknown>): void {
   for (const key of Object.keys(sets)) {
@@ -340,32 +404,30 @@ function hatchNumber(
   return parse(String(value), key);
 }
 
-// Kuma 1.23.17 monitor.js patches a timeout of 0 (or less) to
-// interval * 1000 * 0.8 at check time and then multiplies by 1000 for axios,
-// so the effective timeout silently becomes interval × 800 seconds.
+// timeout may be 0 on 2.x (it becomes interval * 0.8 seconds there); 1.23
+// turns it into interval × 800 seconds, so the zero case is refused after
+// connect() on a 1.x server. Negative, empty and non-numeric values are
+// refused before connecting on both versions.
 function parseTimeoutSeconds(value: string, flag: string): number {
   const n = Number(value);
-  if (!Number.isFinite(n) || n <= 0) {
-    fail(
-      2,
-      `${flag} must be a positive number of seconds, got "${value}"; Kuma 1.23 turns 0 into interval × 800 seconds`,
-    );
+  if (value.trim() === "" || !Number.isFinite(n) || n < 0) {
+    fail(2, `${flag} must be a non-negative number of seconds, got "${value}"`);
   }
   return n;
 }
 
 // MIN/MAX_INTERVAL_SECOND of src/util.ts in Kuma 1.23.17; Monitor.validate()
-// enforces the same bounds server-side before the monitor is stored.
+// enforces the same bounds server-side before the monitor is stored. 2.x
+// lowered the minimum to 1 and dropped the maximum, so only the union —
+// finite and >= 1 — is checked before connect(); the 1.x bounds are
+// re-checked after connect() on a 1.x server.
 const MIN_INTERVAL_SECOND = 20;
 const MAX_INTERVAL_SECOND = 2073600;
 
 function parseMonitorInterval(value: string, flag: string): number {
   const n = Number(value);
-  if (!Number.isFinite(n) || n < MIN_INTERVAL_SECOND || n > MAX_INTERVAL_SECOND) {
-    fail(
-      2,
-      `${flag} must be between ${MIN_INTERVAL_SECOND} and ${MAX_INTERVAL_SECOND} seconds, got "${value}"`,
-    );
+  if (!Number.isFinite(n) || n < 1) {
+    fail(2, `${flag} must be at least 1 second, got "${value}"`);
   }
   return n;
 }
@@ -457,27 +519,64 @@ function validateHatchValues(fields: Record<string, unknown>): void {
   }
 }
 
+// The timeout an unset one derives to: the 2.x UI picks it per type, 1.23
+// uses 48 for every type.
+function defaultTimeoutSeconds(s: KumaSession, type: string): number {
+  if (s.majorVersion < 2) return 48;
+  return KUMA2_TIMEOUT_DEFAULTS[type] ?? 48;
+}
+
 // retryInterval follows the interval and the timeout stays within 80% of
-// it, derived from the final interval after the hatch had its say. Explicit
-// values are kept; the cap applies to them the same way. On edit the caller
-// runs this only when the edit touches interval or timeout — a stored
-// timeout of 0 is otherwise sent back untouched, and Kuma 1.23.17 runs it
-// as interval × 800 seconds on HTTP checks (the reason parseTimeoutSeconds
-// refuses a user-supplied 0).
-function deriveMonitorTiming(monitor: Record<string, unknown>): void {
+// it (unless capTimeout is false: a 2.x ping), derived from the final
+// interval after the hatch had its say. Explicit values are kept; the cap
+// applies to them the same way, and an unset
+// timeout takes the caller's default — the 2.x UI picks it per type, 1.23's
+// is 48 for every type. On edit the caller runs this only when the edit
+// touches interval or timeout — a stored timeout of 0 is otherwise sent
+// back untouched, and Kuma 1.23.17 runs it as interval × 800 seconds on
+// HTTP checks.
+function deriveMonitorTiming(
+  monitor: Record<string, unknown>,
+  defaultTimeout: number,
+  capTimeout: boolean,
+): void {
   if (typeof monitor.interval !== "number") return;
   monitor.retryInterval = monitor.retryInterval ?? monitor.interval;
-  monitor.timeout = Math.min(
-    typeof monitor.timeout === "number" ? monitor.timeout : 48,
-    Math.trunc(monitor.interval * 8) / 10,
-  );
+  const timeout = typeof monitor.timeout === "number" ? monitor.timeout : defaultTimeout;
+  monitor.timeout = capTimeout ? Math.min(timeout, Math.trunc(monitor.interval * 8) / 10) : timeout;
 }
+
+// The 2.x UI leaves a ping's timeout out of the 80% cap (EditMonitor.vue
+// "monitor.timeout" watcher) and the 2.x server refuses a ping timeout below
+// ping_per_request_timeout, so a capped ping timeout would fail to save.
+const capsTimeout = (s: KumaSession, type: unknown): boolean =>
+  !(s.majorVersion >= 2 && type === "ping");
 
 // The merged monitor is validated once on its final values, right before it is
 // sent. On add that is the whole monitor; on edit only the fields the edit
 // sets, plus every required field when the edit changes the type — a stored
 // value the edit does not touch (the UI may save timeout 0, a deleted docker
 // host as docker_host null, proxyId 0 or port 0) is sent back unchanged.
+// 2.5.11's Monitor.validate rounds a ping's timeout and refuses it outside
+// 1..300 or below ping_per_request_timeout, which the DB defaults to 2 when
+// the add leaves it unset. Checking the final values here turns that into an
+// exit 2 before sending, and keeps the CLI from storing a ping that every
+// later save would fail on.
+function checkKuma2Ping(s: KumaSession, monitor: Record<string, unknown>): void {
+  if (s.majorVersion < 2 || monitor.type !== "ping" || !monitor.timeout) return;
+  const timeout = Math.round(Number(monitor.timeout));
+  // Kuma's validate compares the value as JavaScript does (a numeric string
+  // as a number); only a key the add leaves out gets the DB default 2.
+  const raw = monitor.ping_per_request_timeout;
+  const perRequest = raw === undefined ? 2 : Number(raw);
+  if (timeout < 1 || timeout > 300 || timeout < perRequest) {
+    fail(
+      2,
+      `a ping monitor's timeout must be between 1 and 300 seconds and at least ping_per_request_timeout (${perRequest}) on Uptime Kuma 2.x, got ${String(monitor.timeout)}`,
+    );
+  }
+}
+
 function validateFinalMonitor(
   s: KumaSession,
   monitor: Record<string, unknown>,
@@ -1025,6 +1124,17 @@ export function registerMonitors(program: Command): void {
         twoXFieldCandidates.push("jsonPathOperator");
       }
       checkKuma2xFields(s, twoXFieldCandidates);
+      checkMonitorTiming(
+        s,
+        timingFields(sets, fileConfig, {
+          interval: { name: "--interval", value: interval },
+          timeout: timeout === undefined ? undefined : { name: "--timeout", value: timeout },
+          retryInterval:
+            retryInterval === undefined
+              ? undefined
+              : { name: "--retry-interval", value: retryInterval },
+        }),
+      );
       const name = opts.name as string;
       const existing = s.monitors().find((m) => m.name === name);
       if (existing) {
@@ -1169,8 +1279,9 @@ export function registerMonitors(program: Command): void {
       };
       if (normalizedParent !== undefined) monitor.parent = normalizedParent;
       monitor.notificationIDList = notificationIdObject(monitor.notificationIDList);
-      deriveMonitorTiming(monitor);
+      deriveMonitorTiming(monitor, defaultTimeoutSeconds(s, type), capsTimeout(s, type));
       validateFinalMonitor(s, monitor);
+      checkKuma2Ping(s, monitor);
 
       const res = await s.request("add", [monitor]);
       const out: Record<string, unknown> = {
@@ -1275,6 +1386,7 @@ export function registerMonitors(program: Command): void {
       const twoXFieldCandidates = [...Object.keys(sets), ...Object.keys(fileConfig)];
       if (opts.jsonPathOperator !== undefined) twoXFieldCandidates.push("jsonPathOperator");
       checkKuma2xFields(s, twoXFieldCandidates);
+      checkMonitorTiming(s, timingFields(sets, fileConfig, {}));
       const fetched = await fetchMonitor(s, id);
       const monitor: Record<string, unknown> = { ...fetched };
       for (const [k, v] of Object.entries(fileConfig)) monitor[k] = v;
@@ -1302,8 +1414,12 @@ export function registerMonitors(program: Command): void {
         fileConfig.interval !== undefined ||
         sets.timeout !== undefined ||
         fileConfig.timeout !== undefined;
-      if (timingTouched) deriveMonitorTiming(monitor);
+      if (timingTouched) {
+        const type = typeof monitor.type === "string" ? monitor.type : "";
+        deriveMonitorTiming(monitor, defaultTimeoutSeconds(s, type), capsTimeout(s, type));
+      }
       validateFinalMonitor(s, monitor, { touched, typeChanged: monitor.type !== fetched.type });
+      checkKuma2Ping(s, monitor);
       await s.request("editMonitor", [monitor]);
       // editMonitor ignores fields like `active`, so print what Kuma saved.
       const saved = await fetchMonitor(s, id);

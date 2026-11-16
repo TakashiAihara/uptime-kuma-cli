@@ -2247,7 +2247,6 @@ describe("monitors add", () => {
     ["retryInterval=abc"],
     ["resendInterval=1.5"],
     ["maxretries=-1"],
-    ["timeout=0"],
     ["timeout=-1"],
     ["port=70000"],
     ["port=abc"],
@@ -2624,7 +2623,7 @@ describe("monitors add", () => {
     expect((addCalls()[0]!.args[0] as any).docker_host).toBeNull();
   });
 
-  test("--set timeout=0 exits 2: Kuma 1.23 turns it into interval × 800 seconds", async () => {
+  test("--set timeout=0 exits 2 after connecting: Kuma 1.23 turns it into interval × 800 seconds", async () => {
     const r = await run(
       sb,
       [
@@ -2643,10 +2642,11 @@ describe("monitors add", () => {
     );
     expect(r.code).toBe(2);
     expect(r.stderr).toContain("Kuma 1.23 turns 0 into interval × 800 seconds");
-    expect(kuma.calls).toHaveLength(0);
+    expect(kuma.calls.map((c) => c.event)).toContain("login");
+    expect(addCalls()).toHaveLength(0);
   });
 
-  test("--timeout 0 exits 2 with the same Kuma 1.23 reason", async () => {
+  test("--timeout 0 exits 2 after connecting with the same Kuma 1.23 reason", async () => {
     const r = await run(
       sb,
       [
@@ -2665,7 +2665,8 @@ describe("monitors add", () => {
     );
     expect(r.code).toBe(2);
     expect(r.stderr).toContain("Kuma 1.23 turns 0 into interval × 800 seconds");
-    expect(kuma.calls).toHaveLength(0);
+    expect(kuma.calls.map((c) => c.event)).toContain("login");
+    expect(addCalls()).toHaveLength(0);
   });
 
   test.each([[["--timeout", ""]], [["--timeout", "abc"]], [["--set", 'timeout="abc"']]])(
@@ -2688,7 +2689,6 @@ describe("monitors add", () => {
       );
       expect(r.code).toBe(2);
       expect(r.stderr).toContain("timeout must");
-      expect(r.stderr).toContain("Kuma 1.23 turns 0 into interval × 800 seconds");
       expect(kuma.calls).toHaveLength(0);
     },
   );
@@ -3214,7 +3214,7 @@ describe("monitors add", () => {
   );
 
   test.each([[["--interval", "19"]], [["--interval", "2073601"]], [["--set", "interval=19"]]])(
-    "an interval outside Kuma's 20..2073600 bounds exits 2: %p",
+    "an interval outside Kuma's 20..2073600 bounds exits 2 after connecting: %p",
     async (extra) => {
       const r = await run(
         sb,
@@ -3233,6 +3233,7 @@ describe("monitors add", () => {
       );
       expect(r.code).toBe(2);
       expect(r.stderr).toContain("interval must be between 20 and 2073600");
+      expect(kuma.calls.map((c) => c.event)).toContain("login");
       expect(addCalls()).toHaveLength(0);
     },
   );
@@ -3869,11 +3870,12 @@ describe("monitors edit", () => {
     expect(kuma.calls).toHaveLength(0);
   });
 
-  test("edit --set timeout=0 exits 2: Kuma 1.23 turns it into interval × 800 seconds", async () => {
+  test("edit --set timeout=0 exits 2 after connecting: Kuma 1.23 turns it into interval × 800 seconds", async () => {
     const r = await run(sb, ["monitors", "edit", "7", "--set", "timeout=0"], creds(kuma.url));
     expect(r.code).toBe(2);
     expect(r.stderr).toContain("Kuma 1.23 turns 0 into interval × 800 seconds");
-    expect(kuma.calls).toHaveLength(0);
+    expect(kuma.calls.map((c) => c.event)).toContain("login");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
   });
 
   test("edit --config-file timeout=0 exits 2 with the same reason", async () => {
@@ -3882,7 +3884,8 @@ describe("monitors edit", () => {
     const r = await run(sb, ["monitors", "edit", "7", "--config-file", f], creds(kuma.url));
     expect(r.code).toBe(2);
     expect(r.stderr).toContain("Kuma 1.23 turns 0 into interval × 800 seconds");
-    expect(kuma.calls).toHaveLength(0);
+    expect(kuma.calls.map((c) => c.event)).toContain("login");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
   });
 
   test("edit --set docker_host is checked against dockerHostList", async () => {
@@ -4639,11 +4642,12 @@ describe("monitors edit", () => {
     expect(sent.timeout).toBe(48);
   });
 
-  test("edit --set interval=19 exits 2 before connecting", async () => {
+  test("edit --set interval=19 exits 2 after connecting on a 1.x server", async () => {
     const r = await run(sb, ["monitors", "edit", "7", "--set", "interval=19"], creds(kuma.url));
     expect(r.code).toBe(2);
     expect(r.stderr).toContain("interval must be between 20 and 2073600");
-    expect(kuma.calls).toHaveLength(0);
+    expect(kuma.calls.map((c) => c.event)).toContain("login");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
   });
 });
 
