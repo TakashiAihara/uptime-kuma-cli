@@ -153,6 +153,12 @@ uptime-kuma-cli settings set --config-file settings.json
 - Reproduce locally: `bun test --coverage --coverage-reporter=lcov --coverage-dir=coverage` then `bun scripts/coverage.ts whole` (and `bun scripts/coverage.ts diff --base origin/main` for the diff gate)
 - CI also runs mutation testing (`mewt`) on src lines changed by the PR and posts surviving mutants as a PR comment — report-only for now, it does not fail the build; reproduce locally with `mise use -g github:trailofbits/mewt@4.0.0` then `bun scripts/mutation-report.ts --base origin/main`
 
+## Contributing
+
+- Open a pull request; CI runs `check`, `static`, `coverage`, `integration` (Kuma 1.23 and 2.x) and `mutation` (report-only). Branch protection on `main` requires `check`, both `integration` jobs, `opencode / review` and `coderabbit-review` to pass, and all review conversations to be resolved before merge
+- CodeRabbit and opencode review every PR automatically. `coderabbit-review` is a commit status this repo publishes itself: it turns green only when CodeRabbit's own status reports `Review completed` — CodeRabbit's check stays green even when it is rate limited or skips the review, so it cannot be required directly
+- When `coderabbit-review` fails, the status description says why; comment `@coderabbitai review` on the PR to request a new review (for a paused review `@coderabbitai resume` also works), then resolve every review thread — unresolved threads block the merge
+
 ## Integration tests
 
 - `bun run test:integration` runs `tests/integration` — the same CLI — against a real `louislam/uptime-kuma:1.23.17` container started with Docker Compose; it needs Docker

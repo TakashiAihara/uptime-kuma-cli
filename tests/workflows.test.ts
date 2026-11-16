@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-const WORKFLOWS = ["ci.yml", "release.yml"];
+const WORKFLOWS = ["ci.yml", "coderabbit-review.yml", "release.yml"];
 const dir = resolve(import.meta.dir, "../.github/workflows");
 const read = (file: string) => readFileSync(join(dir, file), "utf8");
 // Bun handles the YAML parsing, so types are only attached where needed
@@ -143,7 +143,8 @@ describe("pinning actions", () => {
     const uses: string[] = [];
     for (const file of WORKFLOWS) {
       for (const line of read(file).split("\n")) {
-        if (!line.includes("uses:")) continue;
+        // a uses key, not any line containing the substring ("statuses: write" does)
+        if (!/^\s*-?\s*uses:/.test(line)) continue;
         uses.push(line);
         expect(line).toMatch(/uses:\s*\S+@([0-9a-f]{40}|sha256:[0-9a-f]{64})\s+#\s*v\S*\s*$/);
       }

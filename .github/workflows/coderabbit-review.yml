@@ -1,0 +1,53 @@
+name: coderabbit-review
+
+# Branch protection cannot require CodeRabbit's own status: its state is always
+# success and the outcome lives in the description, so scripts/coderabbit-gate.ts
+# maps that description onto the `coderabbit-review` commit status, which is the
+# context main requires. The job re-runs on every CodeRabbit status change (`status`
+# event) and when the PR head moves (`pull_request_target`), so the gate follows
+# the review without polling. pull_request_target is used on purpose: the workflow
+# and the script always come from the base branch and the job never checks out PR
+# code, so the PR cannot edit the gate that judges it. Only same-repo PRs are
+# expected here; a fork PR's read-only token could not publish the status.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  status: {}
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: pull request number to evaluate
+        required: true
+        type: number
+
+jobs:
+  gate:
+    # the status event fires for every commit status in the repo; only
+    # CodeRabbit's own context carries a review outcome
+    if: github.event_name != 'status' || github.event.context == 'CodeRabbit'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@08ae2a091c038e1e05ec6f5115dc5c69d5a2a6b8 # v5.1.2
+      - name: publish coderabbit-review status
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          STATUS_SHA: ${{ github.event.sha }}
+          DISPATCH_PR: ${{ inputs.pr }}
+        run: |
+          case "$EVENT_NAME" in
+            pull_request_target) bun scripts/coderabbit-gate.ts --pr "$PR_NUMBER" ;;
+            status) bun scripts/coderabbit-gate.ts --sha "$STATUS_SHA" ;;
+            workflow_dispatch) bun scripts/coderabbit-gate.ts --pr "$DISPATCH_PR" ;;
+            *) exit 1 ;;
+          esac
