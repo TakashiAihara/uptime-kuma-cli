@@ -73,8 +73,9 @@ async function setupKuma(): Promise<string> {
     timeout: CALL_TIMEOUT_MS,
   });
   try {
-    // The connection handler registers needSetup/setup synchronously and emits
-    // info, so a received info means those handlers are already listening
+    // 1.23 registers needSetup/setup at once; 2.5.11 registers them right
+    // after awaiting the pre-login sendInfo, whose last act is emitting info.
+    // Either way a received info means those handlers are listening.
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(
         () => reject(new Error(`timed out connecting to ${BASE_URL}`)),
@@ -206,6 +207,8 @@ try {
     (await compose(["up", "-d", "--wait", "--wait-timeout", "120"], COMPOSE_UP_TIMEOUT_MS)) !== 0
   ) {
     console.error("docker compose up failed");
+    console.error("--- Kuma server log (compose up failed) ---");
+    await compose(["logs", "--no-color", "--timestamps"], COMPOSE_DOWN_TIMEOUT_MS);
   } else {
     const version = await setupKuma();
     console.log(`Kuma ${version} ready at ${BASE_URL}`);
@@ -215,10 +218,19 @@ try {
       throw new Error(`UPTIME_KUMA_IT_IMAGE names ${IMAGE_MAJOR}.x but Kuma reports ${version}`);
     }
     exitCode = await runTests(version);
+    // The server's side of a failure (what it was doing while a call timed
+    // out) is gone after down -v, so print its log while the container lives.
+    if (exitCode !== 0) {
+      console.error("--- Kuma server log (tests failed) ---");
+      await compose(["logs", "--no-color", "--timestamps"], COMPOSE_DOWN_TIMEOUT_MS);
+    }
   }
 } catch (e) {
   console.error(`integration setup failed: ${e instanceof Error ? e.message : e}`);
   exitCode = 1;
+  // a setup that timed out during login is the same #52 symptom
+  console.error("--- Kuma server log (setup failed) ---");
+  await compose(["logs", "--no-color", "--timestamps"], COMPOSE_DOWN_TIMEOUT_MS);
 } finally {
   if (!(await teardown()) && exitCode === 0) exitCode = 1;
 }

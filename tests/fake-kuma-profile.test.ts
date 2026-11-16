@@ -32,6 +32,26 @@ afterEach(async () => {
   sb.cleanup();
 });
 
+describe("fake kuma listenersDelayMs", () => {
+  test("drops a login sent before the pre-login info, like 2.5.11", async () => {
+    const { io } = await import("socket.io-client");
+    kuma = await startFakeKuma({ listenersDelayMs: 300 });
+    const socket = io(kuma.url, { transports: ["websocket"], reconnection: false });
+    try {
+      await new Promise<void>((r) => socket.once("connect", () => r()));
+      const early = await Promise.race([
+        new Promise((r) =>
+          socket.emit("login", { username: "admin", password: "pw-from-test", token: "" }, r),
+        ),
+        new Promise((r) => setTimeout(() => r("no answer"), 600)),
+      ]);
+      expect(early).toBe("no answer");
+    } finally {
+      socket.disconnect();
+    }
+  });
+});
+
 describe("fake kuma 2.x profile", () => {
   test("connect reports the 2.x version and major version", async () => {
     kuma = await startFakeKuma({ profile: "2.x" });

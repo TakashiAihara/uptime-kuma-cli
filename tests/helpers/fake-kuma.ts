@@ -165,10 +165,16 @@ export type FakeState = {
   // conditions on add)
   profile: "1.23" | "2.x";
   // the info payload: sent on connection with the version fields (and 2.x's
-  // dbType / runtime) hidden, and in full after login; null sends no info at all
+  // dbType / runtime) hidden, and in full after login; null sends only an
+  // empty pre-login info (a server that reports no version)
   info: Record<string, unknown> | null;
   // ms to hold the post-login info back after the pushed lists
   infoDelayMs: number;
+  // send no pre-login info at all (Kuma always sends one)
+  noPreLoginInfo: boolean;
+  // ms after connect before the fake answers events and sends the pre-login
+  // info, like 2.5.11's awaited sendInfo; events before that are dropped
+  listenersDelayMs: number;
   // send the full info before the login answer instead of after monitorList,
   // like 2.x whose afterLogin runs before the login callback
   infoBeforeLoginAck: boolean;
@@ -416,6 +422,8 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
         },
     infoBeforeLoginAck: profile2x,
     infoDelayMs: 0,
+    noPreLoginInfo: false,
+    listenersDelayMs: 0,
     fail: {},
     silentHeartbeat: [],
     stats: {},
@@ -667,16 +675,25 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
 
   io.on("connection", (socket) => {
     let loggedIn = false;
-    // sendInfo(socket, true) on connection hides the version fields until login
-    if (state.info !== null) {
-      const hidden = { ...state.info };
-      delete hidden.version;
-      delete hidden.latestVersion;
-      delete hidden.isContainer;
-      delete hidden.dbType;
-      delete hidden.runtime;
-      socket.emit("info", hidden);
-    }
+    // sendInfo(socket, true) on connection hides the version fields until
+    // login; Kuma always sends it, so info: null still sends an empty one
+    const hidden: Record<string, unknown> = { ...state.info };
+    delete hidden.version;
+    delete hidden.latestVersion;
+    delete hidden.isContainer;
+    delete hidden.dbType;
+    delete hidden.runtime;
+    // 2.5.11 awaits that sendInfo before registering its listeners, so an
+    // event sent earlier is dropped; listenersDelayMs models a slow await
+    // one timer flips readiness and sends the info, so a login answering
+    // that info can never land before the fake listens
+    let listening = state.listenersDelayMs === 0;
+    const ready = () => {
+      listening = true;
+      if (!state.noPreLoginInfo) socket.emit("info", hidden);
+    };
+    if (listening) ready();
+    else setTimeout(ready, state.listenersDelayMs);
     socket.onAny((event, ...args) => {
       const plain = args.filter((a) => typeof a !== "function");
       calls.push({ event, args: structuredClone(plain) });
@@ -685,6 +702,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     const handle = (event: string, fn: (...a: any[]) => unknown) => {
       socket.on(event, async (...args: any[]) => {
         const cb = args[args.length - 1];
+        if (!listening) return;
         if (state.disconnectOn === event) {
           socket.disconnect(true);
           return;
