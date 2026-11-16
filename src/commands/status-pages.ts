@@ -121,7 +121,8 @@ function redactUrl(url: string): string {
 // output written for 1.23's single `incident` keeps working. The pick does
 // not lean on that order: a dated incident only loses to a later one when
 // its createdDate proves it older, an undated one never beats a dated one,
-// and missing or tied dates fall back to position — the last element wins.
+// a tied createdDate goes to the higher id (the route does not order ties),
+// and missing dates fall back to position — the last element wins.
 function newestIncident(incidents: Record<string, unknown>[]): Record<string, unknown> | null {
   let best: Record<string, unknown> | null = null;
   for (const inc of incidents) {
@@ -132,6 +133,13 @@ function newestIncident(incidents: Record<string, unknown>[]): Record<string, un
     }
     const bd = best.createdDate;
     const cd = inc.createdDate;
+    if (typeof bd === "string" && typeof cd === "string" && bd === cd) {
+      const bid = Number(best.id);
+      const iid = Number(inc.id);
+      if (Number.isInteger(bid) && Number.isInteger(iid) && iid < bid) continue;
+      best = inc;
+      continue;
+    }
     if (typeof bd === "string" && (typeof cd !== "string" || cd < bd)) continue;
     best = inc;
   }
@@ -570,12 +578,26 @@ export function registerStatusPages(program: Command): void {
       if (!statusPageBySlug(s, slug)) fail(1, `status page ${slug} not found`);
       // 1.x's postIncident unpins the page's incidents itself; 2.x's does not,
       // so the one-pinned behaviour needs the explicit unpinIncident first
-      if (s.majorVersion >= 2) await s.request("unpinIncident", [slug]);
-      const res = await s.request("postIncident", [
-        slug,
-        { title, content, style: opts.style as string },
-      ]);
-      const incident = res?.incident;
+      const unpinned = s.majorVersion >= 2;
+      if (unpinned) await s.request("unpinIncident", [slug]);
+      let incident: unknown;
+      try {
+        const res = await s.request("postIncident", [
+          slug,
+          { title, content, style: opts.style as string },
+        ]);
+        incident = res?.incident;
+      } catch (e) {
+        // the unpin already ran, so a failed post can leave the page with
+        // nothing pinned — Kuma's own message does not say that
+        if (unpinned && e instanceof CliError) {
+          fail(
+            e.exitCode,
+            `${e.message} — the page's incidents were unpinned first; re-run to post a new one`,
+          );
+        }
+        throw e;
+      }
       if (incident === null || typeof incident !== "object" || Array.isArray(incident)) {
         fail(70, "unexpected postIncident response");
       }

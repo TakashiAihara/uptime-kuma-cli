@@ -167,13 +167,31 @@ describe("status-pages get on Kuma 2.x", () => {
     expect(r.json().incident.title).toBe("Dated");
   });
 
-  test("tied createdDates fall back to the last element", async () => {
+  test("a tied createdDate goes to the higher incident id", async () => {
+    // the route's ORDER BY created_date DESC does not order ties; the higher
+    // id is the later insert, so it wins over the array position
     const k = await useFake({ statusPages: [structuredClone(STATUS)] });
     k.state.statusPageApiBody = {
       config: {},
       incidents: [
-        { id: 1, title: "First", pin: true, createdDate: "2030-01-01 10:00:00" },
-        { id: 2, title: "Second", pin: true, createdDate: "2030-01-01 10:00:00" },
+        { id: 9, title: "First", pin: true, createdDate: "2030-01-01 10:00:00" },
+        { id: 4, title: "Second", pin: true, createdDate: "2030-01-01 10:00:00" },
+      ],
+      publicGroupList: [],
+      maintenanceList: [],
+    };
+    const r = await run(sb, ["status-pages", "get", "status"], creds(k.url));
+    expect(r.code).toBe(0);
+    expect(r.json().incident.title).toBe("First");
+  });
+
+  test("a tied createdDate without ids falls back to the last element", async () => {
+    const k = await useFake({ statusPages: [structuredClone(STATUS)] });
+    k.state.statusPageApiBody = {
+      config: {},
+      incidents: [
+        { title: "First", pin: true, createdDate: "2030-01-01 10:00:00" },
+        { title: "Second", pin: true, createdDate: "2030-01-01 10:00:00" },
       ],
       publicGroupList: [],
       maintenanceList: [],
@@ -307,6 +325,26 @@ describe("status-pages incident on Kuma 2.x", () => {
     expect(k.state.incidents.find((i) => i.id === 1)!.pin).toBe(false);
     expect(k.state.incidents.find((i) => i.id === 2)!.pin).toBe(true);
     expect(k.state.incidents.find((i) => i.id === 3)!.pin).toBe(true);
+  });
+
+  test("a failed post after the unpin says the page was left unpinned", async () => {
+    const k = await useFake({
+      statusPages: [structuredClone(STATUS)],
+      incidents: [{ id: 1, statusPageId: 7, title: "Old", pin: true, active: true }],
+    });
+    k.state.postIncidentResult = { ok: false, msg: "post failed" };
+    const r = await run(
+      sb,
+      ["status-pages", "incident", "status", "--title", "New", "--content", "c"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("post failed");
+    expect(r.stderr).toContain("unpinned");
+    // the unpin already ran: the old incident lost its pin and no new one exists
+    expect(callsOf(k, "unpinIncident")).toHaveLength(1);
+    expect(k.state.incidents).toHaveLength(1);
+    expect(k.state.incidents[0]!.pin).toBe(false);
   });
 });
 

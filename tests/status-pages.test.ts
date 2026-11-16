@@ -443,6 +443,9 @@ describe("status-pages", () => {
       );
       expect(r.code).toBe(1);
       expect(r.stderr).toContain("slug is not found");
+      // 1.x's postIncident unpins inside the same call, so there is no
+      // unpinned-first window to warn about
+      expect(r.stderr).not.toContain("unpinned");
     });
 
     test("postIncident ok:true without an incident exits 70", async () => {
