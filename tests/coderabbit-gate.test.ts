@@ -4,7 +4,6 @@ import {
   GATE_CONTEXT,
   evaluate,
   gateState,
-  latestCodeRabbitDescription,
   type CommitStatus,
 } from "../scripts/coderabbit-gate.ts";
 
@@ -65,32 +64,6 @@ describe("gateState", () => {
     expect(gate.description.length).toBeLessThanOrEqual(140);
     expect(gate.description).toContain("@coderabbitai review");
     expect(gate.description).toContain("Review skipped");
-  });
-});
-
-describe("latestCodeRabbitDescription", () => {
-  test("returns the newest CodeRabbit status description", () => {
-    const statuses = [
-      status({ id: 3, description: "Review completed", created_at: "2026-11-16T00:02:00Z" }),
-      status({ id: 2, description: "Review in progress", created_at: "2026-11-16T00:01:00Z" }),
-      status({ id: 1, description: "Review queued", created_at: "2026-11-16T00:00:00Z" }),
-    ];
-    expect(latestCodeRabbitDescription(statuses)).toBe("Review completed");
-  });
-
-  test("ignores other contexts and picks the newest on ties", () => {
-    const statuses = [
-      status({ id: 5, context: "ci/check", description: "other" }),
-      status({ id: 4, description: "Review paused", created_at: "2026-11-16T00:01:00Z" }),
-      status({ id: 3, description: "Review completed", created_at: "2026-11-16T00:01:00Z" }),
-    ];
-    // same created_at: the higher id wins
-    expect(latestCodeRabbitDescription(statuses)).toBe("Review paused");
-  });
-
-  test("returns null when CodeRabbit never reported", () => {
-    expect(latestCodeRabbitDescription([status({ context: "ci/check" })])).toBeNull();
-    expect(latestCodeRabbitDescription([])).toBeNull();
   });
 });
 
@@ -160,6 +133,34 @@ describe("evaluate", () => {
 
     const body = JSON.parse(String(calls[1]!.body)) as Record<string, unknown>;
     expect(body.state).toBe("pending");
+  });
+
+  test("uses the first CodeRabbit entry, which the API documents as newest", async () => {
+    const { calls, impl } = fakeFetch([
+      status({ id: 9, description: "Review completed", created_at: "2026-11-16T00:09:00Z" }),
+      status({ id: 8, description: "Review paused", created_at: "2026-11-16T00:08:00Z" }),
+    ]);
+    await evaluate("tok", REPO, SHA, undefined, false, impl);
+
+    const body = JSON.parse(String(calls[1]!.body)) as Record<string, unknown>;
+    expect(body.state).toBe("success");
+  });
+
+  test("stops paging once a CodeRabbit status is found", async () => {
+    const page2 = `https://api.github.com/repos/${REPO}/commits/${SHA}/statuses?per_page=100&page=2`;
+    const calls: string[] = [];
+    const impl = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push(String(url));
+      return new Response(JSON.stringify([status({ description: "Review completed" })]), {
+        status: 200,
+        headers: { link: `<${page2}>; rel="next"` },
+      });
+    }) as typeof fetch;
+
+    await evaluate("tok", REPO, SHA, undefined, false, impl);
+
+    expect(calls).toHaveLength(2); // one statuses GET + the POST, no page 2
+    expect(calls[1]).toBe(`https://api.github.com/repos/${REPO}/statuses/${SHA}`);
   });
 
   test("follows Link pagination until the CodeRabbit status is found", async () => {

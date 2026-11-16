@@ -56,16 +56,6 @@ export function gateState(description: string | null | undefined): {
   return { state: "failure", description: `${prefix}${detail}${remedy}` };
 }
 
-// The statuses endpoint lists newest first, but order is not part of the
-// contract — pick by created_at/id so a reordered response cannot resurrect an
-// older outcome.
-export function latestCodeRabbitDescription(statuses: CommitStatus[]): string | null {
-  const latest = statuses
-    .filter((s) => s.context === CODERABBIT_CONTEXT)
-    .sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id - a.id)[0];
-  return latest?.description ?? null;
-}
-
 type Fetch = typeof fetch;
 
 // The gate is a required check and no event may come after a failed run, so a
@@ -73,6 +63,9 @@ type Fetch = typeof fetch;
 // (GitHub answers secondary limits with 403 + Retry-After, not just 429), and
 // network failures a few times before giving up.
 const MAX_ATTEMPTS = 3;
+// long enough to outlast a secondary rate-limit window, short enough that two
+// waits plus the API calls still fit the job's timeout
+const MAX_DELAY_MS = 120_000;
 
 function isRetryable(res: Response): boolean {
   if (res.status >= 500 || res.status === 429) return true;
@@ -83,8 +76,17 @@ function isRetryable(res: Response): boolean {
 }
 
 function retryAfterMs(res: Response): number {
-  const seconds = Number(res.headers.get("retry-after"));
-  return Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds * 1000, 60_000) : 0;
+  const retryAfter = Number(res.headers.get("retry-after"));
+  if (Number.isFinite(retryAfter) && retryAfter > 0) {
+    return Math.min(retryAfter * 1000, MAX_DELAY_MS);
+  }
+  // primary rate limits answer 403 + x-ratelimit-remaining: 0 + a reset epoch
+  // instead of Retry-After; wait for the window when it reopens soon
+  const reset = Number(res.headers.get("x-ratelimit-reset"));
+  if (Number.isFinite(reset) && reset > 0) {
+    return Math.min(Math.max(reset * 1000 - Date.now(), 0), MAX_DELAY_MS);
+  }
+  return 0;
 }
 
 async function fetchWithRetry(
@@ -114,10 +116,11 @@ function apiHeaders(token: string): Record<string, string> {
   };
 }
 
-// The statuses endpoint pages at 100 and a busy PR can push the CodeRabbit
-// status past page one, so follow Link rel="next". The cap only bounds the
-// requests; pages arrive newest first, so the latest CodeRabbit status is in
-// the pages already fetched even if the cap is hit.
+// The statuses endpoint returns newest first, so the first CodeRabbit entry on
+// the first page that has one is the latest review outcome — paginate only
+// until it is found. When CodeRabbit never reported, every page is read and the
+// result is still the correct pending; the cap only bounds a pathological
+// commit, where the newest statuses sit on the early pages anyway.
 const STATUS_PAGE_LIMIT = 10;
 
 function nextPageUrl(link: string | null): string | null {
@@ -129,13 +132,12 @@ function nextPageUrl(link: string | null): string | null {
   return null;
 }
 
-async function statusesFor(
+async function coderabbitDescription(
   token: string,
   repo: string,
   sha: string,
   fetchImpl: Fetch,
-): Promise<CommitStatus[]> {
-  const statuses: CommitStatus[] = [];
+): Promise<string | null> {
   let url: string | null =
     `https://api.github.com/repos/${repo}/commits/${sha}/statuses?per_page=100`;
   for (let page = 0; page < STATUS_PAGE_LIMIT && url !== null; page++) {
@@ -144,10 +146,12 @@ async function statusesFor(
       const body = (await res.text()).slice(0, 500);
       throw new Error(`GET ${url} failed: ${res.status} ${body}`);
     }
-    statuses.push(...((await res.json()) as CommitStatus[]));
+    const statuses = (await res.json()) as CommitStatus[];
+    const latest = statuses.find((s) => s.context === CODERABBIT_CONTEXT);
+    if (latest !== undefined) return latest.description;
     url = nextPageUrl(res.headers.get("link"));
   }
-  return statuses;
+  return null;
 }
 
 async function publishStatus(
@@ -194,8 +198,7 @@ export async function evaluate(
   dryRun: boolean,
   fetchImpl: Fetch = fetch,
 ): Promise<void> {
-  const statuses = await statusesFor(token, repo, sha, fetchImpl);
-  const description = latestCodeRabbitDescription(statuses);
+  const description = await coderabbitDescription(token, repo, sha, fetchImpl);
   const gate = gateState(description);
   console.log(
     `${sha}: CodeRabbit ${JSON.stringify(description)} -> ${GATE_CONTEXT} ${gate.state} (${gate.description})`,

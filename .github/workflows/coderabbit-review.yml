@@ -6,15 +6,17 @@ name: coderabbit-review
 # context main requires. The job re-runs on every CodeRabbit status change (`status`
 # event) and when the PR head moves (`pull_request_target`), so the gate follows
 # the review without polling. pull_request_target is used on purpose: the workflow
-# and the script always come from the base branch and the job never checks out PR
-# code, so the PR cannot edit the gate that judges it. The job only reads commit
-# statuses and publishes one fixed-context status — it runs no PR code, so a fork
-# PR gains nothing from it (opencode-review's plain pull_request event gives fork
-# PRs a read-only token its write steps cannot live with). Every automated run
-# evaluates and publishes on the event's own commit, so the concurrency group
-# below is always the same sha the run writes to; runs for one commit are
-# serialized with cancel-in-progress, and a stale evaluation cannot overwrite a
-# newer gate status and stall the check.
+# and the script always come from the base branch and the job never runs PR
+# code, so the PR cannot edit the gate that judges it: checkout is pinned to
+# the default branch for every event, including status (whose payload sha is a
+# PR commit) and dispatch (which may run on any ref). The job only reads commit
+# statuses and publishes one fixed-context status — it runs no PR code, so a
+# fork PR gains nothing from it (opencode-review's plain pull_request event
+# gives fork PRs a read-only token its write steps cannot live with). Every
+# automated run evaluates and publishes on the event's own commit, so the
+# concurrency group below is always the same sha the run writes to; runs for
+# one commit are serialized with cancel-in-progress, and a stale evaluation
+# cannot overwrite a newer gate status and stall the check.
 
 on:
   pull_request_target:
@@ -36,7 +38,7 @@ jobs:
       group: coderabbit-review-${{ github.event.pull_request.head.sha || inputs.sha || github.event.sha }}
       cancel-in-progress: true
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       contents: read
       pull-requests: read
@@ -44,6 +46,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
       - uses: jdx/mise-action@08ae2a091c038e1e05ec6f5115dc5c69d5a2a6b8 # v5.1.2
       - name: publish coderabbit-review status
