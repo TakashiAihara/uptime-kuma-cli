@@ -1,0 +1,9 @@
+db = "mewt.sqlite"
+
+# scripts/mutation-report.ts drives campaigns non-interactively: it passes
+# --db/--test.cmd/--test.timeout explicitly per changed file, so the per-target
+# test commands live in that script, not here. This file only gives interactive
+# `mewt run` a sane default.
+[test]
+cmd = "bun test tests/"
+timeout = 300
