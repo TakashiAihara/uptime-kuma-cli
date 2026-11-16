@@ -216,8 +216,21 @@
 
 ## Tests
 
-- `bun test` runs the unit tests in `tests/` against `tests/helpers/fake-kuma.ts`, an in-process Socket.IO server that mimics Kuma 1.23.17
+- `bun test` runs the unit tests in `tests/` against `tests/helpers/fake-kuma.ts`, an in-process Socket.IO server that mimics Kuma 1.23.17; `tests/helpers/run.ts` invokes the CLI in-process (`runCli`) so `bun test --coverage` instruments `src/commands` too — a spawned child process would leave them unmeasured
+- `tests/src-files.test.ts` imports every module under `src/` so a file no test loads still appears in the coverage report at 0% instead of being absent
 - `bun run test:integration` (`scripts/integration.ts`) runs `tests/integration/` — the same CLI — against a real `louislam/uptime-kuma:1.23.17` container from `tests/integration/compose.yaml` (or the image in `UPTIME_KUMA_IT_IMAGE`; CI also runs 2.5.11, where tests marked `skipIf(on2x)` with their issue number are skipped); it needs Docker
+
+## Coverage gates (CI)
+
+- The `coverage` job runs `bun test --coverage --coverage-reporter=lcov --coverage-dir=coverage` then `bun scripts/coverage.ts whole` — src/ line coverage must be >= 90%; the script refuses to pass when a src file is missing from the lcov report
+- On pull requests it also runs `bun scripts/coverage.ts diff --base <base sha>`: added/changed src/ lines from `git diff <base>...HEAD` are intersected with the lcov `DA` records and must be >= 90% covered; a diff with no measurable src/ lines (docs, config, tests only) passes
+- Locally: `bun test --coverage --coverage-reporter=lcov --coverage-dir=coverage` then `bun scripts/coverage.ts whole` / `bun scripts/coverage.ts diff --base origin/main`
+
+## Mutation report (CI, report-only)
+
+- The `mutation` job runs `bun scripts/mutation-report.ts --base <base sha>` on pull requests: for each changed src/ file it generates mewt mutants (`mewt`, pinned in `.mise.toml`), keeps high/medium severity mutants whose line range intersects the PR's added lines, and runs the file's focused unit tests (`MUTATION_TESTS` in the script — `tests/mutation-report.test.ts` fails when a new src file lacks an entry)
+- Surviving mutants (`Uncaught`) are upserted as a PR comment marked `<!-- mutation-testing -->`; the job is `continue-on-error` and never blocks merge — surviving mutants are a report, not a gate
+- Locally: `mise exec -- mewt print mutants --target src/commands/tags.ts` to inspect mutants, or `bun scripts/mutation-report.ts --base origin/main` for the same report CI posts
 
 ## Not in scope
 

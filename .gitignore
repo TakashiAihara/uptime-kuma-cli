@@ -8,3 +8,6 @@ dist/
 tmp/
 .claude/
 .kaneo.json
+coverage/
+mewt.sqlite
+mutation-report.md
