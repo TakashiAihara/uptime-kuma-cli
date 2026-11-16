@@ -119,9 +119,9 @@ function redactUrl(url: string): string {
 // 2.x's public route returns every pinned and active incident as `incidents`,
 // ordered created_date DESC; `incident` reports the newest pinned one so
 // output written for 1.23's single `incident` keeps working. The pick does
-// not lean on that order: an element only loses to a later one when both
-// createdDates are present and prove it older — a missing or tied date
-// falls back to position, i.e. the last element wins.
+// not lean on that order: a dated incident only loses to a later one when
+// its createdDate proves it older, an undated one never beats a dated one,
+// and missing or tied dates fall back to position — the last element wins.
 function newestIncident(incidents: Record<string, unknown>[]): Record<string, unknown> | null {
   let best: Record<string, unknown> | null = null;
   for (const inc of incidents) {
@@ -132,7 +132,7 @@ function newestIncident(incidents: Record<string, unknown>[]): Record<string, un
     }
     const bd = best.createdDate;
     const cd = inc.createdDate;
-    if (typeof cd === "string" && typeof bd === "string" && cd < bd) continue;
+    if (typeof bd === "string" && (typeof cd !== "string" || cd < bd)) continue;
     best = inc;
   }
   return best;

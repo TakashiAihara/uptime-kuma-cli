@@ -133,6 +133,56 @@ describe("status-pages get on Kuma 2.x", () => {
     expect(j.incident.title).toBe("Last");
   });
 
+  test("an undated incident never beats a dated one for incident", async () => {
+    // the route sorts NULL created_date last, so the undated entry sits at
+    // the array's end — it must not win the compatibility field
+    const k = await useFake({ statusPages: [structuredClone(STATUS)] });
+    k.state.statusPageApiBody = {
+      config: {},
+      incidents: [
+        { id: 1, title: "Dated", pin: true, createdDate: "2030-01-01 10:00:00" },
+        { id: 2, title: "Undated", pin: true, createdDate: null },
+      ],
+      publicGroupList: [],
+      maintenanceList: [],
+    };
+    const r = await run(sb, ["status-pages", "get", "status"], creds(k.url));
+    expect(r.code).toBe(0);
+    expect(r.json().incident.title).toBe("Dated");
+  });
+
+  test("a dated incident displaces an earlier undated one", async () => {
+    const k = await useFake({ statusPages: [structuredClone(STATUS)] });
+    k.state.statusPageApiBody = {
+      config: {},
+      incidents: [
+        { id: 1, title: "Undated", pin: true, createdDate: null },
+        { id: 2, title: "Dated", pin: true, createdDate: "2030-01-01 10:00:00" },
+      ],
+      publicGroupList: [],
+      maintenanceList: [],
+    };
+    const r = await run(sb, ["status-pages", "get", "status"], creds(k.url));
+    expect(r.code).toBe(0);
+    expect(r.json().incident.title).toBe("Dated");
+  });
+
+  test("tied createdDates fall back to the last element", async () => {
+    const k = await useFake({ statusPages: [structuredClone(STATUS)] });
+    k.state.statusPageApiBody = {
+      config: {},
+      incidents: [
+        { id: 1, title: "First", pin: true, createdDate: "2030-01-01 10:00:00" },
+        { id: 2, title: "Second", pin: true, createdDate: "2030-01-01 10:00:00" },
+      ],
+      publicGroupList: [],
+      maintenanceList: [],
+    };
+    const r = await run(sb, ["status-pages", "get", "status"], creds(k.url));
+    expect(r.code).toBe(0);
+    expect(r.json().incident.title).toBe("Second");
+  });
+
   test("incident is null and incidents empty when nothing is pinned", async () => {
     const k = await useFake({
       statusPages: [structuredClone(STATUS)],
