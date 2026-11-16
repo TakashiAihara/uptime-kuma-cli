@@ -224,6 +224,9 @@ try {
   }
 } catch (e) {
   console.error(`integration setup failed: ${e instanceof Error ? e.message : e}`);
+  // a setup that timed out during login is the same #52 symptom
+  console.error("--- Kuma server log (setup failed) ---");
+  await compose(["logs", "--no-color", "--timestamps"], COMPOSE_DOWN_TIMEOUT_MS);
   exitCode = 1;
 } finally {
   if (!(await teardown()) && exitCode === 0) exitCode = 1;
