@@ -235,7 +235,22 @@ function missingSrcFiles(lcov: LcovData, root: string): string[] {
 
 export function gitAddedLines(base: string, root: string): AddedLines | null {
   const proc = Bun.spawnSync(
-    ["git", "-c", "core.quotePath=false", "diff", "--unified=0", `${base}...HEAD`, "--", "src/"],
+    [
+      "git",
+      "-c",
+      "core.quotePath=false",
+      "diff",
+      "--unified=0",
+      // local git config (color.diff, diff.external, diff.*Prefix) must not
+      // change the output shape the parser expects
+      "--no-color",
+      "--no-ext-diff",
+      "--src-prefix=a/",
+      "--dst-prefix=b/",
+      `${base}...HEAD`,
+      "--",
+      "src/",
+    ],
     {
       cwd: root,
       stdout: "pipe",

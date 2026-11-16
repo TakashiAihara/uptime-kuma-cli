@@ -146,15 +146,27 @@ export function buildReport(input: {
   if (withSurvivors.length === 0) {
     out.push("", "No surviving mutants.");
   } else {
+    // GitHub rejects comment bodies over 65536 chars; cap the list so a
+    // mutant-heavy PR cannot silently keep a stale comment instead.
+    const MAX_SURVIVOR_LINES = 200;
+    let budget = MAX_SURVIVOR_LINES;
+    let overflow = 0;
     out.push("", "### Surviving mutants", "");
     for (const f of withSurvivors) {
+      const take = Math.min(f.survivors.length, budget);
+      overflow += f.survivors.length - take;
+      budget -= take;
+      if (take === 0) continue;
       out.push(`**${f.file}**`);
-      for (const s of f.survivors) {
+      for (const s of f.survivors.slice(0, take)) {
         out.push(
           `- line ${s.line} — \`${s.slug}\` #${s.id}: \`${clip(s.oldText)}\` → \`${clip(s.newText)}\``,
         );
       }
       out.push("");
+    }
+    if (overflow > 0) {
+      out.push(`… ${overflow} more surviving mutant(s) — see the mutation job log.`);
     }
   }
   if (input.errors.length > 0) {

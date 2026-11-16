@@ -124,6 +124,27 @@ describe("buildReport", () => {
     expect(md).toContain("### Errors");
     expect(md).toContain("src/foo.ts: mewt mutate failed (exit 1)");
   });
+
+  test("caps the survivor list below GitHub's comment size limit", () => {
+    const survivors = Array.from({ length: 250 }, (_, i) => ({
+      id: i + 1,
+      slug: "CR",
+      line: i + 1,
+      oldText: "a",
+      newText: "b",
+    }));
+    const md = buildReport({
+      base: "abc1234",
+      head: "def5678",
+      changedCount: 1,
+      files: [{ file: "src/a.ts", selected: 250, survivors }],
+      counts: { caught: 0, uncaught: 250, other: 0 },
+      errors: [],
+    });
+    expect(md.match(/- line /g)).toHaveLength(200);
+    expect(md).toContain("50 more surviving mutant(s)");
+    expect(md.length).toBeLessThan(65536);
+  });
 });
 
 describe("MUTATION_TESTS", () => {

@@ -60,9 +60,13 @@ jobs:
         run: bun scripts/coverage.ts diff --base "${{ github.event.pull_request.base.sha }}"
 
   # Mutation testing on PR-changed src lines. Report-only: surviving mutants
-  # are posted as a PR comment and never fail the job.
+  # are posted as a PR comment and never fail the job. The concurrency group
+  # keeps an older, slower run from overwriting a newer run's comment.
   mutation:
     if: github.event_name == 'pull_request'
+    concurrency:
+      group: mutation-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     timeout-minutes: 45
     continue-on-error: true
