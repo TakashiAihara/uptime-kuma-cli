@@ -677,7 +677,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     let loggedIn = false;
     // sendInfo(socket, true) on connection hides the version fields until
     // login; Kuma always sends it, so info: null still sends an empty one
-    const hidden: Record<string, unknown> = { ...(state.info ?? {}) };
+    const hidden: Record<string, unknown> = { ...state.info };
     delete hidden.version;
     delete hidden.latestVersion;
     delete hidden.isContainer;
@@ -685,11 +685,15 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     delete hidden.runtime;
     // 2.5.11 awaits that sendInfo before registering its listeners, so an
     // event sent earlier is dropped; listenersDelayMs models a slow await
-    const listenersReadyAt = Date.now() + state.listenersDelayMs;
-    if (!state.noPreLoginInfo) {
-      if (state.listenersDelayMs === 0) socket.emit("info", hidden);
-      else setTimeout(() => socket.emit("info", hidden), state.listenersDelayMs);
-    }
+    // one timer flips readiness and sends the info, so a login answering
+    // that info can never land before the fake listens
+    let listening = state.listenersDelayMs === 0;
+    const ready = () => {
+      listening = true;
+      if (!state.noPreLoginInfo) socket.emit("info", hidden);
+    };
+    if (listening) ready();
+    else setTimeout(ready, state.listenersDelayMs);
     socket.onAny((event, ...args) => {
       const plain = args.filter((a) => typeof a !== "function");
       calls.push({ event, args: structuredClone(plain) });
@@ -698,7 +702,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     const handle = (event: string, fn: (...a: any[]) => unknown) => {
       socket.on(event, async (...args: any[]) => {
         const cb = args[args.length - 1];
-        if (Date.now() < listenersReadyAt) return;
+        if (!listening) return;
         if (state.disconnectOn === event) {
           socket.disconnect(true);
           return;

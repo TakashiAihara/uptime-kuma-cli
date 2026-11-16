@@ -65,7 +65,8 @@ describe("parseMajorVersion", () => {
 
 describe("connect waits for the pre-login info before login", () => {
   test("a server that registers its listeners late (2.5.11's awaited sendInfo) still logs in", async () => {
-    const s = await session({ profile: "2.x", listenersDelayMs: 400 });
+    // longer than any fixed pause a broken fix might use instead of the wait
+    const s = await session({ profile: "2.x", listenersDelayMs: 1500 });
     expect(s.serverVersion).toBe("2.5.11");
   });
 
