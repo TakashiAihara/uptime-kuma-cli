@@ -198,7 +198,10 @@ async function fetchPublicStatusPage(
     incidents = raw;
     incident = newestIncident(raw as Record<string, unknown>[]);
   } else {
-    incident = body.incident ?? null;
+    // the 1.x route always emits `incident` — null or the pinned one — so a
+    // missing key means the body is not the status-page payload
+    if (!("incident" in body)) fail(70, "unexpected /api/status-page response");
+    incident = body.incident;
     if (incident !== null && (typeof incident !== "object" || Array.isArray(incident))) {
       fail(70, "unexpected /api/status-page response");
     }

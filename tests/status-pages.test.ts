@@ -198,6 +198,13 @@ describe("status-pages", () => {
       expect(r.code).toBe(70);
     });
 
+    test("a /api/status-page body without the incident key exits 70", async () => {
+      kuma.state.statusPageApiBody = { config: {}, publicGroupList: [] };
+      const r = await run(sb, ["status-pages", "get", "status"], creds(kuma.url));
+      expect(r.code).toBe(70);
+      expect(r.stderr).toContain("unexpected /api/status-page response");
+    });
+
     test("a malformed /api/status-page body exits 70", async () => {
       kuma.state.statusPageApiBody = { config: {}, incident: null };
       const r = await run(sb, ["status-pages", "get", "status"], creds(kuma.url));
