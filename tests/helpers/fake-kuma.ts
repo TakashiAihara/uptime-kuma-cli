@@ -243,6 +243,17 @@ const checkStatusPageSlug = (slug: string): void => {
   if (!/^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$/.test(s)) throw new Error("Invalid Slug");
 };
 
+// 2.5.11's saveStatusPage validates config.analyticsType against the
+// AnalyticsType enum; null means "no analytics" and a missing key fails too
+const ANALYTICS_TYPES_2X = new Set<unknown>([
+  "google",
+  "umami",
+  "plausible",
+  "matomo",
+  "rybbit",
+  null,
+]);
+
 // Kuma 1.23 runs redbean frozen, so `add` with a key that is not a monitor column fails.
 // The set is the monitor columns: monitorDefaults of src/pages/EditMonitor.vue (1.23.17)
 // plus the fields the form edits through v-model (e.g. description, body, headers,
@@ -555,8 +566,9 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
   const maintenanceListJSON = () =>
     Object.fromEntries(state.maintenances.map((m) => [String(m.id), maintenanceJSON(m)]));
 
-  // Incident.toPublicJSON of Kuma 1.23.17; fields a fixture leaves out fall
-  // back to the column defaults (style 'warning', pin/active 1)
+  // Incident.toPublicJSON; fields a fixture leaves out fall back to the
+  // column defaults (style 'warning', pin/active 1). 2.5.11 adds active and
+  // status_page_id and reports pin as a boolean
   const incidentJSON = (i: IncidentRow): Record<string, unknown> => ({
     id: i.id,
     style: i.style ?? "warning",
@@ -565,6 +577,9 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     pin: i.pin ?? true,
     createdDate: i.createdDate ?? null,
     lastUpdatedDate: i.lastUpdatedDate ?? null,
+    ...(state.profile === "2.x"
+      ? { active: i.active ?? true, status_page_id: i.statusPageId }
+      : {}),
   });
 
   // Maintenance.jsonToBean of Kuma 1.23.17: assigns the listed fields
@@ -1245,7 +1260,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
         throw new Error("UNIQUE constraint failed: status_page.slug");
       }
       const id = ++nextStatusPageId;
-      state.statusPages.push({
+      const added: StatusPageRow = {
         id,
         slug: normalized,
         title: t,
@@ -1259,9 +1274,23 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
         customCSS: null,
         footerText: null,
         showPoweredBy: true,
-        googleAnalyticsId: null,
         showCertificateExpiry: false,
-      });
+      };
+      if (state.profile === "2.x") {
+        // 2.5.11 defaults autoRefreshInterval to 300 on new pages and stores
+        // the analytics columns instead of googleAnalyticsId
+        Object.assign(added, {
+          autoRefreshInterval: 300,
+          rssTitle: null,
+          showOnlyLastHeartbeat: false,
+          analyticsId: null,
+          analyticsScriptUrl: null,
+          analyticsType: null,
+        });
+      } else {
+        added.googleAnalyticsId = null;
+      }
+      state.statusPages.push(added);
       return { ok: true, msg: "OK!" };
     });
 
@@ -1273,6 +1302,8 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
       state.incidents = state.incidents.filter((i) => i.statusPageId !== page.id);
       delete state.statusPageGroups[page.id];
       state.statusPages = state.statusPages.filter((p) => p.id !== page.id);
+      // 2.x's deleteStatusPage clears the public-route cache; 1.23's does not
+      if (state.profile === "2.x") apiCache.clear();
       return { ok: true };
     });
 
@@ -1286,9 +1317,12 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
         const page = state.statusPages.find((p) => p.slug === slug);
         const statusPageID = page?.id;
         if (!statusPageID) throw new Error("slug is not found");
-        // every incident of the page is unpinned before the new one is stored
-        for (const i of state.incidents) {
-          if (i.statusPageId === statusPageID) i.pin = false;
+        // 1.23 unpins every incident of the page first; 2.x postIncident
+        // leaves the old pins alone (unpinIncident is a separate event)
+        if (state.profile !== "2.x") {
+          for (const i of state.incidents) {
+            if (i.statusPageId === statusPageID) i.pin = false;
+          }
         }
         // an incident.id that does not belong to the page falls through to a
         // fresh bean, but the date branch still follows incident.id
@@ -1348,6 +1382,12 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
         // R.findOne returns null and the handler throws "No slug?"
         if (page === undefined) throw new Error("No slug?");
         checkStatusPageSlug(config?.slug);
+        // 2.x validates analyticsType before storing; the allowed set is the
+        // AnalyticsType enum plus null for "no analytics", and a missing key
+        // fails the same check
+        if (state.profile === "2.x" && !ANALYTICS_TYPES_2X.has(config?.analyticsType)) {
+          throw new Error("Invalid analytics type");
+        }
         // imgDataUrl.startsWith crashes on a missing value like the real one;
         // a data: URL must be PNG, anything else becomes the icon verbatim
         if (imgDataUrl.startsWith("data:")) {
@@ -1371,7 +1411,18 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
         page.customCSS = config.customCSS;
         page.showPoweredBy = config.showPoweredBy;
         page.showCertificateExpiry = config.showCertificateExpiry;
-        page.googleAnalyticsId = config.googleAnalyticsId;
+        if (state.profile === "2.x") {
+          // 2.x reads the refresh/analytics keys and no longer reads
+          // googleAnalyticsId
+          page.autoRefreshInterval = config.autoRefreshInterval;
+          page.rssTitle = config.rssTitle;
+          page.showOnlyLastHeartbeat = config.showOnlyLastHeartbeat;
+          page.analyticsId = config.analyticsId;
+          page.analyticsScriptUrl = config.analyticsScriptUrl;
+          page.analyticsType = config.analyticsType;
+        } else {
+          page.googleAnalyticsId = config.googleAnalyticsId;
+        }
         // updateDomainNameList: not an array throws "Invalid array", a
         // non-string entry "Invalid domain"; blanks are skipped and a domain
         // moves off the page that had it
@@ -1426,7 +1477,12 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
               sendUrl,
               type: mon.type,
             };
-            if (sendUrl) row.url = mon.url;
+            // 2.x stores a sent monitor url as monitor_group.custom_url and
+            // the public JSON emits customUrl ?? the monitor's own url; 1.23
+            // ignores the sent url entirely
+            const customUrl = state.profile === "2.x" ? m?.url : undefined;
+            if (customUrl !== undefined) row.customUrl = customUrl;
+            if (sendUrl) row.url = customUrl ?? mon.url;
             monitorList.push(row);
           }
           const row = { id, name: g.name, weight: groupOrder++, monitorList };
@@ -1448,10 +1504,12 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
 
   // GET /api/status-page/:slug of status-page-router.js: the public status
   // page data ({ config: toPublicJSON, incident, publicGroupList,
-  // maintenanceList }). The real route is apicache'd for 5 minutes keyed on
+  // maintenanceList } on 1.x; `incidents` as an array of every pinned and
+  // active incident on 2.x). The real route is apicache'd for 5 minutes keyed on
   // req.originalUrl including the query string, and hangs on an unknown
   // slug; the fake answers 404 instead and caches per req.url, cleared by
-  // the events the fake models that clear it (saveStatusPage, deleteMonitor).
+  // the events the fake models that clear it (saveStatusPage, deleteMonitor,
+  // and deleteStatusPage on 2.x only).
   // Requests outside this path are left alone so the socket.io handshake is
   // untouched.
   http.on("request", (req, res) => {
@@ -1494,19 +1552,52 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     } else if (state.statusPageApiBody !== undefined) {
       body = JSON.stringify(state.statusPageApiBody);
     } else {
-      const incident = state.incidents.find(
-        (i) => i.statusPageId === page.id && i.pin !== false && i.active !== false,
-      );
       // toPublicJSON drops id and domainNameList
       const config = structuredClone(page) as Record<string, unknown>;
       delete config.id;
       delete config.domainNameList;
-      body = JSON.stringify({
-        config,
-        incident: incident === undefined ? null : incidentJSON(incident),
-        publicGroupList: state.statusPageGroups[page.id] ?? [],
-        maintenanceList: [],
-      });
+      // monitor_group.custom_url is a column, not a public field: the public
+      // monitor JSON folds it into `url` (customUrl ?? url, only when
+      // sendUrl is on) and never emits the key, so stored rows lose it on
+      // the way out
+      const publicGroupList = (state.statusPageGroups[page.id] ?? []).map((g) => ({
+        ...g,
+        monitorList: ((g.monitorList as Record<string, unknown>[]) ?? []).map((m) => {
+          const row = { ...m };
+          if (row.sendUrl) row.url = row.customUrl ?? row.url;
+          else delete row.url;
+          delete row.customUrl;
+          return row;
+        }),
+      }));
+      const shown = state.incidents.filter(
+        (i) => i.statusPageId === page.id && i.pin !== false && i.active !== false,
+      );
+      if (state.profile === "2.x") {
+        // 2.x answers every pinned and active incident as `incidents`,
+        // ordered by created_date DESC like the real query; a missing date
+        // sorts last the way SQLite orders NULL
+        body = JSON.stringify({
+          config,
+          incidents: shown
+            .sort((a, b) => {
+              const ad = a.createdDate ?? "";
+              const bd = b.createdDate ?? "";
+              return ad === bd ? 0 : ad < bd ? 1 : -1;
+            })
+            .map(incidentJSON),
+          publicGroupList,
+          maintenanceList: [],
+        });
+      } else {
+        const incident = shown[0];
+        body = JSON.stringify({
+          config,
+          incident: incident === undefined ? null : incidentJSON(incident),
+          publicGroupList,
+          maintenanceList: [],
+        });
+      }
     }
     apiCache.set(url, { status, body });
     res.statusCode = status;
