@@ -1556,7 +1556,17 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
       const config = structuredClone(page) as Record<string, unknown>;
       delete config.id;
       delete config.domainNameList;
-      const publicGroupList = state.statusPageGroups[page.id] ?? [];
+      // monitor_group.custom_url is a column, not a public field: the public
+      // monitor JSON folds it into `url` (customUrl ?? url) and never emits
+      // the key, so stored rows lose it on the way out
+      const publicGroupList = (state.statusPageGroups[page.id] ?? []).map((g) => ({
+        ...g,
+        monitorList: ((g.monitorList as Record<string, unknown>[]) ?? []).map((m) => {
+          const row = { ...m };
+          delete row.customUrl;
+          return row;
+        }),
+      }));
       const shown = state.incidents.filter(
         (i) => i.statusPageId === page.id && i.pin !== false && i.active !== false,
       );

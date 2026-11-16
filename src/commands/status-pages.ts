@@ -581,7 +581,7 @@ export function registerStatusPages(program: Command): void {
 
   statusPages
     .command("unpin <slug>")
-    .description("Unpin the incident shown on a status page")
+    .description("Unpin the incidents shown on a status page")
     .action(async (slug) => {
       const s = await connect(["statusPageList"]);
       // unpinIncident runs the UPDATE with a NULL page id for an unknown slug

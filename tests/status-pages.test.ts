@@ -351,6 +351,8 @@ describe("status-pages", () => {
         "status",
         { title: "Degraded", content: "Investigating", style: "primary" },
       ]);
+      // 1.x's postIncident unpins by itself; the explicit unpinIncident is 2.x-only
+      expect(callsOf("unpinIncident")).toHaveLength(0);
       expect(r.json()).toMatchObject({
         id: 1,
         style: "primary",

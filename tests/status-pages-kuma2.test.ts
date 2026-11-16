@@ -148,6 +148,26 @@ describe("status-pages get on Kuma 2.x", () => {
     expect(j.incidents).toEqual([]);
   });
 
+  test("a pin:false entry in the array is not picked as incident", async () => {
+    // the route only returns pinned incidents, but a body that carries an
+    // unpinned one must not let it win the compatibility field
+    const k = await useFake({ statusPages: [structuredClone(STATUS)] });
+    k.state.statusPageApiBody = {
+      config: {},
+      incidents: [
+        { id: 1, title: "Unpinned", pin: false, createdDate: "2030-01-03 10:00:00" },
+        { id: 2, title: "Pinned", pin: true, createdDate: "2030-01-01 10:00:00" },
+      ],
+      publicGroupList: [],
+      maintenanceList: [],
+    };
+    const r = await run(sb, ["status-pages", "get", "status"], creds(k.url));
+    expect(r.code).toBe(0);
+    const j = r.json();
+    expect(j.incidents).toHaveLength(2);
+    expect(j.incident.title).toBe("Pinned");
+  });
+
   test("a 1.x-shaped body without incidents exits 70", async () => {
     const k = await useFake({ statusPages: [structuredClone(STATUS)] });
     k.state.statusPageApiBody = {
@@ -165,6 +185,7 @@ describe("status-pages get on Kuma 2.x", () => {
     ["a non-array incidents", { incidents: "none" }],
     ["a non-object incident entry", { incidents: [5] }],
     ["a null incident entry", { incidents: [null] }],
+    ["an array incident entry", { incidents: [[]] }],
   ])("%s in the body exits 70", async (_label, extra) => {
     const k = await useFake({ statusPages: [structuredClone(STATUS)] });
     k.state.statusPageApiBody = {
