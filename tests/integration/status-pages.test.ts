@@ -2,7 +2,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { sandbox, type Sandbox } from "../helpers/run";
-import { cliRun, on2x } from "./helpers";
+import { cliRun } from "./helpers";
 
 // Runs only when scripts/integration.ts provides UPTIME_KUMA_IT_*; a plain
 // `bun test` skips the whole file.
@@ -53,20 +53,15 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("status-pages (real Kuma)", () 
     expect(r.json().pin).toBeTruthy();
   }, 120_000);
 
-  // Kuma 2.x: #40
-  test.skipIf(on2x)(
-    "get returns the config with the pinned incident",
-    async () => {
-      const r = await cliRun(sb, ["status-pages", "get", slug]);
-      expect(r.code).toBe(0);
-      const j = r.json();
-      expect(j.slug).toBe(slug);
-      expect(j.title).toBe(title);
-      expect(j.publicGroupList).toEqual([]);
-      expect(j.incident).toMatchObject({ title: "it incident", style: "warning" });
-    },
-    120_000,
-  );
+  test("get returns the config with the pinned incident", async () => {
+    const r = await cliRun(sb, ["status-pages", "get", slug]);
+    expect(r.code).toBe(0);
+    const j = r.json();
+    expect(j.slug).toBe(slug);
+    expect(j.title).toBe(title);
+    expect(j.publicGroupList).toEqual([]);
+    expect(j.incident).toMatchObject({ title: "it incident", style: "warning" });
+  }, 120_000);
 
   test("save renames the title and attaches a group with one monitor", async () => {
     const mon = await cliRun(sb, [
@@ -102,8 +97,7 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("status-pages (real Kuma)", () 
     expect(j.publicGroupList[0].monitorList[0].id).toBe(monitorId);
     expect(j.publicGroupList[0].monitorList[0].sendUrl).toBeTruthy();
     // the incident pinned by the earlier test is still shown
-    // Kuma 2.x: #40 — get has no incident on 2.x yet
-    if (!on2x) expect(j.incident).toMatchObject({ title: "it incident" });
+    expect(j.incident).toMatchObject({ title: "it incident" });
 
     const g = await cliRun(sb, ["status-pages", "get", slug]);
     expect(g.code).toBe(0);
@@ -124,9 +118,7 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("status-pages (real Kuma)", () 
     // query still shows the incident gone
     const g = await cliRun(sb, ["status-pages", "get", slug]);
     expect(g.code).toBe(0);
-    // Kuma 2.x: #40 — get shows no incident on 2.x even while one is pinned,
-    // so this check would pass without the unpin there
-    if (!on2x) expect(g.json().incident).toBeNull();
+    expect(g.json().incident).toBeNull();
   }, 120_000);
 
   test("delete the status page", async () => {
