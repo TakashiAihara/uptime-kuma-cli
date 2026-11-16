@@ -163,6 +163,7 @@ describe("coderabbit-review.yml gate", () => {
           gate: {
             if?: string;
             concurrency?: { group: string; "cancel-in-progress": boolean };
+            steps?: { uses?: string; with?: Record<string, unknown> }[];
           };
         };
       }
@@ -185,6 +186,16 @@ describe("coderabbit-review.yml gate", () => {
     expect(concurrency?.group).toContain("pull_request.head.sha");
     expect(concurrency?.group).toContain("inputs.sha");
     expect(concurrency?.group).toContain("event.sha");
+  });
+
+  // the job runs with statuses: write; if checkout ever resolves a PR ref the
+  // PR's own script would execute with that token — the default-branch pin is
+  // the invariant the header comment promises
+  test("checkout is pinned to the default branch without persisted credentials", () => {
+    const checkout = gate().steps?.find((s) => s.uses?.startsWith("actions/checkout@"));
+
+    expect(String(checkout?.with?.ref)).toContain("github.event.repository.default_branch");
+    expect(checkout?.with?.["persist-credentials"]).toBe(false);
   });
 });
 
