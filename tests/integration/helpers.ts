@@ -36,5 +36,13 @@ export async function cliRun(
     }
     await sleep(starts[0]! + WINDOW_MS - now + 20);
   }
-  return run(sb, args, { ...itEnv(), ...env });
+  const r = await run(sb, args, { ...itEnv(), ...env });
+  // A failing assert only shows the exit code; the CLI's message is the
+  // evidence, and the CI log is the only place it can be read afterwards.
+  if (r.code !== 0) {
+    console.error(
+      `[cliRun] ${args.join(" ")} exited ${r.code} at ${new Date().toISOString()}: ${r.stderr.trim()}`,
+    );
+  }
+  return r;
 }
