@@ -63,6 +63,24 @@ describe("parseMajorVersion", () => {
   });
 });
 
+describe("connect waits for the pre-login info before login", () => {
+  test("a server that registers its listeners late (2.5.11's awaited sendInfo) still logs in", async () => {
+    const s = await session({ profile: "2.x", listenersDelayMs: 400 });
+    expect(s.serverVersion).toBe("2.5.11");
+  });
+
+  test("a server that never sends the pre-login info exits 2 naming it", async () => {
+    process.env.UPTIME_KUMA_TIMEOUT = "1";
+    try {
+      const err = await session({ noPreLoginInfo: true }).catch((e) => e);
+      expect(err).toMatchObject({ exitCode: 2 });
+      expect(String(err.message)).toContain("timed out waiting for the server info");
+    } finally {
+      delete process.env.UPTIME_KUMA_TIMEOUT;
+    }
+  });
+});
+
 describe("connect", () => {
   test("reports the version of the default fake without a warning", async () => {
     const err = spyOn(console, "error").mockImplementation(() => {});

@@ -462,7 +462,9 @@ export async function connect(
   // 2.x sends the versioned `info` before the login answer and 1.23 between
   // the pushed lists, so the listener goes in before login is emitted.
   let serverVersion: string | undefined;
+  let infoSeen = false;
   socket.on("info", (data: unknown) => {
+    infoSeen = true;
     const version = (data as { version?: unknown } | null | undefined)?.version;
     if (typeof version === "string") serverVersion = version;
   });
@@ -542,6 +544,18 @@ export async function connect(
       reject(new CliError(2, `failed to connect to ${url}: ${err.message}`));
     });
   });
+
+  // 2.5.11 registers its login listener only after awaiting the pre-login
+  // sendInfo (server.js connection handler); a login emitted before that is
+  // dropped by socket.io and never answered. Both versions send that info on
+  // connect, so it marks the moment login can be sent.
+  const preLoginDeadline = Date.now() + timeoutMs;
+  while (!infoSeen) {
+    if (Date.now() >= preLoginDeadline) {
+      fail(2, `timed out waiting for the server info from ${url}`);
+    }
+    await Promise.race([sleep(10), disconnected]);
+  }
 
   const login = await emitAck(
     socket,
