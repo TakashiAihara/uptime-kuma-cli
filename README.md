@@ -147,7 +147,7 @@ uptime-kuma-cli settings set --config-file settings.json
 
 ## Testing
 
-- `bun test` runs the unit tests in `tests/` against an in-process fake Kuma (`tests/helpers/fake-kuma.ts`); the CLI itself runs in-process too, so coverage sees `src/commands`
+- `bun test` runs the unit tests in `tests/` against an in-process fake Kuma (`tests/helpers/fake-kuma.ts`); the CLI itself runs in-process too, so coverage sees `src/commands` (`tests/cli-process.test.ts` additionally spawns the real entry point to prove it boots, exits cleanly and disconnects)
 - `bun run check` runs typecheck, lint, format check and the unit tests — the same gate CI's `check` job runs
 - CI enforces line coverage on `src/`: the whole project must stay >= 90%, and on pull requests the lines the PR adds or changes must be >= 90% covered. A diff with no measurable src lines (docs, config, tests only) passes
 - Reproduce locally: `bun test --coverage --coverage-reporter=lcov --coverage-dir=coverage` then `bun scripts/coverage.ts whole` (and `bun scripts/coverage.ts diff --base origin/main` for the diff gate)

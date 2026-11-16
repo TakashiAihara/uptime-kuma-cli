@@ -46,7 +46,9 @@ export const MUTATION_TESTS: Record<string, { cmd: string; timeout: number }> = 
   },
   "src/commands/tags.ts": { cmd: "bun test tests/tags.test.ts", timeout: 60 },
   "src/cli.ts": {
-    cmd: "bun test tests/version-flag.test.ts tests/tags.test.ts",
+    // cli-process.test.ts spawns the real entry point, so it also catches
+    // mutants that only break process-level behavior (e.g. disconnect()).
+    cmd: "bun test tests/version-flag.test.ts tests/tags.test.ts tests/cli-process.test.ts",
     timeout: 60,
   },
   "src/kuma.ts": {
@@ -102,9 +104,11 @@ function clip(text: string): string {
 
 export function buildReport(input: {
   base: string;
+  head: string;
   changedCount: number;
   files: FileReport[];
   counts: { caught: number; uncaught: number; other: number };
+  errors: string[];
 }): string {
   const out: string[] = ["<!-- mutation-testing -->"];
   if (input.changedCount === 0) {
@@ -121,12 +125,16 @@ export function buildReport(input: {
     "",
     "## Mutation testing (report-only)",
     "",
-    `${input.changedCount} src file(s) changed vs \`${input.base}\`. High/medium mutants on the changed lines: **${total} tested — ${input.counts.caught} caught, ${input.counts.uncaught} survived**${input.counts.other > 0 ? `, ${input.counts.other} other (timeout/skipped)` : ""}.`,
+    `${input.changedCount} src file(s) changed vs \`${input.base}\` (head \`${input.head}\`). High/medium mutants on the changed lines: **${total} tested — ${input.counts.caught} caught, ${input.counts.uncaught} survived**${input.counts.other > 0 ? `, ${input.counts.other} other (timeout/skipped)` : ""}.`,
     "",
     "Surviving mutants are informational and do not fail CI.",
   );
   if (total === 0) {
     out.push("", "No high/medium mutants on the changed lines.");
+    if (input.errors.length > 0) {
+      out.push("", "### Errors", "");
+      for (const e of input.errors) out.push(`- ${e}`);
+    }
     return `${out.join("\n")}\n`;
   }
   const withSurvivors = input.files.filter((f) => f.survivors.length > 0);
@@ -143,6 +151,11 @@ export function buildReport(input: {
       }
       out.push("");
     }
+  }
+  if (input.errors.length > 0) {
+    out.push("### Errors", "");
+    for (const e of input.errors) out.push(`- ${e}`);
+    out.push("");
   }
   return `${out.join("\n")}\n`;
 }
@@ -174,6 +187,23 @@ function mewt(args: string[], capture: boolean): string {
   return capture ? new TextDecoder().decode(proc.stdout) : "";
 }
 
+const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+function gitHead(root: string): string {
+  const proc = Bun.spawnSync(["git", "rev-parse", "HEAD"], {
+    cwd: root,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  return proc.exitCode === 0 ? new TextDecoder().decode(proc.stdout).trim() : "unknown";
+}
+
+// Written when the run dies before a real report exists, so the PR comment
+// shows the failure instead of keeping a stale result from an earlier push.
+function failureReport(base: string, head: string, detail: string): string {
+  return `<!-- mutation-testing -->\n\n## Mutation testing (report-only)\n\nThe mutation run failed vs \`${base}\` (head \`${head}\`): ${clip(detail)}\n`;
+}
+
 function main(): void {
   const args = process.argv.slice(2);
   const baseFlag = args.indexOf("--base");
@@ -190,48 +220,59 @@ function main(): void {
   const changed = [...added.entries()].filter(
     ([f]) => f.startsWith("src/") && existsSync(join(ROOT, f)),
   );
+  const head = gitHead(ROOT);
 
   const tmp = mkdtempSync(join(tmpdir(), "mewt-"));
   const db = join(tmp, "mewt.sqlite");
   const files: FileReport[] = [];
+  const errors: string[] = [];
+  let exitCode = 0;
   try {
     for (const [file, lines] of changed) {
-      mewt(["mutate", file, "--db", db], false);
-      const table = mewt(
-        [
-          "print",
-          "mutants",
-          "--target",
-          file,
-          "--severity",
-          SEVERITIES,
-          "--format",
-          "table",
-          "--untested",
-          "--db",
-          db,
-        ],
-        true,
-      );
-      const picked = selectMutants(parseMutantTable(table), lines);
-      if (picked.length === 0) continue;
-      const t = MUTATION_TESTS[file] ?? FALLBACK_TEST;
-      console.log(`${file}: testing ${picked.length} mutant(s) on changed lines`);
-      mewt(
-        [
-          "test",
-          "--ids",
-          picked.map((m) => m.id).join(","),
-          "--test.cmd",
-          t.cmd,
-          "--test.timeout",
-          String(t.timeout),
-          "--db",
-          db,
-        ],
-        false,
-      );
-      files.push({ file, selected: picked.length, survivors: [] });
+      try {
+        mewt(["mutate", file, "--db", db], false);
+        const table = mewt(
+          [
+            "print",
+            "mutants",
+            "--target",
+            file,
+            "--severity",
+            SEVERITIES,
+            "--format",
+            "table",
+            "--untested",
+            "--db",
+            db,
+          ],
+          true,
+        );
+        const picked = selectMutants(parseMutantTable(table), lines);
+        if (picked.length === 0) continue;
+        files.push({ file, selected: picked.length, survivors: [] });
+        const t = MUTATION_TESTS[file] ?? FALLBACK_TEST;
+        console.log(`${file}: testing ${picked.length} mutant(s) on changed lines`);
+        mewt(
+          [
+            "test",
+            "--ids",
+            picked.map((m) => m.id).join(","),
+            "--test.cmd",
+            // --bail stops a caught mutant's test run at the first failure;
+            // uncaught mutants run the whole suite either way.
+            `${t.cmd} --bail`,
+            "--test.timeout",
+            String(t.timeout),
+            "--db",
+            db,
+          ],
+          false,
+        );
+      } catch (err) {
+        const msg = errMsg(err);
+        errors.push(`${file}: ${clip(msg)}`);
+        console.error(`${file}: ${msg}`);
+      }
     }
 
     const counts = { caught: 0, uncaught: 0, other: 0 };
@@ -260,17 +301,28 @@ function main(): void {
 
     const report = buildReport({
       base,
+      head,
       changedCount: changed.length,
       files,
       counts,
+      errors,
     });
     writeFileSync(outPath, report);
     console.log(
       `mutation report: ${counts.caught} caught, ${counts.uncaught} survived -> ${outPath}`,
     );
+  } catch (err) {
+    console.error(`mutation report failed: ${errMsg(err)}`);
+    try {
+      writeFileSync(outPath, failureReport(base, head, errMsg(err)));
+    } catch (writeErr) {
+      console.error(`could not write ${outPath}: ${errMsg(writeErr)}`);
+    }
+    exitCode = 1;
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
+  process.exit(exitCode);
 }
 
 if (import.meta.main) main();

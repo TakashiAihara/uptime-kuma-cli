@@ -86,12 +86,19 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.pull_request.number }}
         run: |
-          if [ ! -f mutation-report.md ]; then
-            echo "no mutation report produced"
-            exit 0
+          report=mutation-report.md
+          if [ ! -f "$report" ]; then
+            {
+              echo '<!-- mutation-testing -->'
+              echo ''
+              echo '## Mutation testing (report-only)'
+              echo ''
+              echo "The mutation run produced no report — the job failed or timed out. See $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            } > "$report"
           fi
-          jq -n --rawfile body mutation-report.md '{body: $body}' > /tmp/mutation-comment.json
-          existing=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments?per_page=100" --paginate --jq '.[] | select(.body | contains("<!-- mutation-testing -->")) | .id' | head -n 1)
+          jq -n --rawfile body "$report" '{body: $body}' > /tmp/mutation-comment.json
+          ids=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments?per_page=100" --paginate --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | contains("<!-- mutation-testing -->"))) | .id')
+          existing=${ids%%$'\n'*}
           if [ -n "$existing" ]; then
             gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$existing" --input /tmp/mutation-comment.json
           else

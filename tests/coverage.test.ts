@@ -5,6 +5,7 @@ import {
   parseAddedLines,
   parseLcov,
   passesGate,
+  unquoteGitPath,
 } from "../scripts/coverage.ts";
 
 const LCOV = `TN:
@@ -77,6 +78,40 @@ index 4444444..0000000
     expect(added.get("src/a.ts")).toEqual(new Set([2, 8, 9]));
     expect(added.get("src/new.ts")).toEqual(new Set([1, 2]));
     expect(added.has("src/gone.ts")).toBe(false);
+  });
+
+  test("an added line starting with '++ ' is content, not a file header", () => {
+    const diff = `diff --git a/src/a.ts b/src/a.ts
+index 1111111..2222222 100644
+--- a/src/a.ts
++++ b/src/a.ts
+@@ -1,0 +2,3 @@
++before
++++ this content line starts with two pluses
++after
+`;
+    const added = parseAddedLines(diff);
+    expect(added.get("src/a.ts")).toEqual(new Set([2, 3, 4]));
+    expect(added.size).toBe(1);
+  });
+});
+
+describe("unquoteGitPath", () => {
+  test("returns unquoted paths unchanged", () => {
+    expect(unquoteGitPath("src/a.ts")).toBe("src/a.ts");
+    expect(unquoteGitPath("/dev/null")).toBe("/dev/null");
+  });
+
+  test("decodes C-style escapes", () => {
+    expect(unquoteGitPath('"src/a\\"b.ts"')).toBe('src/a"b.ts');
+    expect(unquoteGitPath('"src/a\\\\b.ts"')).toBe("src/a\\b.ts");
+    expect(unquoteGitPath('"src/a\\tb.ts"')).toBe("src/a\tb.ts");
+  });
+
+  test("decodes octal-escaped UTF-8 bytes", () => {
+    // git quotes non-ASCII paths as \NNN octal bytes of the UTF-8 encoding
+    expect(unquoteGitPath('"src/\\346\\227\\245.ts"')).toBe("src/日.ts");
+    expect(unquoteGitPath('"src/\\303\\251.ts"')).toBe("src/é.ts");
   });
 });
 

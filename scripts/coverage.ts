@@ -47,17 +47,56 @@ export function parseLcov(text: string): LcovData {
   return lcov;
 }
 
-// git C-quotes paths with special characters; the quoting is JSON-compatible
-// for the escapes git emits.
-function unquoteGitPath(path: string): string {
-  if (path.startsWith('"') && path.endsWith('"')) {
-    try {
-      return JSON.parse(path) as string;
-    } catch {
-      return path.slice(1, -1);
+// git C-quotes paths containing control characters (and, with the default
+// core.quotePath, every non-ASCII byte) as \NNN octal escapes, which are not
+// valid JSON escapes. Decode the quoted body as bytes so multibyte UTF-8
+// sequences reassemble correctly.
+export function unquoteGitPath(path: string): string {
+  if (!path.startsWith('"') || !path.endsWith('"') || path.length < 2) return path;
+  const inner = path.slice(1, -1);
+  if (!inner.includes("\\")) return inner;
+  const SIMPLE: Record<string, string> = {
+    a: "\x07",
+    b: "\b",
+    f: "\f",
+    n: "\n",
+    r: "\r",
+    t: "\t",
+    v: "\v",
+    "\\": "\\",
+    '"': '"',
+  };
+  const bytes: number[] = [];
+  let text = "";
+  const flush = () => {
+    if (bytes.length === 0) return;
+    text += new TextDecoder().decode(new Uint8Array(bytes));
+    bytes.length = 0;
+  };
+  for (let i = 0; i < inner.length; i++) {
+    const c = inner[i]!;
+    if (c !== "\\") {
+      flush();
+      text += c;
+      continue;
+    }
+    const n = inner[i + 1];
+    const oct = n !== undefined && n >= "0" && n <= "7" ? inner.slice(i + 1, i + 4) : "";
+    if (/^[0-7]{3}$/.test(oct)) {
+      bytes.push(parseInt(oct, 8));
+      i += 3;
+      continue;
+    }
+    flush();
+    if (n === undefined) {
+      text += "\\";
+    } else {
+      text += SIMPLE[n] ?? n;
+      i++;
     }
   }
-  return path;
+  flush();
+  return text;
 }
 
 // Added ('+') line numbers on the new side of `git diff --unified=0` output,
@@ -80,7 +119,7 @@ export function parseAddedLines(diff: string): AddedLines {
     if (line.startsWith("diff --git ")) {
       file = undefined;
       inHunk = false;
-    } else if (line.startsWith("+++ ")) {
+    } else if (!inHunk && line.startsWith("+++ ")) {
       const path = unquoteGitPath(line.slice(4));
       file = path === "/dev/null" ? undefined : path.replace(/^b\//, "");
       inHunk = false;
@@ -194,11 +233,14 @@ function missingSrcFiles(lcov: LcovData, root: string): string[] {
 }
 
 export function gitAddedLines(base: string, root: string): AddedLines | null {
-  const proc = Bun.spawnSync(["git", "diff", "--unified=0", `${base}...HEAD`, "--", "src/"], {
-    cwd: root,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  const proc = Bun.spawnSync(
+    ["git", "-c", "core.quotePath=false", "diff", "--unified=0", `${base}...HEAD`, "--", "src/"],
+    {
+      cwd: root,
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
   if (proc.exitCode !== 0) {
     console.error(
       `git diff ${base}...HEAD failed: ${new TextDecoder().decode(proc.stderr).trim()}`,

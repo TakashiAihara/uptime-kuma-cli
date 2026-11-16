@@ -26,12 +26,20 @@ export function writeConfig(sb: Sandbox, toml: string) {
 // In-process equivalent of spawning `bun src/cli.ts`: same clean env, same
 // captured stdout/stderr and exit code, but the run stays inside the test
 // process so `bun test --coverage` instruments src/commands too. console.*
-// bypasses process.stdout.write under Bun, so both are patched.
+// bypasses process.stdout.write under Bun, so both are patched. The patched
+// globals are process-wide, so concurrent run() calls are rejected outright
+// instead of corrupting each other's env and captured output.
+let runActive = false;
+
 export async function run(
   sb: Sandbox,
   args: string[],
   env: Record<string, string | undefined> = {},
 ): Promise<Result> {
+  if (runActive) {
+    throw new Error("run() cannot run concurrently: it patches process-wide globals");
+  }
+  runActive = true;
   const base: Record<string, string> = {
     PATH: process.env.PATH ?? "/usr/bin:/bin",
     HOME: sb.home,
@@ -92,6 +100,7 @@ export async function run(
     Object.assign(process.env, base);
     code = await runCli(args);
   } finally {
+    runActive = false;
     for (const k of Object.keys(process.env)) delete process.env[k];
     Object.assign(process.env, savedEnv);
     process.stdout.write = savedWrite.stdout;

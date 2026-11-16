@@ -54,6 +54,7 @@ describe("buildReport", () => {
   test("lists surviving mutants under their file with a marker comment", () => {
     const md = buildReport({
       base: "abc1234",
+      head: "def5678",
       changedCount: 1,
       files: [
         {
@@ -71,6 +72,7 @@ describe("buildReport", () => {
         },
       ],
       counts: { caught: 4, uncaught: 1, other: 0 },
+      errors: [],
     });
     expect(md).toContain("<!-- mutation-testing -->");
     expect(md).toContain("src/commands/tags.ts");
@@ -78,17 +80,20 @@ describe("buildReport", () => {
     expect(md).toContain("CR");
     expect(md).toContain("4 caught");
     expect(md).toContain("1 survived");
+    expect(md).toContain("def5678");
   });
 
   test("reports an empty result when nothing survived", () => {
     const md = buildReport({
       base: "abc1234",
+      head: "def5678",
       changedCount: 2,
       files: [
         { file: "src/a.ts", selected: 3, survivors: [] },
         { file: "src/b.ts", selected: 2, survivors: [] },
       ],
       counts: { caught: 5, uncaught: 0, other: 0 },
+      errors: [],
     });
     expect(md).toContain("<!-- mutation-testing -->");
     expect(md).toContain("No surviving mutants");
@@ -97,12 +102,27 @@ describe("buildReport", () => {
   test("reports no src changes", () => {
     const md = buildReport({
       base: "abc1234",
+      head: "def5678",
       changedCount: 0,
       files: [],
       counts: { caught: 0, uncaught: 0, other: 0 },
+      errors: [],
     });
     expect(md).toContain("<!-- mutation-testing -->");
     expect(md).toContain("No src/ changes");
+  });
+
+  test("lists per-file errors even when no mutants ran", () => {
+    const md = buildReport({
+      base: "abc1234",
+      head: "def5678",
+      changedCount: 1,
+      files: [],
+      counts: { caught: 0, uncaught: 0, other: 0 },
+      errors: ["src/foo.ts: mewt mutate failed (exit 1)"],
+    });
+    expect(md).toContain("### Errors");
+    expect(md).toContain("src/foo.ts: mewt mutate failed (exit 1)");
   });
 });
 
