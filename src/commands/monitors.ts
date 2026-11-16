@@ -527,8 +527,9 @@ function defaultTimeoutSeconds(s: KumaSession, type: string): number {
 }
 
 // retryInterval follows the interval and the timeout stays within 80% of
-// it, derived from the final interval after the hatch had its say. Explicit
-// values are kept; the cap applies to them the same way, and an unset
+// it (unless capTimeout is false: a 2.x ping), derived from the final
+// interval after the hatch had its say. Explicit values are kept; the cap
+// applies to them the same way, and an unset
 // timeout takes the caller's default — the 2.x UI picks it per type, 1.23's
 // is 48 for every type. On edit the caller runs this only when the edit
 // touches interval or timeout — a stored timeout of 0 is otherwise sent
@@ -564,8 +565,10 @@ const capsTimeout = (s: KumaSession, type: unknown): boolean =>
 function checkKuma2Ping(s: KumaSession, monitor: Record<string, unknown>): void {
   if (s.majorVersion < 2 || monitor.type !== "ping" || !monitor.timeout) return;
   const timeout = Math.round(Number(monitor.timeout));
-  const perRequest =
-    typeof monitor.ping_per_request_timeout === "number" ? monitor.ping_per_request_timeout : 2;
+  // Kuma's validate compares the value as JavaScript does (a numeric string
+  // as a number); only a key the add leaves out gets the DB default 2.
+  const raw = monitor.ping_per_request_timeout;
+  const perRequest = raw === undefined ? 2 : Number(raw);
   if (timeout < 1 || timeout > 300 || timeout < perRequest) {
     fail(
       2,

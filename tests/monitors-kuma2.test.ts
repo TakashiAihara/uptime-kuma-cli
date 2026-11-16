@@ -671,6 +671,70 @@ describe("monitor timing on Kuma 2.x", () => {
     expect(editCalls(k)).toHaveLength(0);
   });
 
+  test("a 2.x ping with a numeric-string ping_per_request_timeout compares it as a number", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "ping",
+        "--name",
+        "ps",
+        "--hostname",
+        "127.0.0.1",
+        "--timeout",
+        "1",
+        "--set",
+        'ping_per_request_timeout="1"',
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+  });
+
+  test.each([
+    [["--timeout", "0"], 0],
+    [["--timeout", "300"], 300],
+    [["--timeout", "300.4"], 300.4],
+  ])("a 2.x ping add with %p is accepted like Kuma", async (extra, stored0) => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "ping",
+        "--name",
+        "pk",
+        "--hostname",
+        "127.0.0.1",
+        "--interval",
+        "600",
+        ...extra,
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "pk").timeout).toBe(stored0);
+  });
+
+  test.each([
+    [["--timeout", "1.4"]],
+    [["--timeout", "0.4", "--set", "ping_per_request_timeout=0"]],
+  ])("a 2.x ping add with %p exits 2 (rounds below 1 / the per-request floor)", async (extra) => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "ping", "--name", "pk", "--hostname", "127.0.0.1", ...extra],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
   test("a 2.x ping timeout of 1.6 rounds to 2 like Kuma and is accepted", async () => {
     const k = await useFake({ profile: "2.x" });
     const r = await run(
