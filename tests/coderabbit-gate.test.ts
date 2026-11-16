@@ -13,6 +13,7 @@ const status = (over: Partial<CommitStatus>): CommitStatus => ({
   state: "success",
   description: "Review completed",
   created_at: "2026-11-16T00:00:00Z",
+  creator: { login: "coderabbitai[bot]" },
   ...over,
 });
 
@@ -125,6 +126,18 @@ describe("evaluate", () => {
     expect(body.description).toContain("Review rate limited");
     expect(body.description).toContain("@coderabbitai review");
     expect(body).not.toHaveProperty("target_url");
+  });
+
+  test("ignores a CodeRabbit context posted by anyone but the app", async () => {
+    // statuses: write lets anyone post under the CodeRabbit context; only the
+    // app's own bot login is a real review outcome
+    const { calls, impl } = fakeFetch([
+      status({ creator: { login: "someone-else" }, description: "Review completed" }),
+    ]);
+    await evaluate("tok", REPO, SHA, undefined, false, impl);
+
+    const body = JSON.parse(String(calls[1]!.body)) as Record<string, unknown>;
+    expect(body.state).toBe("pending");
   });
 
   test("posts pending when CodeRabbit has not reported yet", async () => {

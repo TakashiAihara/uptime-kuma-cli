@@ -16,6 +16,9 @@
 
 export const GATE_CONTEXT = "coderabbit-review";
 export const CODERABBIT_CONTEXT = "CodeRabbit";
+// anyone with statuses: write can post under the CodeRabbit context, so the
+// actor matters as much as the text
+const CODERABBIT_BOT = "coderabbitai[bot]";
 // commit status descriptions are capped at 140 chars by the API
 const DESCRIPTION_LIMIT = 140;
 const REMEDY = "comment `@coderabbitai review` on the PR";
@@ -26,6 +29,7 @@ export type CommitStatus = {
   state: string;
   description: string | null;
   created_at: string;
+  creator: { login: string } | null;
 };
 
 export type GateState = "success" | "failure" | "pending";
@@ -147,7 +151,9 @@ async function coderabbitDescription(
       throw new Error(`GET ${url} failed: ${res.status} ${body}`);
     }
     const statuses = (await res.json()) as CommitStatus[];
-    const latest = statuses.find((s) => s.context === CODERABBIT_CONTEXT);
+    const latest = statuses.find(
+      (s) => s.context === CODERABBIT_CONTEXT && s.creator?.login === CODERABBIT_BOT,
+    );
     if (latest !== undefined) return latest.description;
     url = nextPageUrl(res.headers.get("link"));
   }
