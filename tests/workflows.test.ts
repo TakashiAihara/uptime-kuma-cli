@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { CODERABBIT_CONTEXT } from "../scripts/coderabbit-gate.ts";
 
-const WORKFLOWS = ["ci.yml", "release.yml"];
+const WORKFLOWS = ["ci.yml", "coderabbit-review.yml", "release.yml"];
 const dir = resolve(import.meta.dir, "../.github/workflows");
 const read = (file: string) => readFileSync(join(dir, file), "utf8");
 // Bun handles the YAML parsing, so types are only attached where needed
@@ -143,13 +144,68 @@ describe("pinning actions", () => {
     const uses: string[] = [];
     for (const file of WORKFLOWS) {
       for (const line of read(file).split("\n")) {
-        if (!line.includes("uses:")) continue;
+        // a uses key, not any line containing the substring ("statuses: write" does)
+        if (!/^\s*-?\s*uses:/.test(line)) continue;
         uses.push(line);
         expect(line).toMatch(/uses:\s*\S+@([0-9a-f]{40}|sha256:[0-9a-f]{64})\s+#\s*v\S*\s*$/);
       }
     }
 
     expect(uses.length).toBeGreaterThan(0);
+  });
+});
+
+describe("coderabbit-review.yml gate", () => {
+  const gate = () =>
+    (
+      Bun.YAML.parse(read("coderabbit-review.yml")) as {
+        jobs: {
+          gate: {
+            if?: string;
+            concurrency?: { group: string; "cancel-in-progress": boolean };
+            steps?: { uses?: string; with?: Record<string, unknown> }[];
+          };
+        };
+      }
+    ).jobs.gate;
+
+  // the status-event filter and the script's CODERABBIT_CONTEXT are separate
+  // literals; if they drift, CodeRabbit status events stop retriggering the
+  // gate and a completed review leaves the required check pending forever
+  test("the status-event filter watches the same context the script maps", () => {
+    expect(gate().if).toContain(`'${CODERABBIT_CONTEXT}'`);
+  });
+
+  // pull_request_target and the status events CodeRabbit triggers can evaluate the
+  // same head at once; without per-head serialization a stale run can overwrite a
+  // newer gate status and leave the required check pending forever
+  test("serializes runs per head SHA and lets the newest evaluation win", () => {
+    const concurrency = gate().concurrency;
+
+    expect(concurrency?.["cancel-in-progress"]).toBe(true);
+    expect(concurrency?.group).toContain("pull_request.head.sha");
+    expect(concurrency?.group).toContain("inputs.sha");
+    expect(concurrency?.group).toContain("event.sha");
+  });
+
+  // the job runs with statuses: write; if checkout ever resolves a PR ref the
+  // PR's own script would execute with that token — the default-branch pin is
+  // the invariant the header comment promises
+  test("checkout is pinned to the default branch without persisted credentials", () => {
+    const checkout = gate().steps?.find((s) => s.uses?.startsWith("actions/checkout@"));
+
+    expect(String(checkout?.with?.ref)).toBe("${{ github.event.repository.default_branch }}");
+    expect(checkout?.with?.["persist-credentials"]).toBe(false);
+  });
+
+  // workflow_dispatch executes the workflow file of the ref it was started on;
+  // without the default-branch guard a maintainer re-evaluating a PR head could
+  // run the PR's own copy of this workflow — and script — with statuses: write
+  test("manual dispatch only runs from the default branch", () => {
+    const ifCondition = gate().if ?? "";
+
+    expect(ifCondition).toContain("workflow_dispatch");
+    expect(ifCondition).toContain("github.event.repository.default_branch");
   });
 });
 

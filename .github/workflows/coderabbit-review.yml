@@ -1,0 +1,71 @@
+name: coderabbit-review
+
+# Branch protection cannot require CodeRabbit's own status: its state is always
+# success and the outcome lives in the description, so scripts/coderabbit-gate.ts
+# maps that description onto the `coderabbit-review` commit status, which is the
+# context main requires. The job re-runs on every CodeRabbit status change (`status`
+# event) and when the PR head moves (`pull_request_target`), so the gate follows
+# the review without polling. pull_request_target is used on purpose: the workflow
+# and the script always come from the base branch and the job never runs PR
+# code, so the PR cannot edit the gate that judges it: checkout is pinned to
+# the default branch, the status event's payload sha is a PR commit that must
+# not be checked out, and dispatch is limited to the default branch so a
+# maintainer cannot accidentally run a PR's copy of this workflow with
+# statuses: write. The job only reads commit
+# statuses and publishes one fixed-context status — it runs no PR code, so a
+# fork PR gains nothing from it (opencode-review's plain pull_request event
+# gives fork PRs a read-only token its write steps cannot live with). Every
+# automated run evaluates and publishes on the event's own commit, so the
+# concurrency group below is always the same sha the run writes to; runs for
+# one commit are serialized with cancel-in-progress, and a stale evaluation
+# cannot overwrite a newer gate status and stall the check.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  status: {}
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: commit sha to evaluate, e.g. a PR head
+        required: true
+        type: string
+
+jobs:
+  gate:
+    # the status event fires for every commit status in the repo; only
+    # CodeRabbit's own context carries a review outcome. workflow_dispatch runs
+    # the workflow file of the ref it was started on, so it is limited to the
+    # default branch — from a PR ref the PR's own copy would run with
+    # statuses: write
+    if: >-
+      (github.event_name != 'status' || github.event.context == 'CodeRabbit')
+      && (github.event_name != 'workflow_dispatch'
+          || github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    concurrency:
+      group: coderabbit-review-${{ github.event.pull_request.head.sha || inputs.sha || github.event.sha }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: jdx/mise-action@08ae2a091c038e1e05ec6f5115dc5c69d5a2a6b8 # v5.1.2
+      - name: publish coderabbit-review status
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SHA: ${{ github.event.pull_request.head.sha || github.event.sha }}
+          DISPATCH_SHA: ${{ inputs.sha }}
+        run: |
+          case "$EVENT_NAME" in
+            pull_request_target|status) bun scripts/coderabbit-gate.ts --sha "$EVENT_SHA" ;;
+            workflow_dispatch) bun scripts/coderabbit-gate.ts --sha "$DISPATCH_SHA" ;;
+            *) exit 1 ;;
+          esac
