@@ -215,6 +215,12 @@ try {
       throw new Error(`UPTIME_KUMA_IT_IMAGE names ${IMAGE_MAJOR}.x but Kuma reports ${version}`);
     }
     exitCode = await runTests(version);
+    // The server's side of a failure (what it was doing while a call timed
+    // out) is gone after down -v, so print its log while the container lives.
+    if (exitCode !== 0) {
+      console.error("--- Kuma server log (tests failed) ---");
+      await compose(["logs", "--no-color", "--timestamps"], COMPOSE_DOWN_TIMEOUT_MS);
+    }
   }
 } catch (e) {
   console.error(`integration setup failed: ${e instanceof Error ? e.message : e}`);
