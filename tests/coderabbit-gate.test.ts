@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  CODERABBIT_CONTEXT,
   GATE_CONTEXT,
   evaluate,
   gateState,
@@ -98,6 +99,10 @@ describe("gate context", () => {
   test("is the context branch protection will require", () => {
     expect(GATE_CONTEXT).toBe("coderabbit-review");
   });
+
+  test("matches the context the script filters CodeRabbit statuses by", () => {
+    expect(CODERABBIT_CONTEXT).toBe("CodeRabbit");
+  });
 });
 
 describe("evaluate", () => {
@@ -185,6 +190,39 @@ describe("evaluate", () => {
     expect(calls.map((c) => c.method)).toEqual(["GET", "GET", "POST"]);
     expect(calls[1]!.url).toBe(page2);
     expect(JSON.parse(String(calls[2]!.body))).toMatchObject({ state: "success" });
+  });
+
+  test("retries a transient API failure instead of stranding the check", async () => {
+    // no event may come after the last CodeRabbit status, so one 500 must not
+    // leave the required check pending forever
+    let gets = 0;
+    const calls: string[] = [];
+    const impl = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push(init?.method ?? "GET");
+      if ((init?.method ?? "GET") === "GET") {
+        gets++;
+        if (gets === 1) return new Response("boom", { status: 500 });
+        return new Response(JSON.stringify([status({ description: "Review completed" })]), {
+          status: 200,
+        });
+      }
+      return new Response("{}", { status: 201 });
+    }) as typeof fetch;
+
+    await evaluate("tok", REPO, SHA, undefined, false, impl);
+
+    expect(calls).toEqual(["GET", "GET", "POST"]);
+  });
+
+  test("does not retry a client error", async () => {
+    let calls = 0;
+    const impl = (async (_url: string | URL | Request, _init?: RequestInit) => {
+      calls++;
+      return new Response("nope", { status: 404 });
+    }) as typeof fetch;
+
+    await expect(evaluate("tok", REPO, SHA, undefined, false, impl)).rejects.toThrow("404");
+    expect(calls).toBe(1);
   });
 
   test("dry-run prints the status it would post without calling the API for it", async () => {

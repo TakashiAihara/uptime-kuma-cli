@@ -15,7 +15,7 @@
  */
 
 export const GATE_CONTEXT = "coderabbit-review";
-const CODERABBIT_CONTEXT = "CodeRabbit";
+export const CODERABBIT_CONTEXT = "CodeRabbit";
 // commit status descriptions are capped at 140 chars by the API
 const DESCRIPTION_LIMIT = 140;
 const REMEDY = "comment `@coderabbitai review` on the PR";
@@ -74,6 +74,29 @@ export function latestCodeRabbitDescription(statuses: CommitStatus[]): string | 
 
 type Fetch = typeof fetch;
 
+// The gate is a required check and no event may come after a failed run, so a
+// transient API failure must not strand it: retry server errors, rate limits,
+// and network failures a few times before giving up.
+const MAX_ATTEMPTS = 3;
+
+async function fetchWithRetry(
+  url: string,
+  init: RequestInit | undefined,
+  fetchImpl: Fetch,
+): Promise<Response> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const res = await fetchImpl(url, init);
+      if (res.ok || attempt === MAX_ATTEMPTS || (res.status < 500 && res.status !== 429)) {
+        return res;
+      }
+    } catch (err) {
+      if (attempt === MAX_ATTEMPTS) throw err;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** (attempt - 1)));
+  }
+}
+
 function apiHeaders(token: string): Record<string, string> {
   return {
     Accept: "application/vnd.github+json",
@@ -84,9 +107,11 @@ function apiHeaders(token: string): Record<string, string> {
 }
 
 async function api(token: string, path: string, fetchImpl: Fetch): Promise<unknown> {
-  const res = await fetchImpl(`https://api.github.com${path}`, {
-    headers: apiHeaders(token),
-  });
+  const res = await fetchWithRetry(
+    `https://api.github.com${path}`,
+    { headers: apiHeaders(token) },
+    fetchImpl,
+  );
   if (!res.ok) {
     const body = (await res.text()).slice(0, 500);
     throw new Error(`GET ${path} failed: ${res.status} ${body}`);
@@ -129,7 +154,7 @@ async function statusesFor(
   let url: string | null =
     `https://api.github.com/repos/${repo}/commits/${sha}/statuses?per_page=100`;
   for (let page = 0; page < STATUS_PAGE_LIMIT && url !== null; page++) {
-    const res = await fetchImpl(url, { headers: apiHeaders(token) });
+    const res = await fetchWithRetry(url, { headers: apiHeaders(token) }, fetchImpl);
     if (!res.ok) {
       const body = (await res.text()).slice(0, 500);
       throw new Error(`GET ${url} failed: ${res.status} ${body}`);
@@ -160,11 +185,15 @@ async function publishStatus(
     console.log(`[dry-run] POST /repos/${repo}/statuses/${sha} ${body}`);
     return;
   }
-  const res = await fetchImpl(`https://api.github.com/repos/${repo}/statuses/${sha}`, {
-    method: "POST",
-    headers: { ...apiHeaders(token), "Content-Type": "application/json" },
-    body,
-  });
+  const res = await fetchWithRetry(
+    `https://api.github.com/repos/${repo}/statuses/${sha}`,
+    {
+      method: "POST",
+      headers: { ...apiHeaders(token), "Content-Type": "application/json" },
+      body,
+    },
+    fetchImpl,
+  );
   if (!res.ok) {
     const text = (await res.text()).slice(0, 500);
     throw new Error(`POST /repos/${repo}/statuses/${sha} failed: ${res.status} ${text}`);

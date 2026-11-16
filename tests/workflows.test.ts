@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { CODERABBIT_CONTEXT } from "../scripts/coderabbit-gate.ts";
 
 const WORKFLOWS = ["ci.yml", "coderabbit-review.yml", "release.yml"];
 const dir = resolve(import.meta.dir, "../.github/workflows");
@@ -154,15 +155,25 @@ describe("pinning actions", () => {
   });
 });
 
-describe("coderabbit-review.yml gate concurrency", () => {
+describe("coderabbit-review.yml gate", () => {
   const gate = () =>
     (
       Bun.YAML.parse(read("coderabbit-review.yml")) as {
         jobs: {
-          gate: { concurrency?: { group: string; "cancel-in-progress": boolean } };
+          gate: {
+            if?: string;
+            concurrency?: { group: string; "cancel-in-progress": boolean };
+          };
         };
       }
     ).jobs.gate;
+
+  // the status-event filter and the script's CODERABBIT_CONTEXT are separate
+  // literals; if they drift, CodeRabbit status events stop retriggering the
+  // gate and a completed review leaves the required check pending forever
+  test("the status-event filter watches the same context the script maps", () => {
+    expect(gate().if).toContain(`'${CODERABBIT_CONTEXT}'`);
+  });
 
   // pull_request_target and the status events CodeRabbit triggers can evaluate the
   // same head at once; without per-head serialization a stale run can overwrite a
