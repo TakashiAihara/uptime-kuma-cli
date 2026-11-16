@@ -4,6 +4,7 @@ import {
   evaluate,
   gateState,
   latestCodeRabbitDescription,
+  resolveHeads,
   type CommitStatus,
 } from "../scripts/coderabbit-gate.ts";
 
@@ -50,6 +51,14 @@ describe("gateState", () => {
       expect(gate.description).toContain("@coderabbitai review");
       expect(gate.description.length).toBeLessThanOrEqual(140);
     }
+  });
+
+  test("keeps the remedy when CodeRabbit's description is too long to fit", () => {
+    const gate = gateState(`Review skipped: ${"x".repeat(500)}`);
+    expect(gate.state).toBe("failure");
+    expect(gate.description.length).toBeLessThanOrEqual(140);
+    expect(gate.description).toContain("@coderabbitai review");
+    expect(gate.description).toContain("Review skipped");
   });
 });
 
@@ -157,5 +166,52 @@ describe("evaluate", () => {
     expect(calls).toHaveLength(1);
     expect(logs.join("\n")).toContain("[dry-run] POST");
     expect(logs.join("\n")).toContain('"state":"failure"');
+  });
+});
+
+describe("resolveHeads", () => {
+  const REPO = "o/r";
+  const SHA = "d1198426c550f14248c057ddd949ee40296b01c7";
+  const HEAD = "a".repeat(40);
+
+  // routes each request to a canned body by URL substring
+  const fakeFetch = (routes: [string, unknown][]) => {
+    const impl = (async (url: string | URL | Request) => {
+      const u = String(url);
+      for (const [needle, body] of routes) {
+        if (u.includes(needle)) return new Response(JSON.stringify(body), { status: 200 });
+      }
+      return new Response("not found", { status: 404 });
+    }) as typeof fetch;
+    return impl;
+  };
+
+  test("a --pr target yields the head sha of an open PR", async () => {
+    const impl = fakeFetch([[`/pulls/7`, { number: 7, state: "open", head: { sha: HEAD } }]]);
+    expect(await resolveHeads("tok", REPO, { pr: 7 }, impl)).toEqual([HEAD]);
+  });
+
+  test("a closed PR yields no heads, so nothing is published for it", async () => {
+    const impl = fakeFetch([[`/pulls/7`, { number: 7, state: "closed", head: { sha: HEAD } }]]);
+    expect(await resolveHeads("tok", REPO, { pr: 7 }, impl)).toEqual([]);
+  });
+
+  test("a --sha target yields the heads of open PRs only, deduplicated", async () => {
+    const impl = fakeFetch([
+      [
+        `/commits/${SHA}/pulls`,
+        [
+          { number: 8, state: "open", head: { sha: HEAD } },
+          { number: 9, state: "open", head: { sha: HEAD } },
+          { number: 10, state: "closed", head: { sha: "b".repeat(40) } },
+        ],
+      ],
+    ]);
+    expect(await resolveHeads("tok", REPO, { sha: SHA }, impl)).toEqual([HEAD]);
+  });
+
+  test("a --sha target on a commit no open PR contains yields nothing", async () => {
+    const impl = fakeFetch([[`/commits/${SHA}/pulls`, []]]);
+    expect(await resolveHeads("tok", REPO, { sha: SHA }, impl)).toEqual([]);
   });
 });

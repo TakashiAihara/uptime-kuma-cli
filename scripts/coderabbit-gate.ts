@@ -52,11 +52,12 @@ export function gateState(description: string | null | undefined): {
   if (description === undefined || description === null || description === "") {
     return { state: "pending", description: "waiting for the CodeRabbit review" };
   }
-  const text = `CodeRabbit: ${description} — ${REMEDY}`;
-  return {
-    state: "failure",
-    description: text.length > DESCRIPTION_LIMIT ? text.slice(0, DESCRIPTION_LIMIT) : text,
-  };
+  // the remedy must survive truncation — it is the only guidance on the status
+  const prefix = "CodeRabbit: ";
+  const remedy = ` — ${REMEDY}`;
+  const room = DESCRIPTION_LIMIT - prefix.length - remedy.length;
+  const detail = description.length > room ? `${description.slice(0, room - 1)}…` : description;
+  return { state: "failure", description: `${prefix}${detail}${remedy}` };
 }
 
 // The statuses endpoint lists newest first, but order is not part of the
@@ -195,6 +196,24 @@ export async function evaluate(
   await publishStatus(token, repo, sha, gate.state, gate.description, targetUrl, dryRun, fetchImpl);
 }
 
+// The head SHAs a run must evaluate: a --pr target yields its head when the PR
+// is open, a --sha target yields the current heads of every open PR containing
+// the commit (several when PRs share commits). Closed PRs yield nothing — a
+// status event on an old commit must not publish gate statuses again.
+export async function resolveHeads(
+  token: string,
+  repo: string,
+  target: { pr: number } | { sha: string },
+  fetchImpl: Fetch = fetch,
+): Promise<string[]> {
+  if ("pr" in target) {
+    const pull = await pullRequest(token, repo, target.pr, fetchImpl);
+    return pull === null ? [] : [pull.head.sha];
+  }
+  const pulls = await openPullsForCommit(token, repo, target.sha, fetchImpl);
+  return [...new Set(pulls.map((p) => p.head.sha))];
+}
+
 function usage(): never {
   console.error(
     "usage: bun scripts/coderabbit-gate.ts (--pr <number> | --sha <commit>) [--repo owner/name] [--dry-run]",
@@ -230,24 +249,16 @@ async function main(): Promise<void> {
       ? undefined
       : `${process.env.GITHUB_SERVER_URL ?? "https://github.com"}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`;
 
-  if (pr !== undefined) {
-    const pull = await pullRequest(token, repo, pr, fetch);
-    if (pull === null) {
-      console.log(`PR #${pr} is not open; nothing to do`);
-      return;
-    }
-    await evaluate(token, repo, pull.head.sha, targetUrl, dryRun);
+  const target = pr !== undefined ? { pr } : { sha: sha! };
+  const heads = await resolveHeads(token, repo, target, fetch);
+  if (heads.length === 0) {
+    console.log(
+      pr !== undefined
+        ? `PR #${pr} is not open; nothing to do`
+        : `${sha}: no open pull request contains this commit; nothing to do`,
+    );
     return;
   }
-
-  const pulls = await openPullsForCommit(token, repo, sha!, fetch);
-  if (pulls.length === 0) {
-    console.log(`${sha}: no open pull request contains this commit; nothing to do`);
-    return;
-  }
-  // several open PRs can share a commit (stacked PRs); each head is evaluated
-  // on its own CodeRabbit status
-  const heads = [...new Set(pulls.map((p) => p.head.sha))];
   for (const head of heads) {
     await evaluate(token, repo, head, targetUrl, dryRun);
   }

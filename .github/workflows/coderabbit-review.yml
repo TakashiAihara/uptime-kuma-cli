@@ -7,8 +7,10 @@ name: coderabbit-review
 # event) and when the PR head moves (`pull_request_target`), so the gate follows
 # the review without polling. pull_request_target is used on purpose: the workflow
 # and the script always come from the base branch and the job never checks out PR
-# code, so the PR cannot edit the gate that judges it. Only same-repo PRs are
-# expected here; a fork PR's read-only token could not publish the status.
+# code, so the PR cannot edit the gate that judges it. The job only reads commit
+# statuses and publishes one fixed-context status — it runs no PR code, so a fork
+# PR gains nothing from it (opencode-review's plain pull_request event gives fork
+# PRs a read-only token its write steps cannot live with).
 
 on:
   pull_request_target:
