@@ -39,7 +39,10 @@ export const MUTATION_TESTS: Record<string, { cmd: string; timeout: number }> = 
     timeout: 60,
   },
   "src/commands/proxies.ts": { cmd: "bun test tests/proxies.test.ts", timeout: 60 },
-  "src/commands/settings.ts": { cmd: "bun test tests/settings.test.ts", timeout: 60 },
+  "src/commands/settings.ts": {
+    cmd: "bun test tests/settings.test.ts tests/settings-kuma2.test.ts",
+    timeout: 90,
+  },
   "src/commands/status-pages.ts": {
     cmd: "bun test tests/status-pages.test.ts tests/status-pages-kuma2.test.ts",
     timeout: 120,
