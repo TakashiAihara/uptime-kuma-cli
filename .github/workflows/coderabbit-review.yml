@@ -10,10 +10,11 @@ name: coderabbit-review
 # code, so the PR cannot edit the gate that judges it. The job only reads commit
 # statuses and publishes one fixed-context status — it runs no PR code, so a fork
 # PR gains nothing from it (opencode-review's plain pull_request event gives fork
-# PRs a read-only token its write steps cannot live with). Runs for the same head
-# SHA are serialized with cancel-in-progress: a pull_request_target run and the
-# status-event runs CodeRabbit triggers can overlap, and without it a stale
-# evaluation could overwrite a newer gate status and stall the check.
+# PRs a read-only token its write steps cannot live with). Every automated run
+# evaluates and publishes on the event's own commit, so the concurrency group
+# below is always the same sha the run writes to; runs for one commit are
+# serialized with cancel-in-progress, and a stale evaluation cannot overwrite a
+# newer gate status and stall the check.
 
 on:
   pull_request_target:
@@ -49,13 +50,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EVENT_NAME: ${{ github.event_name }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          STATUS_SHA: ${{ github.event.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.sha }}
           DISPATCH_PR: ${{ inputs.pr }}
         run: |
           case "$EVENT_NAME" in
-            pull_request_target) bun scripts/coderabbit-gate.ts --pr "$PR_NUMBER" ;;
-            status) bun scripts/coderabbit-gate.ts --sha "$STATUS_SHA" ;;
+            pull_request_target|status) bun scripts/coderabbit-gate.ts --sha "$HEAD_SHA" ;;
             workflow_dispatch) bun scripts/coderabbit-gate.ts --pr "$DISPATCH_PR" ;;
             *) exit 1 ;;
           esac

@@ -94,22 +94,6 @@ async function api(token: string, path: string, fetchImpl: Fetch): Promise<unkno
   return res.json();
 }
 
-// The PRs a commit belongs to, restricted to open ones — a status event on an
-// old commit of a merged PR must not publish gate statuses again.
-async function openPullsForCommit(
-  token: string,
-  repo: string,
-  sha: string,
-  fetchImpl: Fetch,
-): Promise<PullRequest[]> {
-  const pulls = (await api(
-    token,
-    `/repos/${repo}/commits/${sha}/pulls?per_page=100`,
-    fetchImpl,
-  )) as PullRequest[];
-  return pulls.filter((p) => p.state === "open");
-}
-
 async function pullRequest(
   token: string,
   repo: string,
@@ -205,10 +189,12 @@ export async function evaluate(
   await publishStatus(token, repo, sha, gate.state, gate.description, targetUrl, dryRun, fetchImpl);
 }
 
-// The head SHAs a run must evaluate: a --pr target yields its head when the PR
-// is open, a --sha target yields the current heads of every open PR containing
-// the commit (several when PRs share commits). Closed PRs yield nothing — a
-// status event on an old commit must not publish gate statuses again.
+// The head SHAs a run must evaluate. --pr resolves the open PR's current head
+// (manual dispatch). --sha evaluates the commit itself: the workflow keys its
+// concurrency group on that same sha, so every writer of a commit's gate status
+// is serialized, and the status lands on the commit the triggering event
+// pointed at — on a stale or merged commit it is inert, on an open PR head it
+// is the required check.
 export async function resolveHeads(
   token: string,
   repo: string,
@@ -219,8 +205,7 @@ export async function resolveHeads(
     const pull = await pullRequest(token, repo, target.pr, fetchImpl);
     return pull === null ? [] : [pull.head.sha];
   }
-  const pulls = await openPullsForCommit(token, repo, target.sha, fetchImpl);
-  return [...new Set(pulls.map((p) => p.head.sha))];
+  return [target.sha];
 }
 
 function usage(): never {
@@ -261,11 +246,7 @@ async function main(): Promise<void> {
   const target = pr !== undefined ? { pr } : { sha: sha! };
   const heads = await resolveHeads(token, repo, target, fetch);
   if (heads.length === 0) {
-    console.log(
-      pr !== undefined
-        ? `PR #${pr} is not open; nothing to do`
-        : `${sha}: no open pull request contains this commit; nothing to do`,
-    );
+    console.log(`PR #${pr} is not open; nothing to do`);
     return;
   }
   for (const head of heads) {

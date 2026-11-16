@@ -231,22 +231,17 @@ describe("resolveHeads", () => {
     expect(await resolveHeads("tok", REPO, { pr: 7 }, impl)).toEqual([]);
   });
 
-  test("a --sha target yields the heads of open PRs only, deduplicated", async () => {
-    const impl = fakeFetch([
-      [
-        `/commits/${SHA}/pulls`,
-        [
-          { number: 8, state: "open", head: { sha: HEAD } },
-          { number: 9, state: "open", head: { sha: HEAD } },
-          { number: 10, state: "closed", head: { sha: "b".repeat(40) } },
-        ],
-      ],
-    ]);
-    expect(await resolveHeads("tok", REPO, { sha: SHA }, impl)).toEqual([HEAD]);
-  });
+  test("a --sha target evaluates the commit itself without any API lookup", async () => {
+    // the workflow's concurrency group is keyed on this same sha, so the run
+    // must publish exactly where the triggering event pointed — resolving to a
+    // different head would let two groups write the same status out of order
+    let calls = 0;
+    const impl = (async (_url: string | URL | Request, _init?: RequestInit) => {
+      calls++;
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
 
-  test("a --sha target on a commit no open PR contains yields nothing", async () => {
-    const impl = fakeFetch([[`/commits/${SHA}/pulls`, []]]);
-    expect(await resolveHeads("tok", REPO, { sha: SHA }, impl)).toEqual([]);
+    expect(await resolveHeads("tok", REPO, { sha: SHA }, impl)).toEqual([SHA]);
+    expect(calls).toBe(0);
   });
 });
