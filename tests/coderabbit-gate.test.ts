@@ -149,7 +149,7 @@ describe("evaluate", () => {
   test("stops paging once a CodeRabbit status is found", async () => {
     const page2 = `https://api.github.com/repos/${REPO}/commits/${SHA}/statuses?per_page=100&page=2`;
     const calls: string[] = [];
-    const impl = (async (url: string | URL | Request, init?: RequestInit) => {
+    const impl = (async (url: string | URL | Request, _init?: RequestInit) => {
       calls.push(String(url));
       return new Response(JSON.stringify([status({ description: "Review completed" })]), {
         status: 200,
