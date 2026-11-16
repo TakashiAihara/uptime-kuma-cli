@@ -14,7 +14,7 @@
  * that lcov instruments; a diff with no measurable lines passes.
  */
 import { readdirSync, readFileSync } from "node:fs";
-import { join, relative } from "node:path";
+import { join, relative, resolve } from "node:path";
 
 export const THRESHOLD_PERCENT = 90;
 const SRC_PREFIX = "src/";
@@ -31,19 +31,16 @@ export type GateResult = {
 
 export function parseLcov(text: string): LcovData {
   const lcov: LcovData = new Map();
-  let file: string | undefined;
   let lines: Map<number, number> | undefined;
   for (const raw of text.split("\n")) {
     const line = raw.trimEnd();
     if (line.startsWith("SF:")) {
-      file = line.slice(3).replace(/^\.\//, "");
       lines = new Map();
-      lcov.set(file, lines);
+      lcov.set(line.slice(3).replace(/^\.\//, ""), lines);
     } else if (line.startsWith("DA:") && lines !== undefined) {
       const [ln, hits] = line.slice(3).split(",");
       lines.set(Number(ln), Number(hits));
     } else if (line === "end_of_record") {
-      file = undefined;
       lines = undefined;
     }
   }
@@ -221,7 +218,7 @@ function main(): void {
     process.exit(2);
   }
   const root = join(import.meta.dir, "..");
-  const lcov = loadLcov(join(root, lcovPath));
+  const lcov = loadLcov(resolve(root, lcovPath));
 
   if (command === "whole") {
     const missing = missingSrcFiles(lcov, root);

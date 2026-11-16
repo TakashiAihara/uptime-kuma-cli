@@ -187,7 +187,9 @@ function main(): void {
 
   const added = gitAddedLines(base, ROOT);
   if (added === null) process.exit(2);
-  const changed = [...added.entries()].filter(([f]) => f.startsWith("src/") && existsSync(f));
+  const changed = [...added.entries()].filter(
+    ([f]) => f.startsWith("src/") && existsSync(join(ROOT, f)),
+  );
 
   const tmp = mkdtempSync(join(tmpdir(), "mewt-"));
   const db = join(tmp, "mewt.sqlite");
@@ -232,25 +234,27 @@ function main(): void {
       files.push({ file, selected: picked.length, survivors: [] });
     }
 
-    const json = mewt(["results", "--all", "--format", "json", "--db", db], true);
-    const parsed = JSON.parse(json) as MewtResult;
     const counts = { caught: 0, uncaught: 0, other: 0 };
     const byFile = new Map<string, Survivor[]>();
-    for (const r of parsed.results ?? []) {
-      const status = r.outcome.status;
-      if (status === "TestFail") counts.caught++;
-      else if (status === "Uncaught") counts.uncaught++;
-      else counts.other++;
-      if (status !== "Uncaught") continue;
-      const list = byFile.get(r.target.path) ?? [];
-      list.push({
-        id: r.mutant.id,
-        slug: r.mutant.mutation_slug,
-        line: r.mutant.line_offset + 1,
-        oldText: r.mutant.old_text,
-        newText: r.mutant.new_text,
-      });
-      byFile.set(r.target.path, list);
+    if (files.length > 0) {
+      const json = mewt(["results", "--all", "--format", "json", "--db", db], true);
+      const parsed = JSON.parse(json) as MewtResult;
+      for (const r of parsed.results ?? []) {
+        const status = r.outcome.status;
+        if (status === "TestFail") counts.caught++;
+        else if (status === "Uncaught") counts.uncaught++;
+        else counts.other++;
+        if (status !== "Uncaught") continue;
+        const list = byFile.get(r.target.path) ?? [];
+        list.push({
+          id: r.mutant.id,
+          slug: r.mutant.mutation_slug,
+          line: r.mutant.line_offset + 1,
+          oldText: r.mutant.old_text,
+          newText: r.mutant.new_text,
+        });
+        byFile.set(r.target.path, list);
+      }
     }
     for (const f of files) f.survivors = byFile.get(f.file) ?? [];
 
