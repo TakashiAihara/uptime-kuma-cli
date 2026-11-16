@@ -84,27 +84,35 @@ describe("status-pages", () => {
       const r = await run(sb, ["status-pages", "get", "status"], creds(kuma.url));
       expect(r.code).toBe(0);
       expect(callsOf("getStatusPage")[0]!.args).toEqual(["status"]);
+      const incident = {
+        id: 1,
+        style: "danger",
+        title: "Outage",
+        content: "db is down",
+        pin: true,
+        createdDate: "2030-01-01 10:00:00",
+        lastUpdatedDate: "2030-01-01 11:00:00",
+      };
       expect(r.json()).toEqual({
         ...STATUS,
         publicGroupList: [
           { id: 3, name: "Core", weight: 1, monitorList: [{ id: 5, name: "web" }] },
         ],
-        incident: {
-          id: 1,
-          style: "danger",
-          title: "Outage",
-          content: "db is down",
-          pin: true,
-          createdDate: "2030-01-01 10:00:00",
-          lastUpdatedDate: "2030-01-01 11:00:00",
-        },
+        incident,
+        // 1.x's single incident is wrapped for output written against 2.x
+        incidents: [incident],
       });
     });
 
     test("prints incident null and an empty publicGroupList when there are none", async () => {
       const r = await run(sb, ["status-pages", "get", "ops"], creds(kuma.url));
       expect(r.code).toBe(0);
-      expect(r.json()).toEqual({ ...OPS, publicGroupList: [], incident: null });
+      expect(r.json()).toEqual({
+        ...OPS,
+        publicGroupList: [],
+        incident: null,
+        incidents: [],
+      });
     });
 
     test("an unpinned or inactive incident is not shown", async () => {
@@ -115,6 +123,7 @@ describe("status-pages", () => {
       const r = await run(sb, ["status-pages", "get", "status"], creds(kuma.url));
       expect(r.code).toBe(0);
       expect(r.json().incident).toBeNull();
+      expect(r.json().incidents).toEqual([]);
     });
 
     test("an unknown slug exits 1 without calling getStatusPage", async () => {
@@ -531,6 +540,7 @@ describe("status-pages", () => {
       expect(j.title).toBe("Renamed page");
       expect(j.slug).toBe("status");
       expect(j.incident).toBeNull();
+      expect(j.incidents).toEqual([]);
       // printed like `get`: the fresh public route's groups carry the new ids
       expect(j.publicGroupList).toEqual([
         {
@@ -799,6 +809,15 @@ describe("status-pages", () => {
         "a numeric sendUrl",
         { publicGroupList: [{ name: "G", monitorList: [{ id: 5, sendUrl: 2 }] }] },
       ],
+      ["a negative autoRefreshInterval", { autoRefreshInterval: -1 }],
+      ["a fractional autoRefreshInterval", { autoRefreshInterval: 1.5 }],
+      ["a string autoRefreshInterval", { autoRefreshInterval: "300" }],
+      ["a numeric rssTitle", { rssTitle: 5 }],
+      ["a numeric analyticsId", { analyticsId: 5 }],
+      ["a numeric analyticsScriptUrl", { analyticsScriptUrl: 5 }],
+      ["a string showOnlyLastHeartbeat", { showOnlyLastHeartbeat: "yes" }],
+      ["an unknown analyticsType", { analyticsType: "bogus" }],
+      ["a numeric analyticsType", { analyticsType: 5 }],
     ])("an invalid file (%s) exits 2 before connecting", async (_label, value) => {
       const f = writeJson("page.json", value as Record<string, unknown>);
       const r = await run(
@@ -808,6 +827,41 @@ describe("status-pages", () => {
       );
       expect(r.code).toBe(2);
       expect(kuma.calls).toHaveLength(0);
+    });
+
+    // valid values, but 1.23's saveStatusPage never reads them: refused once
+    // the version is known, before any page request is sent
+    test.each([
+      ["autoRefreshInterval", 300],
+      ["rssTitle", "RSS"],
+      ["showOnlyLastHeartbeat", true],
+      ["analyticsId", "UA-1"],
+      ["analyticsScriptUrl", "https://example.com/a.js"],
+      ["analyticsType", "umami"],
+    ])("%s exits 2 on a 1.x server before saveStatusPage", async (key, value) => {
+      const f = writeJson("page.json", { [key]: value });
+      const r = await run(
+        sb,
+        ["status-pages", "save", "status", "--config-file", f],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain(`"${key}" needs Uptime Kuma 2.x; the server reports 1.23.17`);
+      expect(callsOf("getStatusPage")).toHaveLength(0);
+      expect(callsOf("saveStatusPage")).toHaveLength(0);
+    });
+
+    test("a 2.x save key exits 2 with the no-version note when the server sends none", async () => {
+      kuma.state.info = null;
+      const f = writeJson("page.json", { autoRefreshInterval: 60 });
+      const r = await run(
+        sb,
+        ["status-pages", "save", "status", "--config-file", f],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("the server sent no version, so 1.x was assumed");
+      expect(callsOf("saveStatusPage")).toHaveLength(0);
     });
 
     test.each(["description", "footerText", "customCSS", "googleAnalyticsId"])(
@@ -886,6 +940,7 @@ describe("status-pages", () => {
       expect(j.publicGroupList[0].name).toBe("Core");
       expect(typeof j.publicGroupList[0].id).toBe("number");
       expect(j.incident).toBeNull();
+      expect(j.incidents).toEqual([]);
       expect(r.stderr).toContain("Read-back failed");
     });
 

@@ -18,7 +18,10 @@ const SAVE_THEMES = ["auto", "light", "dark"] as const;
 // saveStatusPage overwrites every config column it reads, so the CLI merges
 // the file over the fetched toJSON like the UI does. The file may only carry
 // the writable keys — id, icon and published are refused (the icon changes
-// through "logo", published is not touched by the handler at all).
+// through "logo", published is not touched by the handler at all). The set
+// is the union of both versions: googleAnalyticsId is 1.x-only and the six
+// refresh/analytics keys are 2.x-only; the version-specific half is refused
+// after connect() like the 2.x monitor fields.
 const SAVE_FILE_KEYS = new Set([
   "slug",
   "title",
@@ -30,16 +33,39 @@ const SAVE_FILE_KEYS = new Set([
   "showPoweredBy",
   "showCertificateExpiry",
   "googleAnalyticsId",
+  "autoRefreshInterval",
+  "rssTitle",
+  "showOnlyLastHeartbeat",
+  "analyticsId",
+  "analyticsScriptUrl",
+  "analyticsType",
   "domainNameList",
   "logo",
   "publicGroupList",
 ]);
 
+// The config keys only 2.5.11's saveStatusPage reads; a 1.x server never
+// stores them, so they exit 2 once the version is known.
+const SAVE_2X_KEYS = [
+  "autoRefreshInterval",
+  "rssTitle",
+  "showOnlyLastHeartbeat",
+  "analyticsId",
+  "analyticsScriptUrl",
+  "analyticsType",
+] as const;
+
+// 2.5.11 validates analyticsType against this enum; null means no analytics.
+const ANALYTICS_TYPES = ["google", "umami", "plausible", "matomo", "rybbit"] as const;
+
 const PNG_DATA_URL = "data:image/png;base64,";
 
 // The reduced shapes saveStatusPage reads: groups keep only id/name and
 // monitors only id/sendUrl; extra keys a `get` output carries (weight, type,
-// url, tags, ...) are allowed in the file and ignored.
+// url, tags, ...) are allowed in the file and ignored. Dropping url is not
+// cosmetic on 2.x: its saveStatusPage stores a sent monitor url as
+// monitor_group.custom_url, and the public url it would feed back is the
+// redacted "***" form.
 type SaveMonitor = { id: number; sendUrl?: boolean | 0 | 1 };
 type SaveGroup = { id?: number; name: string; monitorList: SaveMonitor[] };
 type SaveFile = {
@@ -90,18 +116,41 @@ function redactUrl(url: string): string {
   }
 }
 
-// GET /api/status-page/:slug is the unauthenticated public route; it answers
-// { config, incident, publicGroupList, maintenanceList } and the CLI merges
-// the socket config with the public groups and the pinned incident. Kuma
-// caches the route for 5 minutes (apicache) keyed on the full URL including
-// the query string; saveStatusPage and deleteMonitor clear it, but
-// deleteStatusPage, addStatusPage, postIncident and unpinIncident do not —
-// so a bare URL can still serve a body cached before a delete/re-add. The
+// 2.x's public route returns every pinned and active incident as `incidents`,
+// ordered created_date DESC; `incident` reports the newest pinned one so
+// output written for 1.23's single `incident` keeps working. The pick does
+// not lean on that order: an element only loses to a later one when both
+// createdDates are present and prove it older — a missing or tied date
+// falls back to position, i.e. the last element wins.
+function newestIncident(incidents: Record<string, unknown>[]): Record<string, unknown> | null {
+  let best: Record<string, unknown> | null = null;
+  for (const inc of incidents) {
+    if (inc.pin === false) continue;
+    if (best === null) {
+      best = inc;
+      continue;
+    }
+    const bd = best.createdDate;
+    const cd = inc.createdDate;
+    if (typeof cd === "string" && typeof bd === "string" && cd < bd) continue;
+    best = inc;
+  }
+  return best;
+}
+
+// GET /api/status-page/:slug is the unauthenticated public route; on 1.x it
+// answers { config, incident, publicGroupList, maintenanceList } and on 2.x
+// { config, incidents, publicGroupList, maintenanceList }. The CLI merges
+// the socket config with the public groups and prints `incidents` next to
+// `incident` on both versions. Kuma caches the route for 5 minutes keyed on
+// the full URL including the query string; which events clear it differs
+// (1.x: saveStatusPage and deleteMonitor; 2.x adds deleteStatusPage) but
+// addStatusPage, postIncident and unpinIncident clear it on neither — the
 // unique query makes every read a cache miss.
 async function fetchPublicStatusPage(
   s: KumaSession,
   slug: string,
-): Promise<{ publicGroupList: unknown[]; incident: unknown }> {
+): Promise<{ publicGroupList: unknown[]; incident: unknown; incidents: unknown[] }> {
   // slug is one from statusPageList, so Kuma's checkSlug charset needs no encoding
   const cacheBust = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
   const url = `${s.url}/api/status-page/${slug}?_=${cacheBust}`;
@@ -136,11 +185,26 @@ async function fetchPublicStatusPage(
   if (!Array.isArray(body.publicGroupList)) {
     fail(70, "unexpected /api/status-page response");
   }
-  const incident = body.incident ?? null;
-  if (incident !== null && (typeof incident !== "object" || Array.isArray(incident))) {
-    fail(70, "unexpected /api/status-page response");
+  let incident: unknown;
+  let incidents: unknown[];
+  if (s.majorVersion >= 2) {
+    const raw = body.incidents;
+    if (!Array.isArray(raw)) fail(70, "unexpected /api/status-page response");
+    for (const i of raw) {
+      if (i === null || typeof i !== "object" || Array.isArray(i)) {
+        fail(70, "unexpected /api/status-page response");
+      }
+    }
+    incidents = raw;
+    incident = newestIncident(raw as Record<string, unknown>[]);
+  } else {
+    incident = body.incident ?? null;
+    if (incident !== null && (typeof incident !== "object" || Array.isArray(incident))) {
+      fail(70, "unexpected /api/status-page response");
+    }
+    incidents = incident === null ? [] : [incident];
   }
-  return { publicGroupList: redactGroupUrls(body.publicGroupList), incident };
+  return { publicGroupList: redactGroupUrls(body.publicGroupList), incident, incidents };
 }
 
 // Monitor.toPublicJSON adds the monitor url when sendUrl is on; a password in
@@ -223,7 +287,15 @@ function parseSaveFile(file: Record<string, unknown>): SaveFile {
     }
     overrides.title = file.title;
   }
-  for (const key of ["description", "footerText", "customCSS", "googleAnalyticsId"] as const) {
+  for (const key of [
+    "description",
+    "footerText",
+    "customCSS",
+    "googleAnalyticsId",
+    "rssTitle",
+    "analyticsId",
+    "analyticsScriptUrl",
+  ] as const) {
     const v = file[key];
     if (v === undefined) continue;
     if (v !== null && typeof v !== "string") fail(2, `"${key}" must be a string or null`);
@@ -238,11 +310,32 @@ function parseSaveFile(file: Record<string, unknown>): SaveFile {
     }
     overrides.theme = file.theme;
   }
-  for (const key of ["showTags", "showPoweredBy", "showCertificateExpiry"] as const) {
+  for (const key of [
+    "showTags",
+    "showPoweredBy",
+    "showCertificateExpiry",
+    "showOnlyLastHeartbeat",
+  ] as const) {
     const v = file[key];
     if (v === undefined) continue;
     if (typeof v !== "boolean") fail(2, `"${key}" must be a boolean`);
     overrides[key] = v;
+  }
+  if (file.autoRefreshInterval !== undefined) {
+    const v = file.autoRefreshInterval;
+    if (typeof v !== "number" || !Number.isInteger(v) || v < 0) {
+      fail(2, '"autoRefreshInterval" must be a non-negative integer');
+    }
+    overrides.autoRefreshInterval = v;
+  }
+  if (file.analyticsType !== undefined) {
+    const v = file.analyticsType;
+    const ok =
+      v === null || (typeof v === "string" && (ANALYTICS_TYPES as readonly string[]).includes(v));
+    if (!ok) {
+      fail(2, `"analyticsType" must be one of ${ANALYTICS_TYPES.join(", ")} or null`);
+    }
+    overrides.analyticsType = v;
   }
   if (file.domainNameList !== undefined) {
     if (
@@ -298,6 +391,32 @@ function toSaveGroup(raw: unknown): SaveGroup {
   return group;
 }
 
+// The version-specific save keys can only be refused once the version is
+// known: 1.23's saveStatusPage never reads the six 2.x keys, and 2.x no
+// longer reads googleAnalyticsId. Like the monitor fields, the refusal
+// exits 2 before anything is sent.
+function checkSaveVersionKeys(s: KumaSession, overrides: Record<string, unknown>): void {
+  if (s.majorVersion >= 2) {
+    if (overrides.googleAnalyticsId !== undefined) {
+      fail(
+        2,
+        `"googleAnalyticsId" is not read on Uptime Kuma 2.x; the server reports ${s.serverVersion} — set "analyticsId" / "analyticsType" instead`,
+      );
+    }
+    return;
+  }
+  for (const key of SAVE_2X_KEYS) {
+    if (overrides[key] !== undefined) {
+      fail(
+        2,
+        s.serverVersion === undefined
+          ? `"${key}" needs Uptime Kuma 2.x; the server sent no version, so 1.x was assumed`
+          : `"${key}" needs Uptime Kuma 2.x; the server reports ${s.serverVersion}`,
+      );
+    }
+  }
+}
+
 export function registerStatusPages(program: Command): void {
   const statusPages = program.command("status-pages").description("Manage status pages");
 
@@ -320,8 +439,8 @@ export function registerStatusPages(program: Command): void {
       // gives the CLI's own not-found first
       if (!statusPageBySlug(s, slug)) fail(1, `status page ${slug} not found`);
       const config = await fetchStatusPageConfig(s, slug);
-      const { publicGroupList, incident } = await fetchPublicStatusPage(s, slug);
-      printJson({ ...config, publicGroupList, incident });
+      const { publicGroupList, incident, incidents } = await fetchPublicStatusPage(s, slug);
+      printJson({ ...config, publicGroupList, incident, incidents });
     });
 
   statusPages
@@ -352,6 +471,7 @@ export function registerStatusPages(program: Command): void {
     .action(async (slug, opts) => {
       const file = parseSaveFile(readJsonFile(opts.configFile, "--config-file"));
       const s = await connect(["statusPageList"]);
+      checkSaveVersionKeys(s, file.overrides);
       const page = statusPageBySlug(s, slug);
       if (page === undefined) fail(1, `status page ${slug} not found`);
       const fetchedConfig = await fetchStatusPageConfig(s, slug);
@@ -400,12 +520,12 @@ export function registerStatusPages(program: Command): void {
       // on stderr, rather than a nonzero exit
       try {
         const config = await fetchStatusPageConfig(s, newSlug);
-        const { publicGroupList, incident } = await fetchPublicStatusPage(s, newSlug);
-        printJson({ ...config, publicGroupList, incident });
+        const { publicGroupList, incident, incidents } = await fetchPublicStatusPage(s, newSlug);
+        printJson({ ...config, publicGroupList, incident, incidents });
       } catch (e) {
         // exit 70 is an unexpected response shape, not a failed read: keep it loud
         if (!(e instanceof CliError) || e.exitCode === 70) throw e;
-        printJson({ ...merged, publicGroupList: savedGroups, incident: null });
+        printJson({ ...merged, publicGroupList: savedGroups, incident: null, incidents: [] });
         console.error(
           `warning: status page ${newSlug} was saved, but reading it back failed: ${e.message}`,
         );
@@ -428,7 +548,7 @@ export function registerStatusPages(program: Command): void {
 
   statusPages
     .command("incident <slug>")
-    .description("Post an incident to a status page (replaces the pinned one)")
+    .description("Post an incident to a status page (unpins the pinned one first)")
     .requiredOption("--title <title>", "incident title")
     .requiredOption("--content <content>", "incident content")
     .addOption(
@@ -445,6 +565,9 @@ export function registerStatusPages(program: Command): void {
       // postIncident of an unknown slug answers "slug is not found"; the
       // pushed list gives the CLI's own not-found first
       if (!statusPageBySlug(s, slug)) fail(1, `status page ${slug} not found`);
+      // 1.x's postIncident unpins the page's incidents itself; 2.x's does not,
+      // so the one-pinned behaviour needs the explicit unpinIncident first
+      if (s.majorVersion >= 2) await s.request("unpinIncident", [slug]);
       const res = await s.request("postIncident", [
         slug,
         { title, content, style: opts.style as string },
