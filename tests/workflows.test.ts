@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { CODERABBIT_CONTEXT } from "../scripts/coderabbit-gate.ts";
 
-const WORKFLOWS = ["ci.yml", "coderabbit-review.yml", "release.yml"];
+const WORKFLOWS = ["ci.yml", "codeql.yml", "coderabbit-review.yml", "release.yml"];
 const dir = resolve(import.meta.dir, "../.github/workflows");
 const read = (file: string) => readFileSync(join(dir, file), "utf8");
 // Bun handles the YAML parsing, so types are only attached where needed
@@ -152,6 +152,46 @@ describe("pinning actions", () => {
     }
 
     expect(uses.length).toBeGreaterThan(0);
+  });
+});
+
+// The analyze job holds security-events: write for the SARIF upload, so its
+// permission set and checkout hygiene are invariants, not details — the same
+// kind the audit step and the coderabbit gate pin in their own describes.
+describe("codeql.yml", () => {
+  const analyze = () =>
+    (
+      Bun.YAML.parse(read("codeql.yml")) as {
+        jobs: {
+          analyze: {
+            "timeout-minutes"?: number;
+            permissions?: Record<string, string>;
+            steps?: { uses?: string; with?: Record<string, unknown> }[];
+          };
+        };
+      }
+    ).jobs.analyze;
+
+  test("permissions are exactly the three the SARIF upload needs", () => {
+    expect(analyze().permissions).toEqual({
+      actions: "read",
+      contents: "read",
+      "security-events": "write",
+    });
+  });
+
+  test("checkout does not persist credentials", () => {
+    const checkout = analyze().steps?.find((s) => s.uses?.startsWith("actions/checkout@"));
+
+    expect(checkout?.with?.["persist-credentials"]).toBe(false);
+  });
+
+  test("the job has a bounded run time", () => {
+    const limit = analyze()["timeout-minutes"];
+
+    expect(typeof limit).toBe("number");
+    expect(limit!).toBeGreaterThan(0);
+    expect(limit!).toBeLessThanOrEqual(30);
   });
 });
 
