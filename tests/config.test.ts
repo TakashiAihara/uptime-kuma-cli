@@ -205,6 +205,17 @@ describe("credentials and url", () => {
     expect(r.code).toBe(0);
   });
 
+  test("an otpauth URI accepts the notp shape spelled out in lowercase", async () => {
+    kuma.state.twoFA = true;
+    writeConfig(
+      sb,
+      `totp_secret_command = 'echo "otpauth://totp/a:b?secret=%41%41%41%41%41%41%41%41%41%41%41%41%41%41%41%41&algorithm=sha1&digits=6&period=30"'`,
+    );
+    const r = await run(sb, list, creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(loginTokens()).toHaveLength(2);
+  });
+
   test("UPTIME_KUMA_TOTP wins over totp_command and totp_secret_command", async () => {
     kuma.state.twoFA = true;
     const token = totpToken(FAKE_TOTP_SECRET, Date.now());
@@ -414,6 +425,65 @@ describe("credentials and url", () => {
     } finally {
       for (const k of Object.keys(process.env)) delete process.env[k];
       Object.assign(process.env, saved);
+      setSystemTime();
+    }
+  });
+
+  test("a same-window relogin retries through Kuma 2.x's authInvalidToken", async () => {
+    const k2 = await startFakeKuma({ profile: "2.x" });
+    try {
+      k2.state.twoFA = true;
+      k2.state.twoFASecret = "BBBBBBBBBBBBBBBB";
+      writeConfig(sb, `totp_secret_command = "printenv IT_TOTP_SECRET"`);
+      const env = { ...creds(k2.url), IT_TOTP_SECRET: "BBBBBBBBBBBBBBBB" };
+      // pinned so both runs mint the same first token: the second run's
+      // first attempt replays it and 2.x answers authInvalidToken — only
+      // the adjacent-window retry can pass
+      setSystemTime(1_800_000_000_000);
+      try {
+        expect((await run(sb, list, env)).code).toBe(0);
+        expect((await run(sb, list, env)).code).toBe(0);
+      } finally {
+        setSystemTime();
+      }
+    } finally {
+      await k2.close();
+    }
+  });
+
+  test.each([
+    "otpauth://totp/x?secret=AAAA&digits=8",
+    "otpauth://totp/x?secret=AAAA&algorithm=SHA256",
+    "otpauth://totp/x?secret=AAAA&period=60",
+    "otpauth://hotp/x?secret=AAAA",
+  ])("an otpauth URI with options Kuma cannot use exits 2: %s", async (uri) => {
+    kuma.state.twoFA = true;
+    writeConfig(sb, `totp_secret_command = "echo '${uri}'"`);
+    const r = await run(sb, list, creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("otpauth URI with options");
+  });
+
+  test("a totp_command that prints only spaces exits 2", async () => {
+    kuma.state.twoFA = true;
+    writeConfig(sb, `totp_command = "echo '   '"`);
+    const r = await run(sb, list, creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("totp_command produced no output");
+  });
+
+  test("a padded UPTIME_KUMA_TOTP is trimmed before login", async () => {
+    kuma.state.twoFA = true;
+    setSystemTime(1_800_000_000_000);
+    try {
+      const token = totpToken(FAKE_TOTP_SECRET, 1_800_000_000_000);
+      const r = await run(sb, list, {
+        ...creds(kuma.url),
+        UPTIME_KUMA_TOTP: ` ${token} `,
+      });
+      expect(r.code).toBe(0);
+      expect(loginTokens()).toEqual(["", token]);
+    } finally {
       setSystemTime();
     }
   });

@@ -382,6 +382,23 @@ function totpSecret(output: string): string {
   if (raw === undefined) {
     fail(2, "totp_secret_command printed an otpauth URI without a secret parameter");
   }
+  // notp only knows SHA-1, 6 digits and 30-second periods, so a URI asking
+  // for anything else would mint tokens Kuma never accepts — refuse it here
+  // instead of failing later with Invalid Token.
+  const kind = /^otpauth:\/\/([^/?]+)/i.exec(text)?.[1]?.toLowerCase();
+  const query = text.includes("?") ? text.slice(text.indexOf("?")) : "";
+  const params = new URLSearchParams(query);
+  if (
+    kind !== "totp" ||
+    (params.get("algorithm") ?? "SHA1").toUpperCase() !== "SHA1" ||
+    (params.get("digits") ?? "6") !== "6" ||
+    (params.get("period") ?? "30") !== "30"
+  ) {
+    fail(
+      2,
+      "totp_secret_command printed an otpauth URI with options Kuma cannot use (needs TOTP, SHA1, 6 digits, 30 s period)",
+    );
+  }
   try {
     return decodeURIComponent(raw);
   } catch {
@@ -405,12 +422,13 @@ export type TotpResolution = {
 // a command that prints a ready token, then a command that prints the secret
 // the CLI turns into one.
 export async function resolveTotp(): Promise<TotpResolution> {
-  const fromEnv = process.env.UPTIME_KUMA_TOTP;
+  const fromEnv = process.env.UPTIME_KUMA_TOTP?.trim();
   if (fromEnv) return { token: fromEnv, retryTokens: [] };
   const config = loadConfig();
   const timeoutMs = commandTimeoutMs();
   if (config.totp_command !== undefined) {
-    const token = await runSecretCommand(config.totp_command, timeoutMs, "totp_command");
+    const token = (await runSecretCommand(config.totp_command, timeoutMs, "totp_command")).trim();
+    if (!token) fail(2, "totp_command produced no output");
     return { token, retryTokens: [] };
   }
   if (config.totp_secret_command !== undefined) {
@@ -434,23 +452,7 @@ export async function resolveTotp(): Promise<TotpResolution> {
   fail(2, "login requires a 2FA token; set UPTIME_KUMA_TOTP, totp_command or totp_secret_command");
 }
 
-// A 2FA login retries `login` with a token and must carry the same
-// credentials; re-running a *_command could return a different secret, so the
-// resolution is cached for the rest of the connect() session. connect()
-// clears it on entry, which also keeps repeated in-process runs (the tests)
-// from seeing each other's values.
-let credentialsCache: Awaited<ReturnType<typeof resolveCredentialsFresh>> | undefined;
-
-export async function resolveCredentials() {
-  credentialsCache ??= await resolveCredentialsFresh();
-  return credentialsCache;
-}
-
-export function clearCredentialsCache() {
-  credentialsCache = undefined;
-}
-
-async function resolveCredentialsFresh(): Promise<{
+export async function resolveCredentials(): Promise<{
   url: string;
   username: string;
   password: string;

@@ -241,7 +241,8 @@ export type FakeState = {
   // rotated after this socket logged in
   settingsPassword: string | null;
   // the account has 2FA enabled: a login without token answers
-  // { tokenRequired: true }, a wrong or replayed one "Invalid Token!"
+  // { tokenRequired: true }, a wrong or replayed one "Invalid Token!" on the
+  // 1.x profile and "authInvalidToken" on the 2.x profile
   twoFA: boolean;
   // base32 TOTP secret the login token verifies against (user.twofa_secret)
   twoFASecret: string;
@@ -902,7 +903,10 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
           token === twofaLastToken ||
           !totpVerify(state.twoFASecret, token, Date.now() + state.twoFASkewMs)
         ) {
-          return { ok: false, msg: "Invalid Token!" };
+          // Kuma 1.x says "Invalid Token!", 2.x the i18n key authInvalidToken
+          return profile2x
+            ? { ok: false, msg: "authInvalidToken", msgi18n: true }
+            : { ok: false, msg: "Invalid Token!" };
         }
         twofaLastToken = token;
       }
