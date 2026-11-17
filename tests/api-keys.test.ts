@@ -28,8 +28,8 @@ const futureLocal = (): { date: string; hm: string } => {
   const d = new Date(Date.now() + 365 * 86400_000);
   const p = (n: number) => String(n).padStart(2, "0");
   return {
-    date: `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}`,
-    hm: `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`,
+    date: `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`,
+    hm: `${p(d.getHours())}:${p(d.getMinutes())}`,
   };
 };
 
@@ -82,6 +82,9 @@ describe("api-keys add", () => {
     expect(out.expires).toBeNull();
     expect(out.active).toBe(true);
     expect(out.key).toMatch(/^uk4_[A-Za-z0-9_-]{40}$/);
+    // the clear key prints on stdout exactly once and never on stderr
+    expect(r.stdout.split(String(out.key))).toHaveLength(2);
+    expect(r.stderr).not.toContain(String(out.key));
     expect(r.stderr).toContain("only once");
     expect(kuma.calls.find((c) => c.event === "addAPIKey")!.args).toEqual([
       { name: "ci deploy", expires: null, active: 1 },
@@ -123,15 +126,27 @@ describe("api-keys add", () => {
     ]);
   });
 
-  test("add --expires keeps seconds and fraction", async () => {
+  test("add --expires keeps seconds", async () => {
     const { date, hm } = futureLocal();
     const r = await run(
       sb,
-      ["api-keys", "add", "--name", "metrics", "--expires", `${date}T${hm}:05.250`],
+      ["api-keys", "add", "--name", "metrics", "--expires", `${date}T${hm}:05`],
       creds(kuma.url),
     );
     expect(r.code).toBe(0);
-    expect(r.json().expires).toBe(`${date} ${hm}:05.250`);
+    expect(r.json().expires).toBe(`${date} ${hm}:05`);
+  });
+
+  test("add --expires with fractional seconds exits 2 before connecting", async () => {
+    const { date, hm } = futureLocal();
+    const r = await run(
+      sb,
+      ["api-keys", "add", "--name", "x", "--expires", `${date}T${hm}:05.250`],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("fractional seconds");
+    expect(kuma.calls).toHaveLength(0);
   });
 
   test("add --expires today is accepted, the datepicker's minDate boundary", async () => {

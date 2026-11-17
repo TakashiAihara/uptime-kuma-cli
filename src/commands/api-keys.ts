@@ -11,12 +11,13 @@ function localToday(): string {
 
 // --expires takes the same offset-free local ISO 8601 datetime as the
 // maintenance flags but goes on the wire in the APIKeyDialog datepicker's
-// modelType spelling — a space-separated local datetime that APIKey.save
-// stores verbatim and getStatus reads with dayjs as server-local time.
-// Omitting the flag sends expires: null, the dialog's "Don't expire". The
-// datepicker's minDate refuses dates before today; the CLI applies the same
-// rule against the CLI host's local date, the approximation the UI makes
-// with the browser's.
+// modelType spelling — a space-separated local datetime without fractional
+// seconds (the UI's modelType has none, and a DATETIME column cannot keep
+// them on every supported DB) that APIKey.save stores verbatim and
+// getStatus reads with dayjs as server-local time. Omitting the flag sends
+// expires: null, the dialog's "Don't expire". The datepicker's minDate
+// refuses dates before today; the CLI applies the same rule against its
+// own host's local date, the way the UI judges "today" on the client.
 function parseExpires(value: string): string {
   if (hasOffsetDesignator(value)) {
     fail(2, `--expires must be local time without an offset, got "${value}"`);
@@ -25,10 +26,13 @@ function parseExpires(value: string): string {
   if (f === null) {
     fail(2, `--expires must be an ISO 8601 local datetime, got "${value}"`);
   }
+  if (f.fraction !== "") {
+    fail(2, `--expires must not have fractional seconds, got "${value}"`);
+  }
   if (f.date < localToday()) {
     fail(2, `--expires must be today or later, got "${value}"`);
   }
-  return `${f.date} ${f.time}:${f.seconds}${f.fraction}`;
+  return `${f.date} ${f.time}:${f.seconds}`;
 }
 
 function parseName(value: string): string {
@@ -92,6 +96,11 @@ export function registerApiKeys(program: Command): void {
       printJson({ id, name, expires, active: true, key });
       console.error(
         "warning: the clear key is returned only once; store it now — it cannot be read again",
+      );
+      // addAPIKey sets apiKeysEnabled unconditionally and nothing turns it
+      // back: /metrics then accepts only API-key auth
+      console.error(
+        "warning: /metrics now requires API-key auth — login credentials no longer work there",
       );
     });
 
