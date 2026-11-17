@@ -22,7 +22,8 @@ jobs:
         run: shellcheck install.sh scripts/publish-release.sh scripts/check-binaries.sh scripts/run-binary.sh
       # Upstream has no release that knows the concurrency `queue` key yet
       # (rhysd/actionlint#657 is still open), so this is the fork that issue tracks.
-      # Digest-pinned like the rest; the image only parses workflow YAML and the job
+      # Move back to rhysd/actionlint once a release there accepts `queue`. The image
+      # is digest-pinned like the rest; it only parses workflow YAML and the job
       # holds contents: read.
       - uses: docker://kjanat/actionlint@sha256:c0a63b3e5c974c2466ead39404b70e448176beaff8c5ec7af0b2e96191aea661 # v1.17.1
         with:
