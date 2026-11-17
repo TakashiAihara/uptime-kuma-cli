@@ -478,6 +478,18 @@ describe("credentials and url", () => {
     expect(r.stderr).toContain("otpauth URI with options");
   });
 
+  test.each([
+    "otpauth://totp/x?secret=AAAA&Algorithm=SHA1",
+    "otpauth://totp/x?secret=AAAA&DIGITS=6",
+    "otpauth://totp/x?Secret=AAAA",
+    "otpauth://totp/x?secret=AAAA&period=30&Period=30",
+  ])("an otpauth URI with a mixed-case option name exits 2: %s", async (uri) => {
+    kuma.state.twoFA = true;
+    writeConfig(sb, `totp_secret_command = "echo '${uri}'"`);
+    const r = await run(sb, list, creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("mixed-case option name");
+  });
   test("a totp_command that prints only spaces exits 2", async () => {
     kuma.state.twoFA = true;
     writeConfig(sb, `totp_command = "echo '   '"`);

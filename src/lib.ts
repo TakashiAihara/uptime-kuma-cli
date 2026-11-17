@@ -380,8 +380,16 @@ function totpSecret(output: string): string {
   if (!text.toLowerCase().startsWith("otpauth://")) return text;
   const query = text.includes("?") ? text.slice(text.indexOf("?")) : "";
   const params = new URLSearchParams(query);
-  // URLSearchParams decodes the value; every key is read case-sensitively so
-  // a "Secret="/"Algorithm=" URI fails closed instead of half-parsing.
+  // params.get matches keys case-sensitively, so a URI spelling an option
+  // like "Algorithm=" would have that option silently ignored; reject any
+  // key that differs from a reserved name only by case before reading values.
+  for (const key of params.keys()) {
+    const lower = key.toLowerCase();
+    if (key !== lower && ["algorithm", "digits", "period", "secret"].includes(lower)) {
+      fail(2, "totp_secret_command printed an otpauth URI with a mixed-case option name");
+    }
+  }
+  // URLSearchParams decodes the value.
   const raw = params.get("secret");
   if (!raw) {
     fail(2, "totp_secret_command printed an otpauth URI without a secret parameter");
