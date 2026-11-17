@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import { connect } from "../kuma.ts";
-import { fail, printJson } from "../lib.ts";
+import { fail, printJson, shrinkTimeoutMs } from "../lib.ts";
 
 // Instance-wide housekeeping: the events act on the whole heartbeat table or
 // the database file, so there is no per-monitor variant and no pushed list
@@ -38,8 +38,9 @@ export function registerHousekeeping(program: Command): void {
     .option("--yes", "confirm shrinking")
     .action(async (opts) => {
       if (!opts.yes) fail(2, "would shrink the database; pass --yes to shrink");
+      const timeoutMs = shrinkTimeoutMs();
       const s = await connect();
-      await s.request("shrinkDatabase");
+      await s.request("shrinkDatabase", [], timeoutMs);
       printJson({ shrunk: true });
     });
 }

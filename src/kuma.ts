@@ -253,8 +253,10 @@ export class KumaSession {
   }
 
   // ok:false is Kuma answering no (exit 1); a missing callback is a timeout (exit 2).
-  async request(event: string, args: any[] = []): Promise<any> {
-    const res = await emitAck(this.socket, event, args, this.timeoutMs, this.disconnected);
+  // timeoutMs overrides the session default for requests like shrinkDatabase
+  // whose server-side work can outlast it.
+  async request(event: string, args: any[] = [], timeoutMs = this.timeoutMs): Promise<any> {
+    const res = await emitAck(this.socket, event, args, timeoutMs, this.disconnected);
     if (res !== null && typeof res === "object" && (res as { ok?: unknown }).ok === false) {
       fail(1, String((res as { msg?: unknown }).msg ?? `${event} failed`));
     }

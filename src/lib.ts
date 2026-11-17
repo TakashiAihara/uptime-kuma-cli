@@ -250,6 +250,12 @@ export function commandTimeoutMs(): number {
   return positiveTimeoutMs("UPTIME_KUMA_COMMAND_TIMEOUT", 60);
 }
 
+// shrinkDatabase's VACUUM is the one request whose server-side work Kuma does
+// not bound itself, so it gets its own, longer ack budget.
+export function shrinkTimeoutMs(): number {
+  return positiveTimeoutMs("UPTIME_KUMA_SHRINK_TIMEOUT", 600);
+}
+
 // A secret keeps its surrounding spaces; only the CR of a CRLF ending is dropped.
 export function firstSecretLine(text: string): string {
   const line = text.split("\n", 1)[0] ?? "";

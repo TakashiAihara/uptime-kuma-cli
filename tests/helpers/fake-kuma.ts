@@ -258,6 +258,9 @@ export type FakeState = {
   databaseSize: number;
   // getDatabaseSize answer override; null answers { ok: true, size: databaseSize }
   databaseSizeResult: Record<string, unknown> | null;
+  // ms to delay a request event's successful ack, like a slow server-side
+  // handler (shrinkDatabase's VACUUM is the case that needs it)
+  ackDelay: Record<string, number>;
 };
 
 export type FakeKuma = { url: string; calls: Call[]; state: FakeState; close: () => Promise<void> };
@@ -502,6 +505,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     dropAfterLists: false,
     databaseSize: 1048576,
     databaseSizeResult: null,
+    ackDelay: {},
     ...init,
   };
   const calls: Call[] = [];
@@ -811,7 +815,10 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
           return;
         }
         try {
-          cb(await fn(...args.slice(0, -1)));
+          const result = await fn(...args.slice(0, -1));
+          const delay = state.ackDelay[event] ?? 0;
+          if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+          cb(result);
         } catch (e) {
           cb({ ok: false, msg: (e as Error).message });
         }

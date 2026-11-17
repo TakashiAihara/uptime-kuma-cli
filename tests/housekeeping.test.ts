@@ -101,4 +101,31 @@ describe("database shrink", () => {
     expect(r.code).toBe(1);
     expect(r.stderr).toContain("cannot shrink");
   });
+
+  test("the ack wait outlives UPTIME_KUMA_TIMEOUT for a slow VACUUM", async () => {
+    kuma.state.ackDelay.shrinkDatabase = 3500;
+    const r = await run(sb, ["database", "shrink", "--yes"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json()).toEqual({ shrunk: true });
+  }, 15_000);
+
+  test("UPTIME_KUMA_SHRINK_TIMEOUT bounds the ack wait", async () => {
+    kuma.state.ackDelay.shrinkDatabase = 3500;
+    const r = await run(sb, ["database", "shrink", "--yes"], {
+      ...creds(kuma.url),
+      UPTIME_KUMA_SHRINK_TIMEOUT: "2",
+    });
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("timed out during shrinkDatabase");
+  }, 15_000);
+
+  test("an invalid UPTIME_KUMA_SHRINK_TIMEOUT exits 2 before connecting", async () => {
+    const r = await run(sb, ["database", "shrink", "--yes"], {
+      ...creds(kuma.url),
+      UPTIME_KUMA_SHRINK_TIMEOUT: "abc",
+    });
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("UPTIME_KUMA_SHRINK_TIMEOUT");
+    expect(kuma.calls).toHaveLength(0);
+  });
 });

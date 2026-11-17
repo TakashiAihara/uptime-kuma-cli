@@ -49,7 +49,7 @@
 - Accounts with 2FA are not supported: Kuma answers `tokenRequired` and the CLI exits 2
 - Each command logs in once. Kuma limits logins to 20 per minute for the whole instance, so a loop of many commands can lock out the UI login for a while
 - With an `http://` URL the login travels in clear text; use `https://` when the path leaves a trusted network
-- Env: `UPTIME_KUMA_URL`, `UPTIME_KUMA_USERNAME`, `UPTIME_KUMA_PASSWORD`, `UPTIME_KUMA_TIMEOUT` (seconds, default 30, for connect + login + each request), `UPTIME_KUMA_COMMAND_TIMEOUT` (seconds, default 60)
+- Env: `UPTIME_KUMA_URL`, `UPTIME_KUMA_USERNAME`, `UPTIME_KUMA_PASSWORD`, `UPTIME_KUMA_TIMEOUT` (seconds, default 30, for connect + login + each request), `UPTIME_KUMA_COMMAND_TIMEOUT` (seconds, default 60), `UPTIME_KUMA_SHRINK_TIMEOUT` (seconds, default 600 — only `database shrink`'s ack wait; VACUUM is not bounded by Kuma's own timeouts)
 - The username command does not see the password and vice versa
 
 ## Output
@@ -249,7 +249,7 @@
 ### database
 
 - `database size`: sends `getDatabaseSize` and prints `{ sizeBytes }`, the database file's size in bytes
-- `database shrink --yes`: sends `shrinkDatabase` (SQLite `VACUUM`) and prints `{ shrunk: true }`; without `--yes` exits 2 before connecting
+- `database shrink --yes`: sends `shrinkDatabase` (SQLite `VACUUM`) and prints `{ shrunk: true }`; without `--yes` exits 2 before connecting. Kuma answers only after VACUUM finishes, which on a large database can outlast `UPTIME_KUMA_TIMEOUT`, so this one request waits up to `UPTIME_KUMA_SHRINK_TIMEOUT` (default 600s) instead
 
 ## Tests
 
