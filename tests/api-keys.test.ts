@@ -63,6 +63,13 @@ describe("api-keys list", () => {
     expect(r.json()).toEqual([]);
   });
 
+  test("prints an empty name as an empty string, not null", async () => {
+    kuma.state.apiKeys = [{ id: 9, name: "", active: 1, expires: null }];
+    const r = await run(sb, ["api-keys", "list"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json()).toEqual([{ id: 9, name: "", expires: null, active: true, status: "active" }]);
+  });
+
   test("times out when the server never pushes apiKeyList", async () => {
     kuma.state.skipLists = ["apiKeyList"];
     const r = await run(sb, ["api-keys", "list"], creds(kuma.url));
@@ -172,23 +179,33 @@ describe("api-keys add", () => {
     expect(kuma.calls).toHaveLength(0);
   });
 
-  test.each([
-    "not-a-date",
-    "2027-02-31T10:00",
-    "2027-13-40T99:99",
-    "2027-01-15 09:30",
-    "2027-01-15T09:30:00Z",
-    "2027-01-15T09:30:00+09:00",
-  ])("add rejects --expires %p with exit 2 before connecting", async (expires) => {
-    const r = await run(
-      sb,
-      ["api-keys", "add", "--name", "x", "--expires", expires],
-      creds(kuma.url),
-    );
-    expect(r.code).toBe(2);
-    expect(r.stderr).toContain("--expires");
-    expect(kuma.calls).toHaveLength(0);
-  });
+  test.each(["not-a-date", "2027-02-31T10:00", "2027-13-40T99:99", "2027-01-15 09:30"])(
+    "add rejects --expires %p with exit 2 before connecting",
+    async (expires) => {
+      const r = await run(
+        sb,
+        ["api-keys", "add", "--name", "x", "--expires", expires],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("--expires");
+      expect(kuma.calls).toHaveLength(0);
+    },
+  );
+
+  test.each(["2027-01-15T09:30:00Z", "2027-01-15T09:30:00+09:00"])(
+    "add rejects offset-bearing --expires %p naming the offset",
+    async (expires) => {
+      const r = await run(
+        sb,
+        ["api-keys", "add", "--name", "x", "--expires", expires],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("without an offset");
+      expect(kuma.calls).toHaveLength(0);
+    },
+  );
 
   test("add without --name exits 2 before connecting", async () => {
     const r = await run(sb, ["api-keys", "add"], creds(kuma.url));
