@@ -3,8 +3,7 @@ import { connect, type KumaSession } from "../kuma.ts";
 import { fail, printJson, shrinkTimeoutMs } from "../lib.ts";
 
 // Instance-wide housekeeping: the events act on the whole heartbeat table or
-// the database file, so there is no per-monitor variant and no pushed list
-// beyond the ones connect() already waits for.
+// the database file. The per-monitor clears live in monitors.ts.
 
 // getDatabaseSize/shrinkDatabase are sqlite-only on 2.x: other backends
 // answer size 0 and a no-op ok, so the CLI refuses instead of printing a
