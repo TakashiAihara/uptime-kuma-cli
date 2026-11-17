@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { CODERABBIT_CONTEXT } from "../scripts/coderabbit-gate.ts";
 
-const WORKFLOWS = ["ci.yml", "coderabbit-review.yml", "release.yml"];
+const WORKFLOWS = ["ci.yml", "codeql.yml", "coderabbit-review.yml", "release.yml"];
 const dir = resolve(import.meta.dir, "../.github/workflows");
 const read = (file: string) => readFileSync(join(dir, file), "utf8");
 // Bun handles the YAML parsing, so types are only attached where needed
