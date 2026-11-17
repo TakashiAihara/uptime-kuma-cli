@@ -364,8 +364,18 @@ if cmp -s dist/SHA256SUMS "${published}/SHA256SUMS"; then
     attached="$(printf '%s\n' "$assets" | awk -F '\t' -v n="$name" '$1 == n { print "x" $2; exit }')"
     [ -n "$attached" ] \
       || { echo "release ${TAG} has no asset ${name}; fix or delete it by hand" >&2; exit 1; }
-    [ "${attached#x}" = "sha256:${sum}" ] \
-      || { echo "release ${TAG} has asset ${name} with a different digest; fix or delete it by hand" >&2; exit 1; }
+    # A missing digest is not a different one: a gh that cannot read the digest field
+    # makes jq print null, and "fix or delete" would aim the operator at a release
+    # that may be fine
+    case "${attached#x}" in
+      "" | "null")
+        echo "release ${TAG} reports no digest for asset ${name}; gh may be too old to read digests, verify by hand" >&2
+        exit 1 ;;
+      "sha256:${sum}") ;;
+      *)
+        echo "release ${TAG} has asset ${name} with a different digest; fix or delete it by hand" >&2
+        exit 1 ;;
+    esac
   done < "${published}/SHA256SUMS"
   echo "release ${TAG} is already published with the same SHA256SUMS; nothing to do"
   released=true

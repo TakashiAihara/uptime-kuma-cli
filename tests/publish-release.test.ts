@@ -34,10 +34,17 @@ beforeEach(() => {
     `#!/bin/sh
 echo "$*" >> "${calls}"
 want_jq() {
-  case "$1" in
-    *--jq*"$2"*) ;;
-    *) echo "gh: $3 lacks --jq $2" >&2; exit 1 ;;
-  esac
+  want="$1"; label="$2"; shift 2
+  prev=""
+  for arg in "$@"; do
+    if [ "$prev" = --jq ]; then
+      [ "$arg" = "$want" ] || { echo "gh: $label --jq is '$arg', want '$want'" >&2; exit 1; }
+      return 0
+    fi
+    prev="$arg"
+  done
+  echo "gh: $label has no --jq '$want'" >&2
+  exit 1
 }
 if [ "$1" = api ]; then
   case "$*" in
@@ -48,12 +55,11 @@ if [ "$1" = api ]; then
       exit 0 ;;
     *"--method DELETE"*git/refs/tags/*) exit 0 ;;
     *git/ref/tags/*)
-      want_jq "$*" ".object.type" "git/ref/tags"
-      want_jq "$*" ".object.sha" "git/ref/tags"
+      want_jq '.object.type + " " + .object.sha' 'git/ref/tags' "$@"
       if [ -n "\${REF_READ_ERROR:-}" ]; then echo "\${REF_READ_ERROR}" >&2; exit 1; fi
       echo "\${REF_TYPE:-commit} \${REF_NOW:-\${REF_EXISTING:-}}" ;;
     *git/tags/*)
-      want_jq "$*" ".object.sha" "git/tags"
+      want_jq '.object.sha' 'git/tags' "$@"
       if [ -n "\${TAG_READ_ERROR:-}" ]; then echo "\${TAG_READ_ERROR}" >&2; exit 1; fi
       echo "\${TAG_TARGET:-}" ;;
     *) exit 98 ;;
@@ -65,11 +71,10 @@ case "$1 $2" in
   "release view")
     case "$*" in
       *"--json isDraft"*)
-        want_jq "$*" ".isDraft" "release view --json isDraft"
+        want_jq '.isDraft' 'release view --json isDraft' "$@"
         echo "\${IS_DRAFT:-false}" ;;
       *"--json assets"*)
-        want_jq "$*" ".assets" "release view --json assets"
-        want_jq "$*" ".digest" "release view --json assets"
+        want_jq '.assets[] | "\\(.name)\\t\\(.digest)"' 'release view --json assets' "$@"
         printf '%s\n' "\${PUBLISHED_ASSETS:-}" ;;
       *)
         if [ -n "\${VIEW_ERROR:-}" ]; then echo "\${VIEW_ERROR}" >&2; exit 1; fi
@@ -77,7 +82,7 @@ case "$1 $2" in
         exit "\${VIEW:-0}" ;;
     esac ;;
   "release list")
-    want_jq "$*" ".tagName" "release list"
+    want_jq '.[].tagName' 'release list' "$@"
     if [ -n "\${LIST_ERROR:-}" ]; then echo "\${LIST_ERROR}" >&2; exit 1; fi
     [ -z "\${LIST_WARN:-}" ] || echo "\${LIST_WARN}" >&2
     if [ -n "\${PUBLISHED_TAGS+x}" ]; then printf '%s\n' "\${PUBLISHED_TAGS}"; else git tag --list 'v*'; fi ;;
@@ -203,7 +208,18 @@ describe("publish-release.sh", () => {
     const r = publish({ CREATE: "1", PUBLISHED_ASSETS: "uptime-kuma-cli-linux-x64" });
 
     expect(r.exitCode).toBe(1);
-    expect(r.stderr.toString()).toContain("different digest");
+    expect(r.stderr.toString()).toContain("reports no digest");
+  });
+
+  // jq prints null for a digest field the gh on the runner cannot read; that is a
+  // missing digest, not a different one, and must not read as "fix or delete" (#4)
+  test("does not succeed when gh reports a null digest for an attached asset", () => {
+    published(BUILT);
+
+    const r = publish({ CREATE: "1", PUBLISHED_ASSETS: "uptime-kuma-cli-linux-x64\tnull" });
+
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr.toString()).toContain("reports no digest");
   });
 
   // gh's stderr is not release data: a warning line that happens to look like a tag must
