@@ -20,7 +20,11 @@ jobs:
       # install.sh is piped into sh, so a mistake there costs the most
       - name: shellcheck (install.sh, publish-release.sh, check-binaries.sh, run-binary.sh)
         run: shellcheck install.sh scripts/publish-release.sh scripts/check-binaries.sh scripts/run-binary.sh
-      - uses: docker://rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 # v1.7.12
+      # Upstream has no release that knows the concurrency `queue` key yet
+      # (rhysd/actionlint#657 is still open), so this is the fork that issue tracks.
+      # Digest-pinned like the rest; the image only parses workflow YAML and the job
+      # holds contents: read.
+      - uses: docker://kjanat/actionlint@sha256:c0a63b3e5c974c2466ead39404b70e448176beaff8c5ec7af0b2e96191aea661 # v1.17.1
         with:
           args: -color
 
