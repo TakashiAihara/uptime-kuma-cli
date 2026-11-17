@@ -372,10 +372,12 @@ describe("ci.yml dependency audit", () => {
   // bun audit is the only vulnerability gate for the transitive tree —
   // Dependabot's alerts read package.json, not bun.lock. Removing the step
   // silently drops that coverage, so pin that the check job still runs it.
+  // The run line may carry the --ignore flags README documents for accepting
+  // a finding; anything else (e.g. `|| true`) fails the gate it guards.
   test("the check job fails on known vulnerabilities in bun.lock", () => {
     const audit = ci().jobs.check.steps.find((s) => s.name === "dependency audit");
 
-    expect(audit?.run).toBe("bun audit");
+    expect(audit?.run?.trim()).toMatch(/^bun audit(?: --ignore[= ]\S+)*$/);
   });
 });
 
