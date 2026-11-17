@@ -40,7 +40,7 @@ password_command = "infisical run --silent -- printenv UPTIME_KUMA_PASSWORD"
 
 | Env | Meaning |
 | --- | --- |
-| `UPTIME_KUMA_URL` | Base URL, starting with `http://` or `https://` (with `http://` the login travels in clear text) |
+| `UPTIME_KUMA_URL` | Base URL, starting with `http://` or `https://` (with `http://` the login — credentials and any 2FA token — travels in clear text) |
 | `UPTIME_KUMA_USERNAME` / `UPTIME_KUMA_PASSWORD` | Login |
 | `UPTIME_KUMA_TOTP` | Ready one-time token for accounts with 2FA |
 | `UPTIME_KUMA_TIMEOUT` | Seconds for connect, login, each request and pushed lists (default 30) |
