@@ -1,6 +1,7 @@
 import { Option, type Command } from "commander";
 import {
   CliError,
+  decimalNumber,
   fail,
   isIdLiteral,
   notificationIdArray,
@@ -424,8 +425,8 @@ function hatchNumber(
 // connect() on a 1.x server. Negative, empty and non-numeric values are
 // refused before connecting on both versions.
 function parseTimeoutSeconds(value: string, flag: string): number {
-  const n = Number(value);
-  if (value.trim() === "" || !Number.isFinite(n) || n < 0) {
+  const n = decimalNumber(value);
+  if (!Number.isFinite(n) || n < 0) {
     fail(2, `${flag} must be a non-negative number of seconds, got "${value}"`);
   }
   return n;
@@ -440,7 +441,7 @@ const MIN_INTERVAL_SECOND = 20;
 const MAX_INTERVAL_SECOND = 2073600;
 
 function parseMonitorInterval(value: string, flag: string): number {
-  const n = Number(value);
+  const n = decimalNumber(value);
   if (!Number.isFinite(n) || n < 1) {
     fail(2, `${flag} must be at least 1 second, got "${value}"`);
   }
@@ -1286,10 +1287,8 @@ export function registerMonitors(program: Command): void {
 
       let pushBase = s.url;
       if (pushToken !== undefined) {
-        const settings = await s.request("getSettings");
-        const data = settings?.data as Record<string, unknown> | undefined;
-        const primary = data?.primaryBaseURL;
-        if (typeof primary === "string" && primary !== "") {
+        const primary = s.primaryBaseURL;
+        if (primary !== undefined && primary !== "") {
           pushBase = primary.replace(/\/+$/, "");
         }
       }
@@ -1462,12 +1461,26 @@ export function registerMonitors(program: Command): void {
       checkKuma2Ping(s, monitor);
       await s.request("editMonitor", [monitor]);
       // editMonitor ignores fields like `active`, so print what Kuma saved.
-      const saved = await fetchMonitor(s, id);
-      printJson({
-        ...redactSecrets(saved),
-        notificationIDList: notificationIdArray(saved.notificationIDList),
-        tags: monitorTags(saved).map(tagJson),
-      });
+      // The save already happened, so a failed re-read degrades to the sent
+      // object plus a warning on stderr rather than a nonzero exit; exit 70
+      // is an unexpected response shape, not a failed read, and stays loud —
+      // same contract as `settings set`.
+      try {
+        const saved = await fetchMonitor(s, id);
+        printJson({
+          ...redactSecrets(saved),
+          notificationIDList: notificationIdArray(saved.notificationIDList),
+          tags: monitorTags(saved).map(tagJson),
+        });
+      } catch (e) {
+        if (!(e instanceof CliError) || e.exitCode === 70) throw e;
+        printJson({
+          ...redactSecrets(monitor),
+          notificationIDList: notificationIdArray(monitor.notificationIDList),
+          tags: monitorTags(monitor).map(tagJson),
+        });
+        console.error(`warning: monitor ${id} was saved, but reading it back failed: ${e.message}`);
+      }
     });
 
   for (const [name, event, active] of [

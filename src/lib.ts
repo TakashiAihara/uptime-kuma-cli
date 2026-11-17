@@ -76,8 +76,15 @@ export function parseId(value: string, flag: string): number {
   return Number(value);
 }
 
+// Number() also accepts hex (0x10), exponents (1e2), signs and surrounding
+// whitespace; CLI numbers are decimal literals only, so anything else is NaN
+// and fails the caller's range check with the usual message.
+export function decimalNumber(value: string): number {
+  return /^\d+(\.\d+)?$/.test(value) ? Number(value) : NaN;
+}
+
 export function parsePositiveNumber(value: string, flag: string): number {
-  const n = Number(value);
+  const n = decimalNumber(value);
   if (!Number.isFinite(n) || n <= 0) {
     fail(2, `${flag} must be a positive number, got "${value}"`);
   }
@@ -85,7 +92,7 @@ export function parsePositiveNumber(value: string, flag: string): number {
 }
 
 export function parsePositiveInteger(value: string, flag: string): number {
-  const n = Number(value);
+  const n = decimalNumber(value);
   if (!Number.isInteger(n) || n <= 0) {
     fail(2, `${flag} must be a positive integer, got "${value}"`);
   }
@@ -93,15 +100,15 @@ export function parsePositiveInteger(value: string, flag: string): number {
 }
 
 export function parseNonNegativeInteger(value: string, flag: string): number {
-  const n = Number(value);
-  if (value.trim() === "" || !Number.isInteger(n) || n < 0) {
+  const n = decimalNumber(value);
+  if (!Number.isInteger(n) || n < 0) {
     fail(2, `${flag} must be an integer of 0 or more, got "${value}"`);
   }
   return n;
 }
 
 export function parsePort(value: string, flag: string): number {
-  const n = Number(value);
+  const n = decimalNumber(value);
   if (!Number.isInteger(n) || n < 1 || n > 65535) {
     fail(2, `${flag} must be a port number, got "${value}"`);
   }

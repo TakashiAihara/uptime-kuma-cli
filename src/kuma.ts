@@ -252,6 +252,10 @@ export class KumaSession {
     // 2.x's post-login info carries dbType (the backend name, e.g. "sqlite");
     // 1.23's info has no such field, so it stays undefined there.
     readonly dbType: string | undefined,
+    // info carries the Primary Base URL setting on both Kuma versions, so
+    // `monitors add --type push` builds pushUrl from it without a getSettings
+    // round trip; undefined when the server never sent a string one.
+    readonly primaryBaseURL: string | undefined,
     // setSettings takes the login password again as currentPassword when the
     // request would disable auth; it is the same secret resolveCredentials
     // already produced for the login, kept here so no command re-resolves it.
@@ -525,12 +529,14 @@ export async function connect(
   // the pushed lists, so the listener goes in before login is emitted.
   let serverVersion: string | undefined;
   let serverDbType: string | undefined;
+  let primaryBaseURL: string | undefined;
   let infoSeen = false;
   socket.on("info", (data: unknown) => {
     infoSeen = true;
-    const info = data as { version?: unknown; dbType?: unknown } | null | undefined;
+    const info = data as { version?: unknown; dbType?: unknown; primaryBaseURL?: unknown } | null | undefined;
     if (typeof info?.version === "string") serverVersion = info.version;
     if (typeof info?.dbType === "string") serverDbType = info.dbType;
+    if (typeof info?.primaryBaseURL === "string") primaryBaseURL = info.primaryBaseURL;
   });
   // 1.23 pushes these right after the login callback and 2.x before it, so the
   // listeners must be in place before login is emitted.
@@ -717,6 +723,7 @@ export async function connect(
     statsEvents,
     serverVersion,
     serverDbType,
+    primaryBaseURL,
     password,
     disconnected,
   );
