@@ -378,7 +378,11 @@ export function totpToken(secret: string, atMs: number = Date.now()): string {
 function totpSecret(output: string): string {
   const text = output.trim();
   if (!text.toLowerCase().startsWith("otpauth://")) return text;
-  const query = text.includes("?") ? text.slice(text.indexOf("?")) : "";
+  // a fragment is not part of the query; without this the "#..." tail would
+  // glue itself onto the last parameter's value
+  const hash = text.indexOf("#");
+  const uri = hash === -1 ? text : text.slice(0, hash);
+  const query = uri.includes("?") ? uri.slice(uri.indexOf("?")) : "";
   const params = new URLSearchParams(query);
   // params.get matches keys case-sensitively, so a URI spelling an option
   // like "Algorithm=" would have that option silently ignored; reject any
@@ -389,6 +393,12 @@ function totpSecret(output: string): string {
       fail(2, "totp_secret_command printed an otpauth URI with a mixed-case option name");
     }
   }
+  // a repeated option is ambiguous — parsers disagree on which value wins
+  for (const name of ["algorithm", "digits", "period", "secret"]) {
+    if (params.getAll(name).length > 1) {
+      fail(2, "totp_secret_command printed an otpauth URI with a repeated option name");
+    }
+  }
   // URLSearchParams decodes the value.
   const raw = params.get("secret");
   if (!raw) {
@@ -397,7 +407,7 @@ function totpSecret(output: string): string {
   // notp only knows SHA-1, 6 digits and 30-second periods, so a URI asking
   // for anything else would mint tokens Kuma never accepts — refuse it here
   // instead of failing later with Invalid Token.
-  const kind = /^otpauth:\/\/([^/?]+)/i.exec(text)?.[1]?.toLowerCase();
+  const kind = /^otpauth:\/\/([^/?]+)/i.exec(uri)?.[1]?.toLowerCase();
   if (
     kind !== "totp" ||
     (params.get("algorithm") ?? "SHA1").toUpperCase() !== "SHA1" ||
@@ -417,9 +427,10 @@ export type TotpResolution = {
   // Only the secret_command source can mint more tokens: Kuma rejects a
   // token equal to the last accepted one and a TOTP repeats every 30 s, so a
   // second login inside one window collides; the adjacent counters' tokens
-  // still verify (Kuma's ±1 window) but differ. Next window first, then the
-  // previous one, so a client clock running ahead of the server still has a
-  // retry inside the server's window.
+  // still verify (Kuma's ±1 window) but differ. The previous window goes
+  // first: its code has already rotated out of the authenticator app, so
+  // spending it cannot collide with a code the user still sees; the next
+  // window's code stays unused unless the previous one cannot verify.
   retryTokens: string[];
 };
 
@@ -428,8 +439,12 @@ export type TotpResolution = {
 // a command that prints a ready token, then a command that prints the secret
 // the CLI turns into one.
 export async function resolveTotp(): Promise<TotpResolution> {
-  const fromEnv = process.env.UPTIME_KUMA_TOTP?.trim();
-  if (fromEnv) return { token: fromEnv, retryTokens: [] };
+  const envToken = process.env.UPTIME_KUMA_TOTP;
+  if (envToken !== undefined) {
+    const token = envToken.trim();
+    if (!token) fail(2, "UPTIME_KUMA_TOTP is set but empty");
+    return { token, retryTokens: [] };
+  }
   const config = loadConfig();
   const timeoutMs = commandTimeoutMs();
   if (config.totp_command !== undefined) {
@@ -450,8 +465,8 @@ export async function resolveTotp(): Promise<TotpResolution> {
     return {
       token: totpToken(secret, counter * 30_000),
       retryTokens: [
-        totpToken(secret, (counter + 1) * 30_000),
         totpToken(secret, (counter - 1) * 30_000),
+        totpToken(secret, (counter + 1) * 30_000),
       ],
     };
   }

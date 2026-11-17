@@ -135,7 +135,7 @@ describe("credentials and url", () => {
     const lib = join(import.meta.dir, "..", "src", "lib.ts");
     writeFileSync(
       gen,
-      `import { totpToken } from ${JSON.stringify(lib)};\nconst secret = process.env.IT_TOTP_SECRET;\nif (secret === undefined) process.exit(1);\nconsole.log(totpToken(secret, Date.now()));\n`,
+      `import { totpToken } from ${JSON.stringify(lib)};\nconst secret = process.env.IT_TOTP_SECRET;\nif (secret === undefined) process.exit(1);\nconsole.log(totpToken(secret, Date.now())); console.log("second-line-ignored");\n`,
     );
     return `${process.execPath} ${gen}`;
   };
@@ -205,6 +205,15 @@ describe("credentials and url", () => {
     expect(r.code).toBe(0);
   });
 
+  test("an otpauth URI ignores a fragment", async () => {
+    kuma.state.twoFA = true;
+    writeConfig(
+      sb,
+      `totp_secret_command = 'echo "otpauth://totp/a:b?secret=%41%41%41%41%41%41%41%41%41%41%41%41%41%41%41%41#note"'`,
+    );
+    const r = await run(sb, list, creds(kuma.url));
+    expect(r.code).toBe(0);
+  });
   test("an otpauth URI accepts the notp shape spelled out in lowercase", async () => {
     kuma.state.twoFA = true;
     writeConfig(
@@ -323,6 +332,8 @@ describe("credentials and url", () => {
     const second = await run(sb, list, env);
     expect(second.code).toBe(2);
     expect(second.stderr).toContain("Invalid Token!");
+    // a ready token cannot be re-minted, so no adjacent retry is sent
+    expect(loginTokens()).toEqual(["", token, "", token]);
   });
 
   test("a secret-derived token retries the adjacent windows on Invalid Token!", async () => {
@@ -362,9 +373,9 @@ describe("credentials and url", () => {
     kuma.state.twoFA = true;
     const secret = "BBBBBBBBBBBBBBBB";
     kuma.state.twoFASecret = secret;
-    // the fake's clock runs 20 s behind, so the client's next-window retry
-    // falls outside the server's ±1 window and only the previous-window
-    // retry verifies
+    // the fake's clock runs 20 s behind, so a next-window token falls
+    // outside the server's ±1 window; the previous-window retry — tried
+    // first — is the one that verifies
     kuma.state.twoFASkewMs = -20_000;
     writeConfig(sb, `totp_secret_command = "printenv IT_TOTP_SECRET"`);
     const env = { ...creds(kuma.url), IT_TOTP_SECRET: secret };
@@ -373,9 +384,10 @@ describe("credentials and url", () => {
       expect((await run(sb, list, env)).code).toBe(0);
       expect((await run(sb, list, env)).code).toBe(0);
       const tokens = loginTokens();
-      expect(tokens).toHaveLength(6);
-      expect(tokens[5]).toMatch(/^\d{1,6}$/);
-      expect(tokens[5]).not.toBe(tokens[1]);
+      expect(tokens).toHaveLength(5);
+      // pinned clock: counter 60_000_000, so the winning retry is the
+      // previous window's token (counter 59_999_999)
+      expect(tokens[4]).toBe(totpToken(secret, 1_799_999_970_000));
     } finally {
       setSystemTime();
     }
@@ -421,7 +433,7 @@ describe("credentials and url", () => {
       const next = await resolve();
       setSystemTime(656_100_000);
       const prev = await resolve();
-      expect(minted.retryTokens).toEqual([next.token, prev.token]);
+      expect(minted.retryTokens).toEqual([prev.token, next.token]);
     } finally {
       for (const k of Object.keys(process.env)) delete process.env[k];
       Object.assign(process.env, saved);
@@ -490,6 +502,16 @@ describe("credentials and url", () => {
     expect(r.code).toBe(2);
     expect(r.stderr).toContain("mixed-case option name");
   });
+  test.each([
+    "otpauth://totp/x?secret=AAAA&secret=BBBB",
+    "otpauth://totp/x?secret=AAAA&digits=6&digits=8",
+  ])("an otpauth URI with a repeated option name exits 2: %s", async (uri) => {
+    kuma.state.twoFA = true;
+    writeConfig(sb, `totp_secret_command = "echo '${uri}'"`);
+    const r = await run(sb, list, creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("repeated option name");
+  });
   test("a totp_command that prints only spaces exits 2", async () => {
     kuma.state.twoFA = true;
     writeConfig(sb, `totp_command = "echo '   '"`);
@@ -514,6 +536,16 @@ describe("credentials and url", () => {
     }
   });
 
+  test("a blank UPTIME_KUMA_TOTP exits 2 instead of falling through", async () => {
+    kuma.state.twoFA = true;
+    writeConfig(sb, `totp_command = "echo 123456"`);
+    const r = await run(sb, list, {
+      ...creds(kuma.url),
+      UPTIME_KUMA_TOTP: "   ",
+    });
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("UPTIME_KUMA_TOTP is set but empty");
+  });
   test("an account without 2FA sends no token and runs no totp command", async () => {
     const marker = join(sb.dir, "ran");
     writeConfig(sb, `totp_command = "touch ${marker}; echo 123456"`);
