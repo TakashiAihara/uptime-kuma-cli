@@ -27,6 +27,7 @@
     - `testNotification (notification)` → `msg`
     - `addProxy (proxy, idOrNull)` → `id`
     - `deleteMonitor (id)` / `deleteNotification (id)` / `deleteProxy (id)`
+    - `addDockerHost (dockerHost, dockerHostID)` → `{ ok, msg, id }` — `dockerHostID` null adds a host, an existing id overwrites it (`DockerHost.save` reads `name` / `dockerType` / `dockerDaemon`); a successful save re-pushes `dockerHostList`. `testDockerHost (dockerHost)` → `{ ok, msg }` without re-pushing. `deleteDockerHost (id)` → `{ ok, msg }`, re-pushes `dockerHostList` and sets `docker_host` null on the monitors that used the host; an unknown or foreign id answers `ok:false "docker host not found"`
     - `getTags ()` → `tags` (`{ id, name, color }` rows)
     - `addTag ({ name, color })` → `tag`; `editTag ({ id, name, color })` → `tag` (overwrites both fields, `ok:false "Tag not found"` for an unknown id); `deleteTag (id)` answers ok even for an unknown id
     - `addMonitorTag (tagID, monitorID, value)` / `editMonitorTag (tagID, monitorID, value)` / `deleteMonitorTag (tagID, monitorID, value)`; none of them pushes `monitorList` again, so the CLI's pushed copy goes stale within a run (each command logs in once, so the next run sees the new state)
@@ -57,6 +58,7 @@
 - Monitor fields that hold secrets (`basic_auth_pass`, `oauth_client_secret`, `tlsKey`, `headers`, `body`, `grpcBody`, `grpcMetadata`, `mqttPassword`, `radiusPassword`, `radiusSecret`, `databaseConnectionString`, the Kuma 2.x fields `bearer_token`, `gamedigToken`, `rabbitmqPassword`, `sshPassword`, `sshPrivateKey` and `sshPassphrase`, and every `kafkaProducerSaslOptions` value other than `mechanism` / `username` / `awsRegion` / `accessKeyId`) print as `"***"` when non-empty; `pushToken` stays visible because pushers need it
 - A password inside a monitor `url` (`https://user:pass@host/`) prints as `***` in `monitors list` / `get` / `edit` and in the `publicGroupList` monitors of `status-pages get` / `save` (Kuma adds the url there when `sendUrl` is on)
 - `steamAPIKey` and `globalpingApiToken` in `settings get` / `settings set` output print as `"***"` when non-empty, and a password inside `primaryBaseURL` prints as `***` like a monitor url; these are the secrets among the general settings
+- The same redaction applies to a userinfo secret inside a docker host's `dockerDaemon` (`https://u:p@host:2376`) in every `docker-hosts` output, and to the daemon value Kuma's `testDockerHost` error `msg` can echo — a socket connect error carries `socketPath` verbatim and an axios error can carry the `tcp://`→`http://` patched baseURL, so both forms are masked in the exit-1 message
 
 ## Exit codes
 
@@ -150,6 +152,15 @@
 - `proxies add --protocol <http|https|socks|socks5|socks5h|socks4> --host <h> --port <p> [--username <u> --password-file <f>] [--default] [--apply-existing]`: prints `{ id }`
 - `proxies edit <id> [--set k=v]... [--password-file <f>]`: merges into the listed proxy (password kept as stored unless `--password-file` is given, which also turns `auth` on) and sends `addProxy (merged, id)`; prints `{ id }`
 - `proxies delete <id> --yes`: sends `deleteProxy` and prints `{ id, deleted: true }`; without `--yes` exits 2 before connecting. Kuma sets `proxy_id` to null on the monitors that used the proxy, so they stop using any proxy
+
+### docker-hosts
+
+- docker hosts come from the pushed `dockerHostList` (`DockerHost.toJSON` rows `{ id, userID, dockerDaemon, dockerType, name }`); `list` prints `[{ id, name, dockerType, dockerDaemon }]` sorted by id — `userID` is pushed but not printed
+- `docker-hosts add --name <n> --type <socket|tcp> --daemon <d>`: sends `addDockerHost (host, null)` and prints `{ id, name, dockerType, dockerDaemon }`; `--name` and `--daemon` must not be empty and `--type` is `socket` or `tcp` (exit 2 before connecting). The UI defaults a new host to `socket` + `/var/run/docker.sock`, but the CLI requires both flags explicitly
+- `docker-hosts edit <id> [--name n] [--type t] [--daemon d]`: at least one flag (exit 2 before connecting), and `--name` / `--daemon` must not be empty. `addDockerHost` overwrites every field it reads, so the flag not given keeps the stored value and the merged object goes out with the id; unknown id exits 1. Prints the merged row
+- `docker-hosts test <id>`: sends the stored `{ name, dockerType, dockerDaemon }` to `testDockerHost` and prints `{ id, ok: true, msg }` — Kuma's `Connected Successfully. Amount of containers: N` or `Connected Successfully, but there are no containers?`; a daemon that does not answer exits 1 with Kuma's error `msg`, with credential-bearing forms of the daemon masked inside it
+- `docker-hosts test --type <t> --daemon <d> [--name n]`: tests an unsaved configuration the same way, like the UI's test button before saving; `--name` defaults to empty and `--type` / `--daemon` are required. An id together with the flags exits 2
+- `docker-hosts delete <id> --yes`: sends `deleteDockerHost` and prints `{ id, deleted: true }`; without `--yes` exits 2 before connecting; an unknown id exits 1 with Kuma's `docker host not found`. Kuma sets `docker_host` to null on the monitors that used the host
 
 ### tags
 

@@ -118,7 +118,7 @@
 | CLI behaviour / event / field | 1.23.17 | 2.5.11 | impact on the CLI |
 |---|---|---|---|
 | `addProxy [config, id]`, `deleteProxy`, `proxyList` via `bean.export()`, protocols `http`, `https`, `socks`, `socks5`, `socks5h`, `socks4`, monitors lose `proxy_id` on delete (src/commands/proxies.ts) | 1.23.17/server/socket-handlers/proxy-socket-handler.js:1-60, server/proxy.js:9, 81, server/client.js:102-110 | unchanged apart from i18n `msg` (2.5.11/server/socket-handlers/proxy-socket-handler.js, server/proxy.js:15, 78, server/client.js:100-113) | none |
-| Docker hosts (`dockerHostList` push, `docker_host` ids validated, src/commands/monitors.ts) and API keys (not used) | 1.23.17/server/socket-handlers/docker-socket-handler.js, api-key-socket-handler.js | handlers unchanged apart from `msg`; API key hashing is now async (2.5.11/server/socket-handlers/api-key-socket-handler.js:23) | none |
+| Docker hosts (`dockerHostList` push, `docker_host` ids validated, src/commands/monitors.ts; `docker-hosts` list/add/edit/test/delete, src/commands/docker-hosts.ts) and API keys (not used) | 1.23.17/server/socket-handlers/docker-socket-handler.js, api-key-socket-handler.js | handlers unchanged apart from `msg`; API key hashing is now async (2.5.11/server/socket-handlers/api-key-socket-handler.js:23) | none |
 
 ## events / login
 

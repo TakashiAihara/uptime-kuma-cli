@@ -181,7 +181,11 @@ export function redactUrl(value: unknown): unknown {
     // unparseable: the userinfo boundary is unknown, so hide the whole value
     return value.includes("@") ? "***" : value;
   }
-  if (parsed.password === "") return value;
+  if (parsed.password === "") {
+    // an opaque-path parse like "u:p@host:port" has no host, so the userinfo
+    // boundary is unknowable — hide the whole value like the catch branch
+    return parsed.host === "" && value.includes("@") ? "***" : value;
+  }
   parsed.password = "***";
   return parsed.toString();
 }
