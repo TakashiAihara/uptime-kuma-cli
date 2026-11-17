@@ -212,7 +212,11 @@ function redactSecrets(monitor: Record<string, unknown>): Record<string, unknown
 async function fetchMonitor(s: KumaSession, id: number): Promise<Record<string, unknown>> {
   const res = await s.request("getMonitor", [id]);
   const monitor = res?.monitor;
-  if (monitor === null || typeof monitor !== "object") fail(1, `monitor ${id} not found`);
+  // a missing monitor answers ok:false before this; a non-object monitor is
+  // an unexpected shape, not "not found"
+  if (monitor === null || typeof monitor !== "object" || Array.isArray(monitor)) {
+    fail(70, "unexpected getMonitor response");
+  }
   return monitor;
 }
 

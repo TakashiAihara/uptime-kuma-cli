@@ -3564,6 +3564,25 @@ describe("monitors edit", () => {
     expect(kuma.state.monitors.find((m) => m.id === 7)!.name).toBe("Taba web");
   });
 
+  test.each([[{ ok: true }], [{ ok: true, monitor: 42 }]])(
+    "a malformed post-edit getMonitor response still exits 70: %p",
+    async (shape) => {
+      kuma.state.getMonitorResult = [null, shape];
+      const r = await run(sb, ["monitors", "edit", "7", "--set", "name=Taba web"], creds(kuma.url));
+      expect(r.code).toBe(70);
+      expect(r.stderr).toContain("unexpected getMonitor response");
+      expect(kuma.calls.filter((c) => c.event === "editMonitor")).toHaveLength(1);
+    },
+  );
+
+  test("a malformed pre-edit getMonitor response exits 70 before editMonitor", async () => {
+    kuma.state.getMonitorResult = { ok: true, monitor: "nope" };
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "name=Taba web"], creds(kuma.url));
+    expect(r.code).toBe(70);
+    expect(r.stderr).toContain("unexpected getMonitor response");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
   test.each([["parent=7"], ['parent="7"']])(
     "making a monitor its own parent is refused before connecting: %s",
     async (set) => {
