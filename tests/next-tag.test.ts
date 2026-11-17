@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import pkg from "../package.json" with { type: "json" };
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { nextTag } from "../scripts/next-tag.ts";
+import { nextTag, TAG_SHAPE } from "../scripts/next-tag.ts";
 
 /**
  * Every push to main that passes CI releases under the tag this returns, and install.sh
@@ -52,6 +52,33 @@ describe("nextTag", () => {
 
   test("reads a tag with a trailing carriage return", () => {
     expect(nextTag(["v0.1.0-rc.3\r"], FIRST)).toBe("v0.1.0-rc.4");
+  });
+
+  // The push trigger takes any v*, so a tag the release side refuses (leading zeros,
+  // numbers wider than 9 digits) can sit in git forever; it must not move the count (#4)
+  test("ignores tags the release shape refuses", () => {
+    expect(nextTag(["v0.1.0-rc.3", "v0.011.0", "v0.1.9999999999"], FIRST)).toBe("v0.1.0-rc.4");
+    expect(nextTag(["v0.011.0"], FIRST)).toBe("v7.7.7-rc.1");
+  });
+
+  // A candidate wider than the shape cannot be released, so the tag job has to stop
+  // here rather than build binaries publish-release.sh would refuse (#4)
+  test("refuses a next tag the release shape cannot express", () => {
+    expect(() => nextTag(["v0.1.999999999"], FIRST)).toThrow("9 digits at most");
+    expect(() => nextTag(["v0.1.0-rc.999999999"], FIRST)).toThrow("9 digits at most");
+  });
+
+  // One regex source is shared by next-tag.ts, publish-release.sh and release.yml;
+  // the shell and workflow literals are pinned in workflows.test.ts, so pinning this
+  // one against publish-release.sh's version_shape keeps all three equal (#4)
+  test("the tag shape is the one publish-release.sh enforces", () => {
+    const shell = readFileSync(
+      join(import.meta.dir, "..", "scripts", "publish-release.sh"),
+      "utf8",
+    );
+    const shellShape = /version_shape='([^']+)'/.exec(shell)?.[1];
+
+    expect(TAG_SHAPE.source).toBe(shellShape ?? "<version_shape not found>");
   });
 
   test("starts the first release candidate from the package.json version when no tag counts", () => {

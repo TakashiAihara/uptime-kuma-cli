@@ -78,6 +78,21 @@ function writeTool(name: string, body: string): void {
   chmodSync(file, 0o755);
 }
 
+// Asserts the arguments gh attestation verify needs to mean anything: the downloaded
+// binary (which must exist), --repo, and --signer-workflow pinned to release.yml
+const GH_ASSERT = `case "$1 $2" in
+  "attestation verify") ;;
+  *) echo "gh: unexpected args: $*" >&2; exit 1 ;;
+esac
+bin="$3"
+case "$bin" in
+  "\${UPTIME_KUMA_CLI_INSTALL_DIR}/.uptime-kuma-cli."*"/uptime-kuma-cli") ;;
+  *) echo "gh: $3 is not the downloaded binary" >&2; exit 1 ;;
+esac
+[ -f "$bin" ] || { echo "gh: $bin is not a file" >&2; exit 1; }
+[ "$4" = --repo ] && [ "$5" = TakashiAihara/uptime-kuma-cli ] || { echo "gh: missing --repo" >&2; exit 1; }
+[ "$6" = --signer-workflow ] && [ "$7" = TakashiAihara/uptime-kuma-cli/.github/workflows/release.yml ] || { echo "gh: missing --signer-workflow" >&2; exit 1; }`;
+
 beforeEach(() => {
   sb = sandbox();
   requests = [];
@@ -227,7 +242,7 @@ describe("install.sh", () => {
 
     test("stops with gh's reason attached when verification fails", async () => {
       startServer({ "v1.0.0": release(WORKING) });
-      writeTool("gh", `echo "HTTP 401: bad credentials" >&2\nexit 1`);
+      writeTool("gh", `${GH_ASSERT}\necho "HTTP 401: bad credentials" >&2\nexit 1`);
       placeOldInstall();
 
       const r = await install(verify);
@@ -239,7 +254,7 @@ describe("install.sh", () => {
 
     test("installs when verification passes", async () => {
       startServer({ "v1.0.0": release(WORKING) });
-      writeTool("gh", `exit 0`);
+      writeTool("gh", `${GH_ASSERT}\nexit 0`);
 
       const r = await install(verify);
 

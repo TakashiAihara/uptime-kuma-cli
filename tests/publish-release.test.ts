@@ -24,13 +24,21 @@ beforeEach(() => {
   git("init", "-q");
   git("commit", "-q", "--allow-empty", "-m", "x");
 
-  // A fake gh that records the arguments it was called with. CREATE / VIEW /
-  // PUBLISHED_SUMS / PUBLISHED_BINARIES / IS_DRAFT decide the outcome
+  // A fake gh that records the arguments it was called with and checks the --jq that
+  // shapes each answer the script parses: a call without it, or with a different one,
+  // fails here instead of letting the script read a shape it does not expect (#4).
+  // CREATE / VIEW / PUBLISHED_SUMS / PUBLISHED_ASSETS / IS_DRAFT decide the outcome
   const gh = join(sb.dir, "bin", "gh");
   writeFileSync(
     gh,
     `#!/bin/sh
 echo "$*" >> "${calls}"
+want_jq() {
+  case "$1" in
+    *--jq*"$2"*) ;;
+    *) echo "gh: $3 lacks --jq $2" >&2; exit 1 ;;
+  esac
+}
 if [ "$1" = api ]; then
   case "$*" in
     *"--method POST"*git/refs*)
@@ -40,9 +48,12 @@ if [ "$1" = api ]; then
       exit 0 ;;
     *"--method DELETE"*git/refs/tags/*) exit 0 ;;
     *git/ref/tags/*)
+      want_jq "$*" ".object.type" "git/ref/tags"
+      want_jq "$*" ".object.sha" "git/ref/tags"
       if [ -n "\${REF_READ_ERROR:-}" ]; then echo "\${REF_READ_ERROR}" >&2; exit 1; fi
       echo "\${REF_TYPE:-commit} \${REF_NOW:-\${REF_EXISTING:-}}" ;;
     *git/tags/*)
+      want_jq "$*" ".object.sha" "git/tags"
       if [ -n "\${TAG_READ_ERROR:-}" ]; then echo "\${TAG_READ_ERROR}" >&2; exit 1; fi
       echo "\${TAG_TARGET:-}" ;;
     *) exit 98 ;;
@@ -53,15 +64,22 @@ case "$1 $2" in
   "release create") exit "\${CREATE:-0}" ;;
   "release view")
     case "$*" in
-      *isDraft*) echo "\${IS_DRAFT:-false}" ;;
-      *assets*) printf '%s\n' "\${PUBLISHED_BINARIES:-}" ;;
+      *"--json isDraft"*)
+        want_jq "$*" ".isDraft" "release view --json isDraft"
+        echo "\${IS_DRAFT:-false}" ;;
+      *"--json assets"*)
+        want_jq "$*" ".assets" "release view --json assets"
+        want_jq "$*" ".digest" "release view --json assets"
+        printf '%s\n' "\${PUBLISHED_ASSETS:-}" ;;
       *)
         if [ -n "\${VIEW_ERROR:-}" ]; then echo "\${VIEW_ERROR}" >&2; exit 1; fi
         if [ "\${VIEW:-0}" != 0 ]; then echo "release not found" >&2; fi
         exit "\${VIEW:-0}" ;;
     esac ;;
   "release list")
+    want_jq "$*" ".tagName" "release list"
     if [ -n "\${LIST_ERROR:-}" ]; then echo "\${LIST_ERROR}" >&2; exit 1; fi
+    [ -z "\${LIST_WARN:-}" ] || echo "\${LIST_WARN}" >&2
     if [ -n "\${PUBLISHED_TAGS+x}" ]; then printf '%s\n' "\${PUBLISHED_TAGS}"; else git tag --list 'v*'; fi ;;
   "release download")
     [ -n "$PUBLISHED_SUMS" ] || exit 1
@@ -89,7 +107,7 @@ function publish(env: Record<string, string | undefined> = {}) {
       MAIN_SHA: head(),
       RELEASE_TRIGGER: "push",
       PUBLISHED_SUMS: published,
-      PUBLISHED_BINARIES: "uptime-kuma-cli-linux-x64",
+      PUBLISHED_ASSETS: "uptime-kuma-cli-linux-x64\tsha256:aaa",
       ...env,
     },
   });
@@ -162,10 +180,44 @@ describe("publish-release.sh", () => {
   test("does not succeed when binaries are missing even if SHA256SUMS match", () => {
     published(BUILT);
 
-    const r = publish({ CREATE: "1", PUBLISHED_BINARIES: "SHA256SUMS" });
+    const r = publish({ CREATE: "1", PUBLISHED_ASSETS: "SHA256SUMS\tsha256:bbb" });
 
     expect(r.exitCode).toBe(1);
     expect(r.stderr.toString()).toContain(`release ${TAG} has no asset uptime-kuma-cli-linux-x64`);
+  });
+
+  // Names alone are not enough: an asset under the right name with other bytes is not
+  // the published one (#4)
+  test("does not succeed when an attached asset's digest differs from SHA256SUMS", () => {
+    published(BUILT);
+
+    const r = publish({ CREATE: "1", PUBLISHED_ASSETS: "uptime-kuma-cli-linux-x64\tsha256:bbb" });
+
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr.toString()).toContain("different digest");
+  });
+
+  test("does not succeed when an attached asset carries no digest", () => {
+    published(BUILT);
+
+    const r = publish({ CREATE: "1", PUBLISHED_ASSETS: "uptime-kuma-cli-linux-x64" });
+
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr.toString()).toContain("different digest");
+  });
+
+  // gh's stderr is not release data: a warning line that happens to look like a tag must
+  // not become a version the new tag is compared against (#4)
+  test("does not read a tag-shaped warning on stderr as a published release", () => {
+    const r = publish({
+      MAIN_SHA: "0123456789abcdef0123456789abcdef01234567",
+      VIEW: "1",
+      PUBLISHED_TAGS: "",
+      LIST_WARN: "v0.0.1",
+    });
+
+    expect(r.exitCode).toBe(0);
+    expect(ghCalls()).toContain(`release create ${TAG} --target ${head()} --latest=false `);
   });
 
   test("fails rather than treating an empty SHA256SUMS as the same", () => {
@@ -531,8 +583,9 @@ describe("publish-release.sh: create the tag first to close the race (#14)", () 
   test("reads an existing tag at the ref its name says, and an annotated one at its tag object", () => {
     const tagObject = "fedcba9876543210fedcba9876543210fedcba98";
 
-    publish({ VIEW: "1", REF_EXISTING: tagObject, REF_TYPE: "tag", TAG_TARGET: head() });
+    const r = publish({ VIEW: "1", REF_EXISTING: tagObject, REF_TYPE: "tag", TAG_TARGET: head() });
 
+    expect(r.exitCode).toBe(0);
     const calls = ghCalls();
     expect(calls).toContain(`api repos/{owner}/{repo}/git/ref/tags/${TAG} `);
     expect(calls).toContain(`api repos/{owner}/{repo}/git/tags/${tagObject} `);
