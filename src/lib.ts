@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -206,6 +207,8 @@ type Config = {
   url?: string;
   username_command?: string;
   password_command?: string;
+  totp_command?: string;
+  totp_secret_command?: string;
 };
 
 export function loadConfig(): Config {
@@ -229,6 +232,8 @@ export function loadConfig(): Config {
     url: str(parsed.url),
     username_command: str(parsed.username_command),
     password_command: str(parsed.password_command),
+    totp_command: str(parsed.totp_command),
+    totp_secret_command: str(parsed.totp_secret_command),
   };
 }
 
@@ -262,12 +267,17 @@ export function firstSecretLine(text: string): string {
   return line.endsWith("\r") ? line.slice(0, -1) : line;
 }
 
-// Both secret env vars are stripped from the child's env so a username_command
+// Every secret env var is stripped from the child's env so a *_command
 // can never see the password and vice versa.
 async function runSecretCommand(command: string, timeoutMs: number, name: string): Promise<string> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined && key !== "UPTIME_KUMA_USERNAME" && key !== "UPTIME_KUMA_PASSWORD") {
+    if (
+      value !== undefined &&
+      key !== "UPTIME_KUMA_USERNAME" &&
+      key !== "UPTIME_KUMA_PASSWORD" &&
+      key !== "UPTIME_KUMA_TOTP"
+    ) {
       env[key] = value;
     }
   }
@@ -313,7 +323,123 @@ async function resolveSecret(
   return runSecretCommand(command, timeoutMs, envName);
 }
 
-export async function resolveCredentials(): Promise<{
+// RFC 4648 base32, case-insensitive; "=" padding and whitespace are ignored —
+// Kuma's prepare2FA strips the padding from the otpauth URI secret anyway.
+const BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+function base32Decode(input: string): Buffer {
+  const clean = input.toUpperCase().replace(/[\s=]/g, "");
+  const out = Buffer.alloc(Math.floor((clean.length * 5) / 8));
+  let buffer = 0;
+  let bits = 0;
+  let n = 0;
+  for (const ch of clean) {
+    const index = BASE32_ALPHABET.indexOf(ch);
+    if (index === -1) {
+      fail(2, "totp_secret_command produced a secret that is not base32");
+    }
+    buffer = (buffer << 5) | index;
+    bits += 5;
+    if (bits >= 8) {
+      bits -= 8;
+      out[n] = (buffer >> bits) & 0xff;
+      n += 1;
+      buffer &= (1 << bits) - 1;
+    }
+  }
+  if (n === 0) fail(2, "totp_secret_command produced an empty base32 secret");
+  return out.subarray(0, n);
+}
+
+// Kuma verifies the login token with notp.totp.verify(token, twofa_secret,
+// { window: 1, time: 30 }): HMAC-SHA1 over the 30-second counter, dynamic
+// truncation, 6 digits. The secret users hold is the base32 string from the
+// otpauth URI, which decodes to the stored key.
+export function totpToken(secret: string, atMs: number = Date.now()): string {
+  const key = base32Decode(secret);
+  const counter = Math.floor(atMs / 1000 / 30);
+  const message = Buffer.alloc(8);
+  message.writeBigUInt64BE(BigInt(counter));
+  const digest = createHmac("sha1", key).update(message).digest();
+  const offset = digest[19]! & 0x0f;
+  const binary =
+    ((digest[offset]! & 0x7f) << 24) |
+    ((digest[offset + 1]! & 0xff) << 16) |
+    ((digest[offset + 2]! & 0xff) << 8) |
+    (digest[offset + 3]! & 0xff);
+  return String(binary % 1_000_000).padStart(6, "0");
+}
+
+// totp_secret_command may print the bare base32 secret or the whole
+// otpauth:// URI a vault entry stores; both reduce to the secret value.
+function totpSecret(output: string): string {
+  const text = output.trim();
+  if (!text.toLowerCase().startsWith("otpauth://")) return text;
+  const raw = /[?&]secret=([^&\s#]+)/i.exec(text)?.[1];
+  if (raw === undefined) {
+    fail(2, "totp_secret_command printed an otpauth URI without a secret parameter");
+  }
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
+export type TotpResolution = {
+  token: string;
+  // Only the secret_command source can mint another token: Kuma rejects a
+  // token equal to the last accepted one and a TOTP repeats every 30 s, so a
+  // second login inside one window collides; the adjacent counter's token
+  // still verifies (Kuma's ±1 window) but differs.
+  nextWindowToken: (() => string) | null;
+};
+
+// Called only when the server answered tokenRequired, so a configured TOTP
+// source never runs for accounts without 2FA. Precedence: the env token, then
+// a command that prints a ready token, then a command that prints the secret
+// the CLI turns into one.
+export async function resolveTotp(): Promise<TotpResolution> {
+  const fromEnv = process.env.UPTIME_KUMA_TOTP;
+  if (fromEnv) return { token: fromEnv, nextWindowToken: null };
+  const config = loadConfig();
+  const timeoutMs = commandTimeoutMs();
+  if (config.totp_command !== undefined) {
+    const token = await runSecretCommand(config.totp_command, timeoutMs, "totp_command");
+    return { token, nextWindowToken: null };
+  }
+  if (config.totp_secret_command !== undefined) {
+    const output = await runSecretCommand(
+      config.totp_secret_command,
+      timeoutMs,
+      "totp_secret_command",
+    );
+    const secret = totpSecret(output);
+    return {
+      token: totpToken(secret),
+      nextWindowToken: () => totpToken(secret, Date.now() + 30_000),
+    };
+  }
+  fail(2, "login requires a 2FA token; set UPTIME_KUMA_TOTP, totp_command or totp_secret_command");
+}
+
+// A 2FA login retries `login` with a token and must carry the same
+// credentials; re-running a *_command could return a different secret, so the
+// resolution is cached for the rest of the connect() session. connect()
+// clears it on entry, which also keeps repeated in-process runs (the tests)
+// from seeing each other's values.
+let credentialsCache: Awaited<ReturnType<typeof resolveCredentialsFresh>> | undefined;
+
+export async function resolveCredentials() {
+  credentialsCache ??= await resolveCredentialsFresh();
+  return credentialsCache;
+}
+
+export function clearCredentialsCache() {
+  credentialsCache = undefined;
+}
+
+async function resolveCredentialsFresh(): Promise<{
   url: string;
   username: string;
   password: string;

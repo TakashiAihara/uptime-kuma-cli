@@ -1,5 +1,13 @@
 import { io, type Socket } from "socket.io-client";
-import { CliError, fail, resolveCredentials, sleep, socketTimeoutMs } from "./lib.ts";
+import {
+  CliError,
+  clearCredentialsCache,
+  fail,
+  resolveCredentials,
+  resolveTotp,
+  sleep,
+  socketTimeoutMs,
+} from "./lib.ts";
 
 export interface Monitor extends Record<string, unknown> {
   id: number;
@@ -440,6 +448,9 @@ export function parseMajorVersion(version: string | undefined): number {
 export async function connect(
   extraLists: readonly ("maintenanceList" | "statusPageList" | "apiKeyList")[] = [],
 ): Promise<KumaSession> {
+  // The credential cache exists for the 2FA retry inside this session; a new
+  // connect() must resolve fresh values instead of seeing the last one's.
+  clearCredentialsCache();
   const timeoutMs = socketTimeoutMs();
   const { url, username, password } = await resolveCredentials();
   const socket = io(url, {
@@ -591,7 +602,7 @@ export async function connect(
     await Promise.race([sleep(10), disconnected]);
   }
 
-  const login = await emitAck(
+  let login = await emitAck(
     socket,
     "login",
     [{ username, password, token: "" }],
@@ -599,7 +610,33 @@ export async function connect(
     disconnected,
   );
   if (login?.tokenRequired === true) {
-    fail(2, "login requires 2FA; this CLI does not support 2FA logins");
+    // Kuma 1.23.17 answers tokenRequired (not ok:false) when the account has
+    // 2FA and the login carried no token, and only then is a TOTP resolved —
+    // a totp_* command never runs for accounts without 2FA. The retry reuses
+    // the cached credentials so a *_command cannot return a different secret
+    // than the first attempt used.
+    const { url: _url, ...loginFields } = await resolveCredentials();
+    const totp = await resolveTotp();
+    login = await emitAck(
+      socket,
+      "login",
+      [{ ...loginFields, token: totp.token }],
+      timeoutMs,
+      disconnected,
+    );
+    // Credentials were already proven by the tokenless attempt, so an
+    // Invalid Token answer is about the token itself; only the CLI-generated
+    // secret path can mint the adjacent counter's token that both verifies
+    // (Kuma's ±1 window) and differs from the rejected one.
+    if (login?.ok === false && login?.msg === "Invalid Token!" && totp.nextWindowToken !== null) {
+      login = await emitAck(
+        socket,
+        "login",
+        [{ ...loginFields, token: totp.nextWindowToken() }],
+        timeoutMs,
+        disconnected,
+      );
+    }
   }
   if (login?.ok !== true) {
     const msg = typeof login?.msg === "string" ? login.msg : "login failed";

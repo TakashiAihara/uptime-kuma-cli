@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { Server } from "socket.io";
+import { totpToken } from "../../src/lib.ts";
 
 // Mimics the Uptime Kuma 1.23.17 Socket.IO server (server/server.js, server/client.js,
 // server/socket-handlers/proxy-socket-handler.js): event names, argument order, callback shapes,
@@ -239,8 +240,11 @@ export type FakeState = {
   // state.password — set it to simulate the account password having been
   // rotated after this socket logged in
   settingsPassword: string | null;
-  // login answers { tokenRequired: true } like an account with 2FA enabled
+  // the account has 2FA enabled: a login without token answers
+  // { tokenRequired: true }, a wrong or replayed one "Invalid Token!"
   twoFA: boolean;
+  // base32 TOTP secret the login token verifies against (user.twofa_secret)
+  twoFASecret: string;
   // addTag answer override; null uses the stored-tag answer
   addTagResult: Record<string, unknown> | null;
   // addMaintenance answer override; null uses the stored-row answer
@@ -437,6 +441,17 @@ const ADD_KEYS_2X = new Set([
   "wsSubprotocol",
 ]);
 
+// The base32 secret twoFASecret defaults to; tests compute expected tokens
+// with totpToken from src/lib.ts.
+export const FAKE_TOTP_SECRET = "AAAAAAAAAAAAAAAA";
+
+// notp.totp.verify(token, secret, { window: 1, time: 30 }) accepts the token
+// of the current 30-second counter or either neighbor.
+function totpVerify(secret: string, token: string, atMs = Date.now()): boolean {
+  const counter = Math.floor(atMs / 30_000);
+  return [counter - 1, counter, counter + 1].some((c) => totpToken(secret, c * 30_000) === token);
+}
+
 export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<FakeKuma> {
   const profile2x = init.profile === "2.x";
   const state: FakeState = {
@@ -503,6 +518,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     getSettingsResult: null,
     settingsPassword: null,
     twoFA: false,
+    twoFASecret: FAKE_TOTP_SECRET,
     addTagResult: null,
     addMaintenanceResult: null,
     addAPIKeyResult: null,
@@ -524,6 +540,8 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
   const apiCache = new Map<string, { status: number; body: string }>();
   // status_page.id is AUTOINCREMENT: deleted ids are never reused
   let nextStatusPageId = Math.max(0, ...state.statusPages.map((p) => p.id));
+  // user.twofa_last_token: the last accepted login token, rejected on reuse
+  let twofaLastToken: string | null = null;
 
   // monitor.toJSON always carries tags (the monitor_tag⋈tag join, [] when none)
   const tagsOf = (m: Monitor): MonitorTagRow[] =>
@@ -837,10 +855,17 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
       });
     };
 
-    handle("login", (data: { username: string; password: string }) => {
+    handle("login", (data: { username: string; token?: string; password: string }) => {
       if (data.username !== state.username || data.password !== state.password)
         return { ok: false, msg: "Incorrect username or password." };
-      if (state.twoFA) return { tokenRequired: true };
+      if (state.twoFA) {
+        const token = data.token;
+        if (!token) return { tokenRequired: true };
+        if (token === twofaLastToken || !totpVerify(state.twoFASecret, token)) {
+          return { ok: false, msg: "Invalid Token!" };
+        }
+        twofaLastToken = token;
+      }
       loggedIn = true;
       // afterLogin sets socket.userID = user.id; the fake's user id is 1
       (socket as { userID?: number }).userID = 1;

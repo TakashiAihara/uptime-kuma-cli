@@ -14,7 +14,7 @@
 
 - Socket.IO v4 client (`socket.io-client`) against the Kuma base URL, `transports: ["websocket"]`
 - Kuma 1.23 has no OpenAPI / REST API for management (only badge, push, status page and metrics are REST), so the CLI talks Socket.IO
-- Log in with `login` `{ username, password, token: "" }`; the callback returns `{ ok, msg }`
+- Log in with `login` `{ username, password, token: "" }`; the callback returns `{ ok, msg }`. With 2FA enabled Kuma answers `{ tokenRequired: true }` instead of `ok`; the CLI then resolves a TOTP (Configuration below) and re-sends `login` with `token` set — the tokenless first attempt is required because Kuma runs its token check whenever the login carries a token, even for `twofa_status === 0`, so a token sent up front would hit `notp.totp.verify` against an empty `twofa_secret`
 - After login the server pushes `monitorList` (object keyed by id), `maintenanceList` (object keyed by id), `notificationList` (array), `proxyList` (array), `dockerHostList` (array), `apiKeyList` (array of `APIKey.toPublicJSON` rows — `active` is the BOOLEAN column's 0/1, `status` is the computed `active` / `inactive` / `expired`, the stored secret `key` is never sent), then `statusPageList` (object keyed by id) about 500ms later, then one `heartbeatList (monitorID, beats)` and one `importantHeartbeatList (monitorID, beats)` per monitor. Then `Monitor.sendStats` emits per monitor in monitorList order `avgPing (monitorID, ms)`, `uptime (monitorID, 24, ratio)` and `uptime (monitorID, 720, ratio)`, plus `certInfo (monitorID, info_json)` only when a `monitor_tls_info` row exists; the sends are awaited one monitor at a time, `sendStats` also runs on every heartbeat so the pushes repeat, and `afterLogin`'s `for...in` sends the id as a string (the heartbeat path sends a number — the CLI accepts both). There is no pushed tag list: each monitor's `tags` is the `monitor_tag`⋈`tag` join (`{ id, monitor_id, tag_id, value, name, color }`, ordered by tag name) and the tag table itself is only readable through `getTags`
 - The CLI waits after login only for the lists the command reads: `monitorList`, `notificationList`, `proxyList` and `dockerHostList` for every command, `maintenanceList` for the maintenance commands, `apiKeyList` for the api-keys commands that check or print it, `statusPageList` for `maintenance status-pages`, every `status-pages` command and `settings set` when its `entryPage` override names a status page — waiting for the delayed `statusPageList` unconditionally would add its ~500ms to every command
 - Request events used, all with a trailing callback returning `{ ok, msg, ... }`:
@@ -44,12 +44,17 @@
 ## Configuration
 
 - `$XDG_CONFIG_HOME/uptime-kuma-cli/config.toml` (or `~/.config/uptime-kuma-cli/config.toml`)
-    - `url`, `username_command`, `password_command`
-- `*_command` runs with `sh -c`; the first stdout line, minus a trailing `\r`, is the secret (spaces are kept). An env value takes precedence and the command does not run
-- Accounts with 2FA are not supported: Kuma answers `tokenRequired` and the CLI exits 2
+    - `url`, `username_command`, `password_command`, `totp_command`, `totp_secret_command`
+- `*_command` runs with `sh -c`; the first stdout line, minus a trailing `\r`, is the value (spaces are kept). An env value takes precedence and the command does not run
+- 2FA login (TOTP): only after the tokenless `login` answers `tokenRequired` does the CLI resolve a token and retry `login`. The first configured source wins: `UPTIME_KUMA_TOTP`, then `totp_command`, then `totp_secret_command`; none configured exits 2 naming all three
+    - `totp_command` prints a ready one-time token; `totp_secret_command` prints the base32 secret — or a whole `otpauth://` URI — and the CLI derives the token itself: HMAC-SHA1 over the 30-second counter, 6 digits, the same shape `notp.totp.verify` checks with `{ window: 1, time: 30 }`, so ±1 period of clock skew is tolerated
+    - Kuma rejects a token equal to the last accepted one (`twofa_last_token`) and a TOTP repeats every 30 s, so two logins inside one window collide; on `Invalid Token!` a secret-minted token is retried once with the adjacent counter's value, which still verifies but differs. `UPTIME_KUMA_TOTP` / `totp_command` tokens cannot be re-minted, so pace those past the window like the login rate limit already requires
+    - a wrong token is an ordinary login failure: Kuma answers `{ ok: false, msg: "Invalid Token!" }` and the CLI exits 2
+    - the TOTP secret never lands in argv, stdout, stderr or the socket calls; command output is handled like the other `*_command` secrets (failure reports only that the command failed, timed out or printed nothing), and `UPTIME_KUMA_TOTP` is stripped from `*_command` children like the login secrets
+    - TOTP sources run only after `tokenRequired`, so accounts without 2FA never execute a `totp_*` command even when one is configured
 - Each command logs in once. Kuma limits logins to 20 per minute for the whole instance, so a loop of many commands can lock out the UI login for a while
 - With an `http://` URL the login travels in clear text; use `https://` when the path leaves a trusted network
-- Env: `UPTIME_KUMA_URL`, `UPTIME_KUMA_USERNAME`, `UPTIME_KUMA_PASSWORD`, `UPTIME_KUMA_TIMEOUT` (seconds, default 30, for connect + login + each request), `UPTIME_KUMA_COMMAND_TIMEOUT` (seconds, default 60), `UPTIME_KUMA_SHRINK_TIMEOUT` (seconds, default 600 — only `database shrink`'s ack wait; on 2.x VACUUM is not bounded by Kuma's own timeouts)
+- Env: `UPTIME_KUMA_URL`, `UPTIME_KUMA_USERNAME`, `UPTIME_KUMA_PASSWORD`, `UPTIME_KUMA_TOTP` (a ready one-time token for accounts with 2FA), `UPTIME_KUMA_TIMEOUT` (seconds, default 30, for connect + login + each request), `UPTIME_KUMA_COMMAND_TIMEOUT` (seconds, default 60), `UPTIME_KUMA_SHRINK_TIMEOUT` (seconds, default 600 — only `database shrink`'s ack wait; on 2.x VACUUM is not bounded by Kuma's own timeouts)
 - The username command does not see the password and vice versa
 
 ## Output
