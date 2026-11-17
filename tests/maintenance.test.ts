@@ -483,7 +483,7 @@ describe("maintenance", () => {
       expect(kuma.calls).toHaveLength(0);
     });
 
-    test("--start and --end on a cron window exits 2 before connecting", async () => {
+    test("--start and --end on a cron window exits 2 without sending addMaintenance", async () => {
       const r = await run(
         sb,
         [
@@ -503,7 +503,9 @@ describe("maintenance", () => {
       expect(r.code).toBe(2);
       expect(r.stderr).toContain("end date");
       expect(r.stderr).toContain("give only a start");
-      expect(kuma.calls).toHaveLength(0);
+      // the end-date refusal is a 1.x rule, checked once the version is known
+      expect(kuma.calls.map((c) => c.event)).toContain("login");
+      expect(callsOf("addMaintenance")).toHaveLength(0);
     });
 
     test("equal start and end in different formats exits 2 before connecting", async () => {
@@ -1545,6 +1547,22 @@ describe("maintenance", () => {
       expect(kuma.calls).toHaveLength(0);
     });
 
+    test.each(["0 9 * * 5#3", "0 9 * * 5#L"])(
+      "a croner 8 day-of-week form %p exits 2 once the 1.x version is known",
+      async (cron) => {
+        const f = writeJson("cron8-on-1x.json", { cron });
+        const r = await run(
+          sb,
+          ["maintenance", "add", "--title", "w", "--strategy", "cron", "--config-file", f],
+          creds(kuma.url),
+        );
+        expect(r.code).toBe(2);
+        expect(r.stderr).toContain("5 or 6 whitespace-separated cron fields");
+        expect(kuma.calls.map((c) => c.event)).toContain("login");
+        expect(callsOf("addMaintenance")).toHaveLength(0);
+      },
+    );
+
     test("lastDay1 is accepted in daysOfMonth", async () => {
       const f = writeJson("lastday.json", { daysOfMonth: ["lastDay1"] });
       const r = await run(
@@ -1664,7 +1682,9 @@ describe("maintenance", () => {
       );
       expect(r.code).toBe(2);
       expect(r.stderr).toContain("no greater than 31 for recurring-interval");
-      expect(kuma.calls).toHaveLength(0);
+      // the 31 cap is a 1.x rule, checked once the version is known
+      expect(kuma.calls.map((c) => c.event)).toContain("login");
+      expect(callsOf("addMaintenance")).toHaveLength(0);
     });
 
     test("recurring-interval accepts intervalDay 31", async () => {
@@ -1756,7 +1776,7 @@ describe("maintenance", () => {
       expect(sent.dateRange).toEqual(["2032-01-01T00:00:00"]);
     });
 
-    test("a dateRange end on a recurring strategy exits 2 before connecting", async () => {
+    test("a dateRange end on a recurring strategy exits 2 without sending addMaintenance", async () => {
       const f = writeJson("rec-end.json", {
         dateRange: ["2030-01-01T00:00:00", "2030-01-02T00:00:00"],
       });
@@ -1776,7 +1796,8 @@ describe("maintenance", () => {
       );
       expect(r.code).toBe(2);
       expect(r.stderr).toContain("end date");
-      expect(kuma.calls).toHaveLength(0);
+      expect(kuma.calls.map((c) => c.event)).toContain("login");
+      expect(callsOf("addMaintenance")).toHaveLength(0);
     });
 
     test("a dateRange with an offset in --config-file exits 2 before connecting", async () => {
