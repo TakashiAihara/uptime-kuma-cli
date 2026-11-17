@@ -68,9 +68,9 @@ describe("nextTag", () => {
     expect(() => nextTag(["v0.1.0-rc.999999999"], FIRST)).toThrow("9 digits at most");
   });
 
-  // One regex source is shared by next-tag.ts, publish-release.sh and release.yml;
-  // the shell and workflow literals are pinned in workflows.test.ts, so pinning this
-  // one against publish-release.sh's version_shape keeps all three equal (#4)
+  // One regex source is shared by next-tag.ts, publish-release.sh and release.yml:
+  // this pins the shell literal, and workflows.test.ts derives the workflow literals
+  // from TAG_SHAPE.source, keeping all three equal (#4)
   test("the tag shape is the one publish-release.sh enforces", () => {
     const shell = readFileSync(
       join(import.meta.dir, "..", "scripts", "publish-release.sh"),

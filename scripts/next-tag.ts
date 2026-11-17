@@ -20,8 +20,9 @@
  */
 type Version = readonly [major: number, minor: number, patch: number, rc: number];
 
-// The same text as publish-release.sh's version_shape; workflows.test.ts pins the
-// literals on the shell and workflow side equal to this pattern's source.
+// The canonical tag shape: next-tag.test.ts pins publish-release.sh's
+// version_shape to this source, and workflows.test.ts derives release.yml's
+// literals from it, keeping all three equal.
 export const TAG_SHAPE =
   /^v(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})(-rc\.(0|[1-9][0-9]{0,8}))?$/;
 

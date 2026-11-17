@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { CODERABBIT_CONTEXT } from "../scripts/coderabbit-gate.ts";
+import { TAG_SHAPE } from "../scripts/next-tag.ts";
 
 const WORKFLOWS = ["ci.yml", "codeql.yml", "coderabbit-review.yml", "release.yml"];
 const dir = resolve(import.meta.dir, "../.github/workflows");
@@ -309,14 +310,18 @@ describe("release.yml publish job", () => {
 
 // publish-release.sh strictly requires the tag shape after `:?` (no leading zeros, no
 // number wider than 9 digits). A looser shape on the workflow side would run checkout
-// and build to the end and only then fail in the script.
+// and build to the end and only then fail in the script. The literals below are
+// derived from TAG_SHAPE.source — next-tag.test.ts pins publish-release.sh's
+// version_shape to the same source — so the three cannot drift apart (#4)
+const RC_SHAPE = TAG_SHAPE.source.replace(
+  "(-rc\\.(0|[1-9][0-9]{0,8}))?",
+  "-rc\\.(0|[1-9][0-9]{0,8})",
+);
 describe("release.yml tag shape", () => {
   test("check the requested tag uses the same shape as publish-release.sh", () => {
     const run = stepRun("tag", "check the requested tag");
 
-    expect(run).toContain(
-      "shape='^v(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})(-rc\\.(0|[1-9][0-9]{0,8}))?$'",
-    );
+    expect(run).toContain(`shape='${TAG_SHAPE.source}'`);
     expect(run).not.toContain("[0-9]+\\.");
   });
 
@@ -324,9 +329,7 @@ describe("release.yml tag shape", () => {
   test("decide the tag checks the rc tag picked for reuse against the same shape", () => {
     const run = stepRun("tag", "decide the tag");
 
-    expect(run).toContain(
-      "grep -E '^v(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})-rc\\.(0|[1-9][0-9]{0,8})$'",
-    );
+    expect(run).toContain(`grep -E '${RC_SHAPE}'`);
   });
 });
 
