@@ -34,7 +34,7 @@ username_command = "infisical run --silent -- printenv UPTIME_KUMA_USERNAME"
 password_command = "infisical run --silent -- printenv UPTIME_KUMA_PASSWORD"
 ```
 
-- Accounts with 2FA (TOTP) work through `UPTIME_KUMA_TOTP` (a ready one-time token), `totp_command` (prints a ready token) or `totp_secret_command` (prints the base32 secret or a whole `otpauth://` URI — the CLI derives the token itself) in config.toml. The token is only sent after Kuma answers `tokenRequired`; on `Invalid Token!` a secret-derived token is retried once with the next 30-second window's value, so back-to-back commands still log in. The TOTP secret never appears in argv or output
+- Accounts with 2FA (TOTP) work through `UPTIME_KUMA_TOTP` (a ready one-time token), `totp_command` (prints a ready token) or `totp_secret_command` (prints the base32 secret or a whole `otpauth://` URI — the CLI derives the token itself) in config.toml. The token is only sent after Kuma answers `tokenRequired`; on `Invalid Token!` a secret-derived token is retried with the adjacent windows' values (next, then previous — the previous covers a client clock ahead of the server), so back-to-back commands still log in. The CLI keeps the TOTP secret out of argv, logs and the socket payload — the secret does pass through `totp_secret_command`'s stdout by design, so have the command read it from a file or keychain rather than embed it in the command string (an embedded secret sits in config.toml and the child's argv)
 
 - `*_command` runs with `sh -c`; the first stdout line is used. The username command does not see the password env and vice versa
 
@@ -157,7 +157,7 @@ uptime-kuma-cli api-keys delete 3 --yes
 - Monitor timing follows the server version detected at login: `interval` must be 20–2073600 s on Kuma 1.x but only >= 1 s on 2.x (no maximum), `timeout` must be positive on 1.x (0 would become interval × 800 s) but may be 0 on 2.x (Kuma turns it into 80% of the interval), and `retryInterval` must be >= 1 on 2.x. An unset `timeout` on `monitors add` defaults to the 2.x UI value — 10 for ping, 1 for kafka-producer, 48 for every other type — and 48 on 1.x. The timeout is capped at 80% of the interval, except a ping on 2.x, whose timeout must be 1–300 s and at least `ping_per_request_timeout` (2 by default) or the command exits 2
 - `monitors stats` reports Kuma's pushed stats like `beats latest` waits for heartbeats: `uptime24h` / `uptime30d` are 0–1 ratios over the 24h / 30d windows, `avgPing` is null when no beat has a ping, `certExpiresAt` / `certDaysRemaining` are null without a certificate — the wait for a monitor's certificate ends 500 ms after its own 30d uptime arrives, and missing stats (not a missing certificate) exit 2 naming the monitors
 - New monitors get the notifications marked default; every type except port / push gets the proxy flagged `default` (proxyId), and `--proxy-id` overrides it
-- Each command logs in once; Kuma allows 20 logins per minute per instance, so pace long loops. Accounts with 2FA log in via `UPTIME_KUMA_TOTP`, `totp_command` or `totp_secret_command` (see Configuration)
+- Each command logs in once — a 2FA account can take up to four `login` attempts inside it; Kuma allows 20 logins per minute per instance, so pace long loops. Accounts with 2FA log in via `UPTIME_KUMA_TOTP`, `totp_command` or `totp_secret_command` (see Configuration)
 
 ## Exit codes
 

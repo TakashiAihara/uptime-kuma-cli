@@ -6,8 +6,9 @@ import { run, type Result, type Sandbox } from "../helpers/run";
 // skipIf(on2x); the fix removes the skip.
 export const on2x = parseMajorVersion(process.env.UPTIME_KUMA_IT_KUMA_VERSION) >= 2;
 
-// Every CLI invocation logs in once and Kuma 1.23 allows 20 logins per minute
-// for the whole instance, so invocation starts are paced to stay under it.
+// Every CLI invocation logs in once (the integration admin has no 2FA) and
+// Kuma 1.23 allows 20 logins per minute for the whole instance, so
+// invocation starts are paced to stay under it.
 const WINDOW_MS = 60_000;
 const MAX_STARTS_PER_WINDOW = 15;
 const starts: number[] = [];

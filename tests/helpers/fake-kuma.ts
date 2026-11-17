@@ -1,7 +1,7 @@
+import { createHmac } from "node:crypto";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { Server } from "socket.io";
-import { totpToken } from "../../src/lib.ts";
 
 // Mimics the Uptime Kuma 1.23.17 Socket.IO server (server/server.js, server/client.js,
 // server/socket-handlers/proxy-socket-handler.js): event names, argument order, callback shapes,
@@ -245,6 +245,9 @@ export type FakeState = {
   twoFA: boolean;
   // base32 TOTP secret the login token verifies against (user.twofa_secret)
   twoFASecret: string;
+  // ms added to Date.now() when the login token is verified, modelling a
+  // server clock offset from the client's
+  twoFASkewMs: number;
   // addTag answer override; null uses the stored-tag answer
   addTagResult: Record<string, unknown> | null;
   // addMaintenance answer override; null uses the stored-row answer
@@ -441,15 +444,47 @@ const ADD_KEYS_2X = new Set([
   "wsSubprotocol",
 ]);
 
-// The base32 secret twoFASecret defaults to; tests compute expected tokens
-// with totpToken from src/lib.ts.
+// The base32 secret twoFASecret defaults to.
 export const FAKE_TOTP_SECRET = "AAAAAAAAAAAAAAAA";
 
 // notp.totp.verify(token, secret, { window: 1, time: 30 }) accepts the token
-// of the current 30-second counter or either neighbor.
+// of the current 30-second counter or either neighbor. The decode and HOTP
+// are deliberately not src/lib.ts's totpToken — the fake must agree with the
+// spec, not with the code under test.
+const B32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+function fakeB32Decode(secret: string): Buffer | null {
+  const bytes: number[] = [];
+  let acc = 0;
+  let nbits = 0;
+  for (const raw of secret) {
+    const ch = raw.toUpperCase();
+    if (ch === "=" || /\s/.test(ch)) continue;
+    const v = B32.indexOf(ch);
+    if (v === -1) return null;
+    acc = (acc << 5) | v;
+    nbits += 5;
+    while (nbits >= 8) {
+      nbits -= 8;
+      bytes.push((acc >> nbits) & 0xff);
+    }
+  }
+  return bytes.length === 0 ? null : Buffer.from(bytes);
+}
+
+function fakeHotp(secret: string, counter: number): string | null {
+  const key = fakeB32Decode(secret);
+  if (key === null) return null;
+  const msg = Buffer.alloc(8);
+  msg.writeBigUInt64BE(BigInt(counter));
+  const digest = createHmac("sha1", key).update(msg).digest();
+  const binary = digest.readUInt32BE(digest[19]! & 0x0f) & 0x7fffffff;
+  return String(binary).slice(-6);
+}
+
 function totpVerify(secret: string, token: string, atMs = Date.now()): boolean {
   const counter = Math.floor(atMs / 30_000);
-  return [counter - 1, counter, counter + 1].some((c) => totpToken(secret, c * 30_000) === token);
+  return [counter - 1, counter, counter + 1].some((c) => fakeHotp(secret, c) === token);
 }
 
 export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<FakeKuma> {
@@ -519,6 +554,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     settingsPassword: null,
     twoFA: false,
     twoFASecret: FAKE_TOTP_SECRET,
+    twoFASkewMs: 0,
     addTagResult: null,
     addMaintenanceResult: null,
     addAPIKeyResult: null,
@@ -861,7 +897,10 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
       if (state.twoFA) {
         const token = data.token;
         if (!token) return { tokenRequired: true };
-        if (token === twofaLastToken || !totpVerify(state.twoFASecret, token)) {
+        if (
+          token === twofaLastToken ||
+          !totpVerify(state.twoFASecret, token, Date.now() + state.twoFASkewMs)
+        ) {
           return { ok: false, msg: "Invalid Token!" };
         }
         twofaLastToken = token;

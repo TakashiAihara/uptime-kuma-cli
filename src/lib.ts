@@ -353,8 +353,10 @@ function base32Decode(input: string): Buffer {
 
 // Kuma verifies the login token with notp.totp.verify(token, twofa_secret,
 // { window: 1, time: 30 }): HMAC-SHA1 over the 30-second counter, dynamic
-// truncation, 6 digits. The secret users hold is the base32 string from the
-// otpauth URI, which decodes to the stored key.
+// truncation, then the last 6 characters of the decimal value — notp does
+// not zero-pad, so a binary below 100000 yields a shorter token and the
+// string compare needs the same shape. The secret users hold is the base32
+// string from the otpauth URI, which decodes to the stored key.
 export function totpToken(secret: string, atMs: number = Date.now()): string {
   const key = base32Decode(secret);
   const counter = Math.floor(atMs / 1000 / 30);
@@ -367,7 +369,8 @@ export function totpToken(secret: string, atMs: number = Date.now()): string {
     ((digest[offset + 1]! & 0xff) << 16) |
     ((digest[offset + 2]! & 0xff) << 8) |
     (digest[offset + 3]! & 0xff);
-  return String(binary % 1_000_000).padStart(6, "0");
+  const digits = String(binary);
+  return digits.slice(digits.length - 6);
 }
 
 // totp_secret_command may print the bare base32 secret or the whole
@@ -388,11 +391,13 @@ function totpSecret(output: string): string {
 
 export type TotpResolution = {
   token: string;
-  // Only the secret_command source can mint another token: Kuma rejects a
+  // Only the secret_command source can mint more tokens: Kuma rejects a
   // token equal to the last accepted one and a TOTP repeats every 30 s, so a
-  // second login inside one window collides; the adjacent counter's token
-  // still verifies (Kuma's ±1 window) but differs.
-  nextWindowToken: (() => string) | null;
+  // second login inside one window collides; the adjacent counters' tokens
+  // still verify (Kuma's ±1 window) but differ. Next window first, then the
+  // previous one, so a client clock running ahead of the server still has a
+  // retry inside the server's window.
+  retryTokens: (() => string)[];
 };
 
 // Called only when the server answered tokenRequired, so a configured TOTP
@@ -401,12 +406,12 @@ export type TotpResolution = {
 // the CLI turns into one.
 export async function resolveTotp(): Promise<TotpResolution> {
   const fromEnv = process.env.UPTIME_KUMA_TOTP;
-  if (fromEnv) return { token: fromEnv, nextWindowToken: null };
+  if (fromEnv) return { token: fromEnv, retryTokens: [] };
   const config = loadConfig();
   const timeoutMs = commandTimeoutMs();
   if (config.totp_command !== undefined) {
     const token = await runSecretCommand(config.totp_command, timeoutMs, "totp_command");
-    return { token, nextWindowToken: null };
+    return { token, retryTokens: [] };
   }
   if (config.totp_secret_command !== undefined) {
     const output = await runSecretCommand(
@@ -417,7 +422,10 @@ export async function resolveTotp(): Promise<TotpResolution> {
     const secret = totpSecret(output);
     return {
       token: totpToken(secret),
-      nextWindowToken: () => totpToken(secret, Date.now() + 30_000),
+      retryTokens: [
+        () => totpToken(secret, Date.now() + 30_000),
+        () => totpToken(secret, Date.now() - 30_000),
+      ],
     };
   }
   fail(2, "login requires a 2FA token; set UPTIME_KUMA_TOTP, totp_command or totp_secret_command");

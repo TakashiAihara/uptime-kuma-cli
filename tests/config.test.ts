@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setSystemTime, test } from "bun:test";
 import { readFileSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { join } from "node:path";
@@ -128,14 +128,14 @@ describe("credentials and url", () => {
       .filter((c) => c.event === "login")
       .map((c) => (c.args[0] as { token?: string }).token);
 
-  // A script that prints a fresh TOTP for the given secret, used as a
-  // totp_command because sh cannot compute one itself.
-  const writeTotpGen = (secret: string) => {
+  // A script that prints a fresh TOTP for the secret in IT_TOTP_SECRET, used
+  // as a totp_command because sh cannot compute one itself.
+  const writeTotpGen = () => {
     const gen = join(sb.dir, "gen-totp.ts");
     const lib = join(import.meta.dir, "..", "src", "lib.ts");
     writeFileSync(
       gen,
-      `import { totpToken } from ${JSON.stringify(lib)};\nconsole.log(totpToken(${JSON.stringify(secret)}, Date.now()));\n`,
+      `import { totpToken } from ${JSON.stringify(lib)};\nconst secret = process.env.IT_TOTP_SECRET;\nif (secret === undefined) process.exit(1);\nconsole.log(totpToken(secret, Date.now()));\n`,
     );
     return `${process.execPath} ${gen}`;
   };
@@ -159,24 +159,24 @@ describe("credentials and url", () => {
 
   test("totp_command's first output line is sent as the login token", async () => {
     kuma.state.twoFA = true;
-    writeConfig(sb, `totp_command = "${writeTotpGen(FAKE_TOTP_SECRET)}"`);
-    const r = await run(sb, list, creds(kuma.url));
+    writeConfig(sb, `totp_command = "${writeTotpGen()}"`);
+    const r = await run(sb, list, { ...creds(kuma.url), IT_TOTP_SECRET: FAKE_TOTP_SECRET });
     expect(r.code).toBe(0);
     const tokens = loginTokens();
     expect(tokens).toHaveLength(2);
-    expect(tokens[1]).toMatch(/^\d{6}$/);
+    expect(tokens[1]).toMatch(/^\d{1,6}$/);
   });
 
   test("totp_secret_command's secret is converted to a login token", async () => {
     kuma.state.twoFA = true;
     const secret = "JBSWY3DPEHPK3PXP";
     kuma.state.twoFASecret = secret;
-    writeConfig(sb, `totp_secret_command = "echo ${secret}"`);
-    const r = await run(sb, list, creds(kuma.url));
+    writeConfig(sb, `totp_secret_command = "printenv IT_TOTP_SECRET"`);
+    const r = await run(sb, list, { ...creds(kuma.url), IT_TOTP_SECRET: secret });
     expect(r.code).toBe(0);
     const tokens = loginTokens();
     expect(tokens).toHaveLength(2);
-    expect(tokens[1]).toMatch(/^\d{6}$/);
+    expect(tokens[1]).toMatch(/^\d{1,6}$/);
     // the secret itself never reaches the socket or the output
     expect(JSON.stringify(kuma.calls)).not.toContain(secret);
     expect(r.stderr + r.stdout).not.toContain(secret);
@@ -188,9 +188,9 @@ describe("credentials and url", () => {
     kuma.state.twoFASecret = secret;
     writeConfig(
       sb,
-      `totp_secret_command = "echo 'otpauth://totp/uptime-kuma:admin?secret=${secret}&issuer=uptime-kuma'"`,
+      `totp_secret_command = 'echo "otpauth://totp/uptime-kuma:admin?secret=$(printenv IT_TOTP_SECRET)&issuer=uptime-kuma"'`,
     );
-    const r = await run(sb, list, creds(kuma.url));
+    const r = await run(sb, list, { ...creds(kuma.url), IT_TOTP_SECRET: secret });
     expect(r.code).toBe(0);
     expect(loginTokens()).toHaveLength(2);
   });
@@ -199,7 +199,7 @@ describe("credentials and url", () => {
     kuma.state.twoFA = true;
     writeConfig(
       sb,
-      `totp_secret_command = "echo 'otpauth://totp/a:b?secret=${FAKE_TOTP_SECRET}%3D%3D'"`,
+      `totp_secret_command = 'echo "otpauth://totp/a:b?secret=%41%41%41%41%41%41%41%41%41%41%41%41%41%41%41%41"'`,
     );
     const r = await run(sb, list, creds(kuma.url));
     expect(r.code).toBe(0);
@@ -224,12 +224,12 @@ describe("credentials and url", () => {
     writeConfig(
       sb,
       [
-        `totp_command = "${writeTotpGen(secret)}"`,
+        `totp_command = "${writeTotpGen()}"`,
         // a valid base32 secret whose tokens do not match twoFASecret
         `totp_secret_command = "echo CCCCCCCCCCCCCCCC"`,
       ].join("\n"),
     );
-    const r = await run(sb, list, creds(kuma.url));
+    const r = await run(sb, list, { ...creds(kuma.url), IT_TOTP_SECRET: secret });
     expect(r.code).toBe(0);
   });
 
@@ -304,26 +304,60 @@ describe("credentials and url", () => {
     expect(second.stderr).toContain("Invalid Token!");
   });
 
-  test("a secret-derived token is retried once with the next window on Invalid Token!", async () => {
+  test("a secret-derived token retries the adjacent windows on Invalid Token!", async () => {
     kuma.state.twoFA = true;
-    // valid base32 but not twoFASecret, so the retry fails the same way
+    // valid base32 but not twoFASecret, so every retry fails the same way
     writeConfig(sb, `totp_secret_command = "echo CCCCCCCCCCCCCCCC"`);
     const r = await run(sb, list, creds(kuma.url));
     expect(r.code).toBe(2);
     expect(r.stderr).toContain("Invalid Token!");
     const tokens = loginTokens();
-    expect(tokens).toHaveLength(3);
+    expect(tokens).toHaveLength(4);
     expect(tokens[0]).toBe("");
-    expect(tokens[1]).toMatch(/^\d{6}$/);
-    expect(tokens[2]).toMatch(/^\d{6}$/);
-    expect(tokens[1]).not.toBe(tokens[2]);
+    expect(new Set(tokens.slice(1)).size).toBe(3);
+    for (const token of tokens.slice(1)) expect(token).toMatch(/^\d{1,6}$/);
   });
 
-  test("back-to-back logins through totp_secret_command both succeed", async () => {
+  test("a same-window relogin bumps the secret-derived token to the next counter", async () => {
     kuma.state.twoFA = true;
-    writeConfig(sb, `totp_secret_command = "echo ${FAKE_TOTP_SECRET}"`);
-    expect((await run(sb, list, creds(kuma.url))).code).toBe(0);
-    expect((await run(sb, list, creds(kuma.url))).code).toBe(0);
+    writeConfig(sb, `totp_secret_command = "printenv IT_TOTP_SECRET"`);
+    const env = { ...creds(kuma.url), IT_TOTP_SECRET: kuma.state.twoFASecret };
+    // pin the clock so both runs mint the same first token: the second run's
+    // first attempt replays it, and only the bumped token can pass
+    setSystemTime(1_800_000_000_000);
+    try {
+      expect((await run(sb, list, env)).code).toBe(0);
+      expect((await run(sb, list, env)).code).toBe(0);
+      const tokens = loginTokens();
+      expect(tokens).toHaveLength(5);
+      expect(tokens[3]).toBe(tokens[1]);
+      expect(tokens[4]).not.toBe(tokens[1]);
+    } finally {
+      setSystemTime();
+    }
+  });
+
+  test("a same-window relogin logs in when the server clock is behind", async () => {
+    kuma.state.twoFA = true;
+    const secret = "BBBBBBBBBBBBBBBB";
+    kuma.state.twoFASecret = secret;
+    // the fake's clock runs 20 s behind, so the client's next-window retry
+    // falls outside the server's ±1 window and only the previous-window
+    // retry verifies
+    kuma.state.twoFASkewMs = -20_000;
+    writeConfig(sb, `totp_secret_command = "printenv IT_TOTP_SECRET"`);
+    const env = { ...creds(kuma.url), IT_TOTP_SECRET: secret };
+    setSystemTime(1_800_000_000_000);
+    try {
+      expect((await run(sb, list, env)).code).toBe(0);
+      expect((await run(sb, list, env)).code).toBe(0);
+      const tokens = loginTokens();
+      expect(tokens).toHaveLength(6);
+      expect(tokens[5]).toMatch(/^\d{1,6}$/);
+      expect(tokens[5]).not.toBe(tokens[1]);
+    } finally {
+      setSystemTime();
+    }
   });
 
   test("an account without 2FA sends no token and runs no totp command", async () => {
