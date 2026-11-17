@@ -166,6 +166,11 @@ export type StatusPageRow = Record<string, unknown> & { id: number; title: strin
 // public shape (dateRange, timeRange, status, ...), not bean columns.
 export type MaintenanceRow = Record<string, unknown> & { id: number };
 
+// The apiKeyList push carries APIKey.toPublicJSON(): id, name, userID,
+// createdDate, active (the BOOLEAN column's 0/1), expires and the computed
+// status — the stored secret `key` is never sent.
+export type ApiKeyRow = Record<string, unknown> & { id: number };
+
 // The resolved stats of one monitor as `monitors stats` reports them: the
 // uptime values are Kuma's 0..1 ratios over its 24h and 30d windows,
 // avgPing is null when the monitor has no beats with a ping in 24h, and
@@ -231,6 +236,7 @@ export class KumaSession {
     readonly notificationList: NotificationRow[],
     readonly proxyList: ProxyRow[],
     readonly dockerHostList: DockerHostRow[],
+    readonly apiKeyList: ApiKeyRow[] | undefined,
     readonly statusPageList: Record<string, StatusPageRow> | undefined,
     readonly heartbeats: Map<number, BeatRow[]>,
     private readonly statsEvents: Map<number, MonitorStatEvents>,
@@ -295,6 +301,16 @@ export class KumaSession {
 
   dockerHostById(id: number): DockerHostRow | undefined {
     return this.dockerHosts().find((h) => h.id === id);
+  }
+
+  apiKeys(): ApiKeyRow[] {
+    const list = this.apiKeyList;
+    if (list === undefined) fail(70, "apiKeyList was not awaited");
+    return [...list].sort((a, b) => a.id - b.id);
+  }
+
+  apiKeyById(id: number): ApiKeyRow | undefined {
+    return this.apiKeys().find((k) => k.id === id);
   }
 
   statusPages(): StatusPageRow[] {
@@ -408,13 +424,16 @@ export function parseMajorVersion(version: string | undefined): number {
 }
 
 // monitorList, notificationList, proxyList and dockerHostList are pushed in
-// the same tick right after login, so every command waits for them. The
-// maintenance commands additionally name the lists they read: maintenanceList
-// for the window itself and statusPageList for the status-pages attach —
-// statusPageList arrives ~500ms later (afterLogin sleeps first), so waiting
-// for it unconditionally would add that latency to every command.
+// the same tick right after login, so every command waits for them. Commands
+// name the further pushed lists they read through extraLists:
+// maintenanceList for the maintenance commands, statusPageList for
+// `maintenance status-pages`, every `status-pages` command and `settings set`
+// when its `entryPage` override names a status page — statusPageList arrives
+// ~500ms later (afterLogin sleeps first), so waiting for it unconditionally
+// would add that latency to every command — and apiKeyList for the api-keys
+// commands that check or print it.
 export async function connect(
-  extraLists: readonly ("maintenanceList" | "statusPageList")[] = [],
+  extraLists: readonly ("maintenanceList" | "statusPageList" | "apiKeyList")[] = [],
 ): Promise<KumaSession> {
   const timeoutMs = socketTimeoutMs();
   const { url, username, password } = await resolveCredentials();
@@ -443,6 +462,7 @@ export async function connect(
     notificationList?: NotificationRow[];
     proxyList?: ProxyRow[];
     dockerHostList?: DockerHostRow[];
+    apiKeyList?: ApiKeyRow[];
     statusPageList?: Record<string, StatusPageRow>;
   } = {};
   const heartbeats = new Map<number, BeatRow[]>();
@@ -488,6 +508,9 @@ export async function connect(
   });
   socket.on("dockerHostList", (data: DockerHostRow[]) => {
     pushed.dockerHostList = data;
+  });
+  socket.on("apiKeyList", (data: ApiKeyRow[]) => {
+    pushed.apiKeyList = data;
   });
   socket.on("statusPageList", (data: Record<string, StatusPageRow>) => {
     pushed.statusPageList = data;
@@ -616,6 +639,7 @@ export async function connect(
     present("notificationList"),
     present("proxyList"),
     present("dockerHostList"),
+    wanted.has("apiKeyList") ? present("apiKeyList") : undefined,
     wanted.has("statusPageList") ? present("statusPageList") : undefined,
     heartbeats,
     statsEvents,
