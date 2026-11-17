@@ -101,6 +101,17 @@ describe("monitors list", () => {
     expect(out.find((m: any) => m.id === 2).url).toBe("https://dav.example.com");
   });
 
+  test("hides a schemeless user:pass@host value entirely", async () => {
+    kuma.state.monitors.find((m) => m.id === 7)!.url = "u1:fixture-hidden-u3@x.example.com:2375";
+    kuma.state.monitors.find((m) => m.id === 2)!.url = "https://user@x.example.com/";
+    const r = await run(sb, ["monitors", "list"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.stdout).not.toContain("fixture-hidden-u3");
+    const out = r.json();
+    expect(out.find((m: any) => m.id === 7).url).toBe("***");
+    expect(out.find((m: any) => m.id === 2).url).toBe("https://user@x.example.com/");
+  });
+
   test("--name filters case-insensitively by substring", async () => {
     const r = await run(sb, ["monitors", "list", "--name", "TAB"], creds(kuma.url));
     expect(r.code).toBe(0);

@@ -55,6 +55,21 @@ describe("docker-hosts", () => {
     expect(r.stdout).not.toContain(TCP_PW);
   });
 
+  test("list hides a schemeless userinfo daemon entirely", async () => {
+    kuma.state.dockerHosts = [
+      {
+        id: 3,
+        name: "bare",
+        dockerType: "tcp",
+        dockerDaemon: `u1:${TCP_PW}@docker.example.com:2375`,
+      },
+    ];
+    const r = await run(sb, ["docker-hosts", "list"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json()[0].dockerDaemon).toBe("***");
+    expect(r.stdout).not.toContain(TCP_PW);
+  });
+
   test("list prints null for missing fields", async () => {
     kuma.state.dockerHosts = [{ id: 7 }];
     const r = await run(sb, ["docker-hosts", "list"], creds(kuma.url));
