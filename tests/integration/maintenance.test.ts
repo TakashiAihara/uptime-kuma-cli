@@ -131,6 +131,18 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("maintenance (real Kuma)", () =
       expect(got.code).toBe(0);
       expect(got.json().cron).toBe("0 9 * * 5#3");
       expect(got.json().dateRange).toEqual(["2032-06-01T10:00:00", "2032-06-02T10:00:00"]);
+      // "#L" is croner 8's last-weekday nth form; the real server must take it
+      const edit = await cliRun(sb, [
+        "maintenance",
+        "edit",
+        String(id),
+        "--set",
+        "cron=0 9 * * 5#L",
+      ]);
+      expect(edit.code).toBe(0);
+      const got2 = await cliRun(sb, ["maintenance", "get", String(id)]);
+      expect(got2.code).toBe(0);
+      expect(got2.json().cron).toBe("0 9 * * 5#L");
       const del = await cliRun(sb, ["maintenance", "delete", String(id), "--yes"]);
       expect(del.code).toBe(0);
     },
