@@ -36,6 +36,13 @@ jobs:
       - uses: jdx/mise-action@08ae2a091c038e1e05ec6f5115dc5c69d5a2a6b8 # v5.1.2
       - run: bun install --frozen-lockfile
       - run: bun run check
+      # Fails on known vulnerabilities in the locked dependency tree. bun audit
+      # reads bun.lock, so it covers transitive deps that Dependabot's alerts
+      # cannot see (the dependency graph reads package.json, not bun.lock).
+      # Accepting a finding is a --ignore flag on this line, so each acceptance
+      # stays in this file's history and gets re-read on review.
+      - name: dependency audit
+        run: bun audit
 
   # Whole-project and PR-diff line coverage gates (issue #59). fetch-depth 0 so
   # `git diff <base>...HEAD` can find the merge base.

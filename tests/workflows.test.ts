@@ -363,6 +363,51 @@ describe("release.yml: the artifact build uploads (#13)", () => {
   });
 });
 
+describe("ci.yml dependency audit", () => {
+  const ci = () =>
+    Bun.YAML.parse(read("ci.yml")) as {
+      jobs: {
+        check: {
+          if?: string;
+          "continue-on-error"?: boolean;
+          steps: {
+            name?: string;
+            run?: string;
+            if?: string;
+            "continue-on-error"?: boolean;
+          }[];
+        };
+      };
+    };
+
+  // bun audit is the only vulnerability gate for the transitive tree —
+  // Dependabot's alerts read package.json, not bun.lock. Removing the step
+  // silently drops that coverage, so pin that the check job still runs it
+  // and cannot be told to skip it or swallow its failure. The run line may
+  // carry the --ignore flags README documents for accepting a finding; the
+  // value takes advisory-ID characters only, so a shell operator like `||`
+  // cannot be smuggled in to mask the failure.
+  const AUDIT_RUN = /^bun audit(?: --ignore[= ][A-Za-z0-9-]+)*$/;
+
+  test("the check job fails on known vulnerabilities in bun.lock", () => {
+    const audit = ci().jobs.check.steps.find((s) => s.name === "dependency audit");
+
+    expect(audit?.run?.trim()).toMatch(AUDIT_RUN);
+    expect(audit?.["continue-on-error"]).toBeUndefined();
+    expect(audit?.if).toBeUndefined();
+  });
+
+  test("the check job cannot skip or ignore the audit step's failure", () => {
+    expect(ci().jobs.check["continue-on-error"]).toBeUndefined();
+    expect(ci().jobs.check.if).toBeUndefined();
+  });
+
+  test("the audit pin rejects run lines that mask a failure", () => {
+    expect("bun audit || true").not.toMatch(AUDIT_RUN);
+    expect("bun audit --ignore=123||true").not.toMatch(AUDIT_RUN);
+  });
+});
+
 describe("release.yml: publish the checked commit and artifact as is (second round of #13)", () => {
   type Step = {
     id?: string;

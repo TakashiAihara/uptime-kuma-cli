@@ -1,0 +1,55 @@
+# What Dependabot watches here, and what it does not.
+#
+# `github-actions` covers the workflows. Every action is pinned to a commit with
+# the version in a trailing comment — the pinning test in tests/workflows.test.ts
+# enforces it — and that comment is exactly what Dependabot needs to know what
+# to bump. A fix upstream does not reach us on its own; this is what moves them.
+#
+# `bun` covers package.json and bun.lock at the root.
+#
+# Things this file does not cover, all worth knowing before trusting it:
+#
+#   - Bun has version updates but no security updates (GitHub's supported
+#     ecosystems table marks bun security updates unsupported). Nothing here is
+#     ever fixed for us by Dependabot; the weekly pull request is the only
+#     thing that carries a fix in. The `bun audit` step in ci.yml is the
+#     vulnerability gate.
+#   - The dependency graph reads package.json, not bun.lock, so alerts cover
+#     the packages we name ourselves and not the tree beneath them. A vulnerable
+#     transitive dep raises no alert — `bun audit` covers it instead.
+#   - `uses: docker://...` is outside every ecosystem, so the actionlint image
+#     in ci.yml is not covered; bumping it stays manual.
+#   - `uses: TakashiAihara/opencode-review/...@main` is a branch ref, not a
+#     version, so Dependabot leaves it alone by design.
+#
+# Dependabot's own bun parses bun.lock `lockfileVersion` up to 3 (bun 1.4 writes
+# 2). A future bun that writes more turns every update job into a failing job
+# rather than a pull request; tests/dependabot.test.ts is what makes that loud.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # One pull request rather than several. The actions move together often
+    # enough that separate ones would mostly be noise, and each still shows its
+    # own version change.
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci
+
+  - package-ecosystem: bun
+    directory: /
+    schedule:
+      interval: weekly
+    # Minor and patch arrive together, majors one at a time. A batch of small
+    # bumps gets read once; a major on its own is the only way a major gets
+    # read at all.
+    groups:
+      minor-and-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    commit-message:
+      prefix: deps
