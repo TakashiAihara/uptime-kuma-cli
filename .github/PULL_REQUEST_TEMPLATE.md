@@ -8,9 +8,11 @@ Closes #N
 ## Verification
 
 <!-- Append the result to each item: pass/fail counts for the
-integration runs, percentages for coverage. If a check does not apply
-to this diff, say so instead of leaving the box silently unchecked.
-Commands: README "Testing" and "Integration tests". -->
+integration runs, percentages for coverage. The two images are the
+ones in CI's `integration` matrix — update the tags here when it
+moves. If a check does not apply to this diff, say so instead of
+leaving the box silently unchecked. Commands: README "Testing" and
+"Integration tests". -->
 
 - [ ] `bun run check` — typecheck, lint, format check, unit tests
 - [ ] `bun run test:integration` on `louislam/uptime-kuma:1.23.17`
@@ -21,11 +23,12 @@ Commands: README "Testing" and "Integration tests". -->
 ## Reviews
 
 <!-- One row per review round — update the table as reviews land so it
-is current at merge. CodeRabbit and opencode review every push;
-`coderabbit-review` and `opencode / review` are the required checks
-(the mutation report is informational only). Record the commit that
-was reviewed and what was done with its findings: fixed (and where),
-rebutted (with the evidence), or deferred to a follow-up issue. -->
+is current at merge. opencode reviews every push; CodeRabbit reviews
+every push to a non-draft PR (drafts are skipped). `coderabbit-review`
+and `opencode / review` are the required checks (the mutation report
+is informational only). Record the commit that was reviewed and what
+was done with its findings: fixed (and where), rebutted (with the
+evidence), or deferred to a follow-up issue. -->
 
 | Reviewer | Commit | Findings | Disposition |
 | --- | --- | --- | --- |
