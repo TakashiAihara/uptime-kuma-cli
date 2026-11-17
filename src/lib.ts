@@ -429,11 +429,11 @@ export type TotpResolution = {
   // Only the secret_command source can mint more tokens: Kuma rejects a
   // token equal to the last accepted one and a TOTP repeats every 30 s, so a
   // second login inside one window collides; the adjacent counters' tokens
-  // still verify (Kuma's ±1 window) but differ. The previous window goes
-  // first: its code has usually rotated out of the authenticator app, so
-  // spending it is unlikely to collide with a code the user still sees;
-  // the next window's code stays unused unless the previous one cannot
-  // verify.
+  // verify while the skew stays inside Kuma's ±1 window, and differ. The
+  // previous window goes first: its code has usually rotated out of the
+  // authenticator app, so spending it is unlikely to collide with a code
+  // the user still sees; the next window's code stays unused unless the
+  // previous one cannot verify.
   retryTokens: string[];
 };
 
