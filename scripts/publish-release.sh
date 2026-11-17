@@ -116,13 +116,13 @@ refuse_higher_than_existing() {
       ;;
   esac
 
-  # gh's stderr comes along so a failure can be reported in gh's own words. A warning it prints
-  # on success stays in there too, and the shape below drops it before it is read as a version.
-  listed="$(gh release list --exclude-drafts --limit 1000 --json tagName --jq '.[].tagName' 2>&1)" || {
+  # stderr goes to its own file like every other parsed gh call: a warning a successful
+  # list prints must not be read as a tag name, and a failure is reported in gh's words.
+  if ! listed="$(gh release list --exclude-drafts --limit 1000 --json tagName --jq '.[].tagName' 2>"${gh_err}")"; then
     echo "could not read the list of published releases:" >&2
-    echo "$listed" >&2
+    cat "${gh_err}" >&2
     exit 1
-  }
+  fi
   # Both greps exit 1 on an empty result: no published release carries a tag of this shape, or
   # nothing is left once $TAG itself is taken out. Either way there is no partner to compare
   # against, so nothing is refused. $TAG is taken out only for the moment between the view above
@@ -350,17 +350,33 @@ gh release download "$TAG" --pattern SHA256SUMS --dir "$published" \
   || { echo "release ${TAG} exists without SHA256SUMS; fix or delete it by hand" >&2; exit 1; }
 
 if cmp -s dist/SHA256SUMS "${published}/SHA256SUMS"; then
-  # Matching sums only say the sums match. Read the asset list too (downloading 4 binaries to
-  # look at names would cost 300MB on every re-run), so a release carrying SHA256SUMS and,
-  # say, two of four binaries is not read as the published one.
-  assets="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
+  # Matching sums only say the sums match. Read each asset's name and digest (downloading 4
+  # binaries to look at them would cost 300MB on every re-run), so a release carrying
+  # SHA256SUMS and, say, two of four binaries, or the right names over other bytes, is not
+  # read as the published one.
+  assets="$(gh release view "$TAG" --json assets --jq '.assets[] | "\(.name)\t\(.digest)"')"
   # sha256sum writes "hash  name" and "hash *name"; the last field is the asset name either way
   names="$(awk '{print $NF}' "${published}/SHA256SUMS" | tr -d '*')"
   [ -n "$names" ] || { echo "release ${TAG} has an empty SHA256SUMS; fix or delete it by hand" >&2; exit 1; }
-  for name in $names; do
-    printf '%s\n' "$assets" | grep -Fxq -- "$name" \
+  while read -r sum file; do
+    name="${file#\*}"
+    # The x prefix marks "the asset is there" apart from an empty digest field
+    attached="$(printf '%s\n' "$assets" | awk -F '\t' -v n="$name" '$1 == n { print "x" $2; exit }')"
+    [ -n "$attached" ] \
       || { echo "release ${TAG} has no asset ${name}; fix or delete it by hand" >&2; exit 1; }
-  done
+    # A missing digest is not a different one: a gh that cannot read the digest field
+    # makes jq print null, and "fix or delete" would aim the operator at a release
+    # that may be fine
+    case "${attached#x}" in
+      "" | "null")
+        echo "release ${TAG} reports no digest for asset ${name}; gh may be too old to read digests, verify by hand" >&2
+        exit 1 ;;
+      "sha256:${sum}") ;;
+      *)
+        echo "release ${TAG} has asset ${name} with a different digest; fix or delete it by hand" >&2
+        exit 1 ;;
+    esac
+  done < "${published}/SHA256SUMS"
   echo "release ${TAG} is already published with the same SHA256SUMS; nothing to do"
   released=true
   exit 0
