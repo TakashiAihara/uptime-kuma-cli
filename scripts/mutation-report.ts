@@ -25,6 +25,10 @@ const DEFAULT_TIMEOUT = 300;
 // per mutant instead of the whole suite. tests/mutation-report.test.ts fails
 // when a new src file has no entry here.
 export const MUTATION_TESTS: Record<string, { cmd: string; timeout: number }> = {
+  "src/commands/api-keys.ts": {
+    cmd: "bun test tests/api-keys.test.ts",
+    timeout: 60,
+  },
   "src/commands/beats.ts": { cmd: "bun test tests/beats.test.ts", timeout: 60 },
   "src/commands/docker-hosts.ts": {
     cmd: "bun test tests/docker-hosts.test.ts",
@@ -59,10 +63,15 @@ export const MUTATION_TESTS: Record<string, { cmd: string; timeout: number }> = 
     timeout: 60,
   },
   "src/kuma.ts": {
-    cmd: "bun test tests/monitors.test.ts tests/tags.test.ts tests/settings.test.ts tests/docker-hosts.test.ts",
+    cmd: "bun test tests/monitors.test.ts tests/tags.test.ts tests/settings.test.ts tests/docker-hosts.test.ts tests/api-keys.test.ts",
     timeout: 180,
   },
-  "src/lib.ts": { cmd: "bun test tests/config.test.ts tests/tags.test.ts", timeout: 60 },
+  // the local-datetime helpers live here and are exercised through the
+  // maintenance and api-keys commands
+  "src/lib.ts": {
+    cmd: "bun test tests/config.test.ts tests/tags.test.ts tests/maintenance.test.ts tests/api-keys.test.ts",
+    timeout: 300,
+  },
   "src/timezones.ts": { cmd: "bun test tests/settings.test.ts", timeout: 60 },
   "src/version.ts": { cmd: "bun test tests/version-flag.test.ts", timeout: 60 },
 };

@@ -1,6 +1,6 @@
 # uptime-kuma-cli
 
-CLI for Uptime Kuma 1.23 over its Socket.IO API: monitors, beats, status changes, notifications, proxies, docker hosts, maintenance windows, tags, status pages and settings.
+CLI for Uptime Kuma 1.23 over its Socket.IO API: monitors, beats, status changes, notifications, proxies, docker hosts, maintenance windows, tags, status pages, API keys and settings.
 
 Existing CLIs cover monitors but not proxies, notification tests, or status changes; see `docs/design/cli.md` for the comparison and the full specification.
 
@@ -123,6 +123,12 @@ uptime-kuma-cli status-pages delete status --yes
 uptime-kuma-cli settings get
 uptime-kuma-cli settings set --set keepDataPeriodDays=90 --set 'tlsExpiryNotifyDays=[7,14,21]'
 uptime-kuma-cli settings set --config-file settings.json
+
+uptime-kuma-cli api-keys list
+uptime-kuma-cli api-keys add --name "ci metrics" --expires 2027-01-01T00:00
+uptime-kuma-cli api-keys enable 3
+uptime-kuma-cli api-keys disable 3
+uptime-kuma-cli api-keys delete 3 --yes
 ```
 
 - `monitors add` and `tags add` exit 3 and send nothing when the same name exists; `maintenance add` does the same for a title, `status-pages add` for a slug, `status-pages save` when the file's slug belongs to another page; `monitors tag` exits 3 when the same tag+value is already attached. `monitors add --tag <id[:value]>` attaches tags at creation
@@ -132,6 +138,7 @@ uptime-kuma-cli settings set --config-file settings.json
 - `status-pages save` merges the JSON file over the fetched page config and replaces the whole public group set — groups not listed are deleted; a `get` output's `publicGroupList` can be fed back as the file's `publicGroupList` (monitor `url`s in the file are dropped — 2.x would store them as custom URLs); when the file omits `publicGroupList` on Kuma 2.x, a custom monitor URL set in the UI survives the save — the CLI reads the public route unredacted and sends the public `url` back only when it differs from the monitor's own (a `sendUrl`-off monitor exposes no public url, so its custom URL cannot be detected and is cleared). The file accepts the save keys of both Kuma versions: the six refresh/analytics keys (`autoRefreshInterval`, `rssTitle`, `showOnlyLastHeartbeat`, `analyticsId`, `analyticsScriptUrl`, `analyticsType`) exit 2 on 1.x and `googleAnalyticsId` exits 2 on 2.x. If the read-back after a successful save fails, the sent config is printed with a stderr warning and exit code 0 — an unexpected response shape on the read-back is not degraded and still exits 70
 - `settings set` sends the whole merged settings object like the UI does — a partial object would reset `entryPage`, toggle `nscd` and could disconnect other clients; precedence is fetched < `--config-file` < `--set`. The editable keys follow the connected Kuma version: `domainExpiryNotifyDays` and `globalpingApiToken` need 2.x, `dnsCache` is 1.x-only, and a key for the other version exits 2 after connect. `steamAPIKey` and `globalpingApiToken` only go through `--config-file`, the literal `"***"` is refused there, and both print as `***`; a `primaryBaseURL` password prints as `***` too, is refused in `--set` (use `--config-file`) and its masked form is refused when fed back, and any `?` / `#` is refused; `serverTimezone` accepts only the names the connected version's UI offers that Kuma also takes, case-sensitively; turning `disableAuth` on re-checks the login password and turning it back off disconnects other clients; `chromeExecutable` / `nscd` changes take effect immediately; if the post-save re-read fails the sent object is printed with a warning and exit code 0
 - Push monitors get their token in the same `add` call; the output carries `pushToken` and `pushUrl`
+- `api-keys add` prints the clear key once — Kuma stores only its hash, so it cannot be read again; `--expires` takes a local ISO datetime without an offset or fractional seconds and is stored in the UI's `yyyy-MM-dd HH:mm:ss` form, omitting it means the key never expires. The first add also switches `/metrics` to API-key-only auth — login credentials stop working there and deleting every key does not switch it back
 - `--paused` creates the monitor without starting it (push to a paused monitor returns HTTP 404, so resume before the pusher starts)
 - Kuma only notifies on status changes; with `resendInterval` 0 a monitor that stays down does not notify again
 - Notification configs, proxy passwords and secret monitor fields (basic auth, OAuth secret, TLS key, headers, body, ...) are never printed; pass secrets with `--config-file` / `--password-file`. The Kuma 2.x monitor secrets `bearer_token`, `gamedigToken`, `rabbitmqPassword`, `sshPassword`, `sshPrivateKey` and `sshPassphrase` print as `***` the same way

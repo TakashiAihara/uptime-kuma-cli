@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { Command, CommanderError } from "commander";
+import { registerApiKeys } from "./commands/api-keys.ts";
 import { registerBeats, registerEvents } from "./commands/beats.ts";
 import { registerDockerHosts } from "./commands/docker-hosts.ts";
 import { registerMaintenance } from "./commands/maintenance.ts";
@@ -31,6 +32,7 @@ function buildProgram(): Command {
   registerMaintenance(program);
   registerStatusPages(program);
   registerSettings(program);
+  registerApiKeys(program);
 
   return program;
 }

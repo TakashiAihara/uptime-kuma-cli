@@ -1,5 +1,14 @@
 import { Option, type Command } from "commander";
-import { fail, parseId, parseSets, printJson, readJsonFile } from "../lib.ts";
+import {
+  compareLocalDateTimes,
+  fail,
+  hasOffsetDesignator,
+  isLocalDateTime,
+  parseId,
+  parseSets,
+  printJson,
+  readJsonFile,
+} from "../lib.ts";
 import { connect, type KumaSession } from "../kuma.ts";
 
 // The six strategies the 1.23.17 EditMaintenance.vue picker offers.
@@ -14,58 +23,8 @@ const STRATEGIES = [
 
 const collect = (value: string, previous: string[]): string[] => [...previous, value];
 
-// --start/--end are ISO 8601 local datetimes: Kuma stores the strings and
-// reads them as local time in timezoneOption (dayjs.tz in getStatus, the
-// single-window croner job), so an offset designator would be misparsed —
-// the UI's datetime-local input never sends one, and neither does the CLI.
-const OFFSET_DATETIME =
-  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?([zZ]|[+-]\d{2}(:\d{2}|\d{2})?)$/;
-
-const hasOffset = (value: string): boolean => OFFSET_DATETIME.test(value);
-
-const LOCAL_PARTS = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?$/;
-
-// Date.parse rolls an impossible day into the next month and engines differ
-// on T24:00, so the calendar fields are checked directly.
-const isLocalDateTime = (value: unknown): value is string => {
-  if (typeof value !== "string") return false;
-  const m = LOCAL_PARTS.exec(value);
-  if (m === null) return false;
-  const [, y, mo, d, h, mi] = m;
-  const year = Number(y);
-  const month = Number(mo);
-  const day = Number(d);
-  const hour = Number(h);
-  const minute = Number(mi);
-  const second = m[6] === undefined ? 0 : Number(m[6]);
-  if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) return false;
-  const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
-  const dim = month === 2 ? (leap ? 29 : 28) : [4, 6, 9, 11].includes(month) ? 30 : 31;
-  return day >= 1 && day <= dim;
-};
-
-// Ordering must not go through Date.parse: it resolves the offset-free
-// strings in the CLI host's timezone, where DST can reorder local times.
-// Compare the fields instead; callers run isLocalDateTime first.
-function compareLocalDateTimes(a: string, b: string): number {
-  const pa = LOCAL_PARTS.exec(a);
-  const pb = LOCAL_PARTS.exec(b);
-  if (pa === null || pb === null) return Number.NaN;
-  for (let i = 1; i <= 6; i++) {
-    const na = Number(pa[i] ?? "0");
-    const nb = Number(pb[i] ?? "0");
-    if (na !== nb) return na < nb ? -1 : 1;
-  }
-  const fa = pa[7] ?? "";
-  const fb = pb[7] ?? "";
-  const width = Math.max(fa.length, fb.length);
-  const sa = fa.padEnd(width, "0");
-  const sb = fb.padEnd(width, "0");
-  return sa === sb ? 0 : sa < sb ? -1 : 1;
-}
-
 function parseIsoDateTime(value: string, flag: string): string {
-  if (hasOffset(value)) {
+  if (hasOffsetDesignator(value)) {
     fail(
       2,
       `${flag} must be local time in the maintenance timezone without an offset, got "${value}"`,
@@ -278,7 +237,7 @@ function validateMaintenance(
     // here the same way the flags refuse them. null means "no bound".
     for (const v of m.dateRange as unknown[]) {
       if (v === null || v === undefined) continue;
-      if (typeof v === "string" && hasOffset(v)) {
+      if (typeof v === "string" && hasOffsetDesignator(v)) {
         fail(
           2,
           `"dateRange" must be local time in the maintenance timezone without an offset, got "${v}"`,

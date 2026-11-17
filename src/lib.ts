@@ -103,6 +103,78 @@ export function parsePort(value: string, flag: string): number {
   return n;
 }
 
+// Local ISO 8601 datetimes without an offset
+// ("YYYY-MM-DDTHH:mm[:ss[.fff]]") — the shape the CLI's datetime flags take.
+// Kuma stores such strings verbatim and reads them as local time, so an
+// offset designator would be stored with the value and misparsed; the CLI
+// refuses it. The calendar fields are checked directly because Date.parse
+// rolls an impossible day into the next month and engines differ on T24:00.
+const OFFSET_DATETIME =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?([zZ]|[+-]\d{2}(:\d{2}|\d{2})?)$/;
+
+const LOCAL_PARTS = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?$/;
+
+export function hasOffsetDesignator(value: string): boolean {
+  return OFFSET_DATETIME.test(value);
+}
+
+// The wall-clock fields of a local datetime, for callers that re-emit the
+// value in another spelling; seconds default to "00" and fraction keeps its
+// leading dot or is "".
+export type LocalDateTimeFields = {
+  date: string;
+  time: string;
+  seconds: string;
+  fraction: string;
+};
+
+export function localDateTimeFields(value: unknown): LocalDateTimeFields | null {
+  if (typeof value !== "string") return null;
+  const m = LOCAL_PARTS.exec(value);
+  if (m === null) return null;
+  const [, y, mo, d, h, mi] = m;
+  const year = Number(y);
+  const month = Number(mo);
+  const day = Number(d);
+  const hour = Number(h);
+  const minute = Number(mi);
+  const second = m[6] === undefined ? 0 : Number(m[6]);
+  if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) return null;
+  const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+  const dim = month === 2 ? (leap ? 29 : 28) : [4, 6, 9, 11].includes(month) ? 30 : 31;
+  if (day < 1 || day > dim) return null;
+  return {
+    date: `${y}-${mo}-${d}`,
+    time: `${h}:${mi}`,
+    seconds: m[6] ?? "00",
+    fraction: m[7] === undefined ? "" : `.${m[7]}`,
+  };
+}
+
+export function isLocalDateTime(value: unknown): value is string {
+  return localDateTimeFields(value) !== null;
+}
+
+// Ordering must not go through Date.parse: it resolves the offset-free
+// strings in the CLI host's timezone, where DST can reorder local times.
+// Compare the fields instead; callers run isLocalDateTime first.
+export function compareLocalDateTimes(a: string, b: string): number {
+  const pa = LOCAL_PARTS.exec(a);
+  const pb = LOCAL_PARTS.exec(b);
+  if (pa === null || pb === null) return Number.NaN;
+  for (let i = 1; i <= 6; i++) {
+    const na = Number(pa[i] ?? "0");
+    const nb = Number(pb[i] ?? "0");
+    if (na !== nb) return na < nb ? -1 : 1;
+  }
+  const fa = pa[7] ?? "";
+  const fb = pb[7] ?? "";
+  const width = Math.max(fa.length, fb.length);
+  const sa = fa.padEnd(width, "0");
+  const sb = fb.padEnd(width, "0");
+  return sa === sb ? 0 : sa < sb ? -1 : 1;
+}
+
 export function readJsonFile(path: string, flag: string): Record<string, unknown> {
   let text: string;
   try {

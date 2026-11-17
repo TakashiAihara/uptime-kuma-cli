@@ -107,6 +107,20 @@ export type MaintenanceRow = {
   timezoneOption?: string | null;
 };
 
+// apiKeyList rows are APIKey.toPublicJSON() values: id, name, userID,
+// createdDate, active (the BOOLEAN column's 0/1) and expires; status is
+// derived on emit like getStatus() does. `key` is the stored secret hash —
+// kept for fidelity, never emitted.
+export type ApiKeyRow = {
+  id: number;
+  name: string;
+  userID?: number;
+  createdDate?: string;
+  active: number;
+  expires: string | null;
+  key?: string;
+};
+
 // Per-monitor stats values for the post-login stats pushes; a field left
 // out is derived like Kuma computes it (avgPing and the uptimes from the
 // beats), and certInfo exists only when set here — it is sent verbatim, so
@@ -136,6 +150,8 @@ export type FakeState = {
   tags: TagRow[];
   // rows pushed as dockerHostList after login; the CLI checks docker_host ids against them
   dockerHosts: DockerHostRow[];
+  // rows pushed as apiKeyList after login (APIKey.toPublicJSON values)
+  apiKeys: ApiKeyRow[];
   // rows pushed as statusPageList after login (StatusPage.toJSON values)
   statusPages: StatusPageRow[];
   // incident rows; the public route shows the pinned+active one per page
@@ -229,6 +245,8 @@ export type FakeState = {
   addTagResult: Record<string, unknown> | null;
   // addMaintenance answer override; null uses the stored-row answer
   addMaintenanceResult: Record<string, unknown> | null;
+  // addAPIKey answer override; null uses the generated-key answer
+  addAPIKeyResult: Record<string, unknown> | null;
   // event name whose request makes the server drop the connection without answering
   disconnectOn: string | null;
   // after the login answer, drop the connection instead of pushing the lists
@@ -242,6 +260,16 @@ export type FakeKuma = { url: string; calls: Call[]; state: FakeState; close: ()
 const now = () => new Date().toISOString().replace("T", " ").slice(0, 19);
 const beatTime = (b: Beat): number => Date.parse(`${b.time.replace(" ", "T")}Z`);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// nanoid(40)'s url-safe alphabet; the real addAPIKey generates the clear key
+// with nanoid(40) and the fake produces the same shape. The alphabet is 64
+// chars, so a byte's low 6 bits index it without modulo bias.
+const API_KEY_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+
+const randomApiKeyPart = (): string => {
+  const bytes = crypto.getRandomValues(new Uint8Array(40));
+  return Array.from(bytes, (b) => API_KEY_ALPHABET[b & 63]).join("");
+};
 
 // checkSlug of server/socket-handlers/status-page-socket-handler.js (1.23.17):
 // addStatusPage lower-cases the slug first, so the accepted set is lowercase
@@ -406,6 +434,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     proxies: [],
     tags: [],
     dockerHosts: [],
+    apiKeys: [],
     statusPages: [],
     incidents: [],
     statusPageGroups: {},
@@ -462,6 +491,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     twoFA: false,
     addTagResult: null,
     addMaintenanceResult: null,
+    addAPIKeyResult: null,
     disconnectOn: null,
     dropInsteadOfLists: false,
     dropAfterLists: false,
@@ -575,6 +605,29 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
 
   const maintenanceListJSON = () =>
     Object.fromEntries(state.maintenances.map((m) => [String(m.id), maintenanceJSON(m)]));
+
+  // APIKey.getStatus of Kuma 1.23.17: expired when expires parses before now
+  // (dayjs reads an unparseable value as Invalid Date whose diff is NaN, so
+  // it never counts as expired), else active/inactive by the active flag
+  const apiKeyStatus = (k: ApiKeyRow): string => {
+    if (k.expires !== null) {
+      const t = Date.parse(k.expires.replace(" ", "T"));
+      if (!Number.isNaN(t) && t < Date.now()) return "expired";
+    }
+    return k.active ? "active" : "inactive";
+  };
+
+  // APIKey.toPublicJSON — the stored secret `key` column is never emitted
+  const apiKeyListJSON = () =>
+    state.apiKeys.map((k) => ({
+      id: k.id,
+      name: k.name,
+      userID: k.userID ?? 1,
+      createdDate: k.createdDate ?? now(),
+      active: k.active,
+      expires: k.expires,
+      status: apiKeyStatus(k),
+    }));
 
   // Incident.toPublicJSON; fields a fixture leaves out fall back to the
   // column defaults (style 'warning', pin/active 1). 2.5.11 adds active and
@@ -806,6 +859,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
             state.dockerHosts.map((h) => structuredClone(h)),
           ),
         );
+        push("apiKeyList", () => socket.emit("apiKeyList", apiKeyListJSON()));
         // Kuma pushes this one ~500ms after the other lists (afterLogin sleeps
         // first); the fake sends it in the same batch, the CLI waits either way
         push("statusPageList", () =>
@@ -1297,6 +1351,62 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
           (t) => !(t.tag_id === Number(tagID) && t.value === value),
         );
       }
+      return { ok: true, msg: "Deleted Successfully." };
+    });
+
+    // api-key-socket-handler.js of Kuma 1.23.17 (2.5.11 sends the same events;
+    // only the hashing is async there): addAPIKey generates the clear key
+    // server-side, stores its hash and answers { ok, msg, key: "uk<id>_<40>",
+    // keyID }; the rest re-push apiKeyList. delete/disable/enable answer ok
+    // even when the id matches nothing — the UPDATE/DELETE affects 0 rows —
+    // and enable/disable do not even scope by user.
+    const sendApiKeyList = () => socket.emit("apiKeyList", apiKeyListJSON());
+
+    handle("getAPIKeyList", () => {
+      sendApiKeyList();
+      return { ok: true };
+    });
+
+    handle("addAPIKey", (key: { name: string; expires: string | null; active: number }) => {
+      if (state.addAPIKeyResult !== null) return state.addAPIKeyResult;
+      const id = Math.max(0, ...state.apiKeys.map((k) => k.id)) + 1;
+      const clearKey = randomApiKeyPart();
+      state.apiKeys.push({
+        id,
+        name: key.name,
+        userID: 1,
+        createdDate: now(),
+        active: key.active ? 1 : 0,
+        expires: key.expires ?? null,
+        key: `hash:${clearKey}`,
+      });
+      sendApiKeyList();
+      return {
+        ok: true,
+        msg: "Added Successfully.",
+        key: `uk${id}_${clearKey}`,
+        keyID: id,
+      };
+    });
+
+    const setApiKeyActive = (active: 0 | 1) => (keyID: number) => {
+      const row = state.apiKeys.find((k) => k.id === Number(keyID));
+      if (row !== undefined) row.active = active;
+      sendApiKeyList();
+      return {
+        ok: true,
+        msg: active === 1 ? "Enabled Successfully" : "Disabled Successfully.",
+      };
+    };
+    handle("enableAPIKey", setApiKeyActive(1));
+    handle("disableAPIKey", setApiKeyActive(0));
+
+    // the DELETE is user-scoped but still answers ok when nothing matches
+    handle("deleteAPIKey", (keyID: number) => {
+      state.apiKeys = state.apiKeys.filter(
+        (k) => !(k.id === Number(keyID) && (k.userID ?? 1) === 1),
+      );
+      sendApiKeyList();
       return { ok: true, msg: "Deleted Successfully." };
     });
 
