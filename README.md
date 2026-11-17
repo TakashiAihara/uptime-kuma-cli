@@ -148,7 +148,8 @@ uptime-kuma-cli settings set --config-file settings.json
 ## Testing
 
 - `bun test` runs the unit tests in `tests/` against an in-process fake Kuma (`tests/helpers/fake-kuma.ts`); the CLI itself runs in-process too, so coverage sees `src/commands` (`tests/cli-process.test.ts` additionally spawns the real entry point to prove it boots, exits cleanly and disconnects)
-- `bun run check` runs typecheck, lint, format check and the unit tests — the same gate CI's `check` job runs
+- `bun run check` runs typecheck, lint, format check and the unit tests — the same gate CI's `check` job runs; the job also ends with `bun audit`, which fails on known vulnerabilities in `bun.lock`
+- To accept an audit finding, add its GHSA or advisory id to `--ignore` on the `bun audit` step in `.github/workflows/ci.yml`; the acceptance stays in the file's history so it is re-read on review
 - CI enforces line coverage on `src/`: the whole project must stay >= 90%, and on pull requests the lines the PR adds or changes must be >= 90% covered. A diff with no measurable src lines (docs, config, tests only) passes
 - Reproduce locally: `bun test --coverage --coverage-reporter=lcov --coverage-dir=coverage` then `bun scripts/coverage.ts whole` (and `bun scripts/coverage.ts diff --base origin/main` for the diff gate)
 - CI also runs mutation testing (`mewt`) on src lines changed by the PR and posts surviving mutants as a PR comment — report-only for now, it does not fail the build; reproduce locally with `mise use -g github:trailofbits/mewt@4.0.0` then `bun scripts/mutation-report.ts --base origin/main`
@@ -159,6 +160,7 @@ uptime-kuma-cli settings set --config-file settings.json
 - `.github/PULL_REQUEST_TEMPLATE.md` is the PR body: it asks for the verification results (both integration images with pass/fail counts, coverage numbers) and a review log — one row per review round with the reviewed commit, the findings, and what was done with them
 - CodeRabbit and opencode review every PR automatically. `coderabbit-review` is a commit status this repo publishes itself: it turns green only when CodeRabbit's own status reports `Review completed` — CodeRabbit's check stays green even when it is rate limited or skips the review, so it cannot be required directly
 - When `coderabbit-review` fails, the status description says why; comment `@coderabbitai review` on the PR to request a new review (for a paused review `@coderabbitai resume` also works; when CodeRabbit reports no files to review, `@coderabbitai full review` reviews the whole diff), then resolve every review thread — unresolved threads block the merge
+- Dependabot opens weekly PRs for bun dependencies and the GitHub Actions (`.github/dependabot.yml`). Bun gets version updates only — no security updates — and the dependency graph reads `package.json` but not `bun.lock`, so the `bun audit` step is the vulnerability gate for the transitive tree. Dependabot PRs go through the same required checks as any other PR
 
 ## Integration tests
 

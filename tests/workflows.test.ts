@@ -363,6 +363,22 @@ describe("release.yml: the artifact build uploads (#13)", () => {
   });
 });
 
+describe("ci.yml dependency audit", () => {
+  const ci = () =>
+    Bun.YAML.parse(read("ci.yml")) as {
+      jobs: { check: { steps: { name?: string; run?: string }[] } };
+    };
+
+  // bun audit is the only vulnerability gate for the transitive tree —
+  // Dependabot's alerts read package.json, not bun.lock. Removing the step
+  // silently drops that coverage, so pin that the check job still runs it.
+  test("the check job fails on known vulnerabilities in bun.lock", () => {
+    const audit = ci().jobs.check.steps.find((s) => s.name === "dependency audit");
+
+    expect(audit?.run).toBe("bun audit");
+  });
+});
+
 describe("release.yml: publish the checked commit and artifact as is (second round of #13)", () => {
   type Step = {
     id?: string;
