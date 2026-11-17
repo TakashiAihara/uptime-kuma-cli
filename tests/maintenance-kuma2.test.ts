@@ -105,6 +105,24 @@ describe("maintenance on Kuma 2.x", () => {
       expect(sentAdd(k).dateRange).toEqual(["2030-01-01T00:00:00", "2030-01-02T00:00:00"]);
     });
 
+    test.each(["cron", "recurring-interval"])(
+      "%s rejects a --config-file dateRange whose end precedes its start",
+      async (strategy) => {
+        const k = await useFake();
+        const f = writeJson("inverted.json", {
+          dateRange: ["2030-01-02T00:00:00", "2030-01-01T00:00:00"],
+        });
+        const r = await run(
+          sb,
+          ["maintenance", "add", "--title", "w", "--strategy", strategy, "--config-file", f],
+          creds(k.url),
+        );
+        expect(r.code).toBe(2);
+        expect(r.stderr).toContain("end must be after start");
+        expect(k.calls).toHaveLength(0);
+      },
+    );
+
     test("recurring-interval accepts intervalDay above 31", async () => {
       const k = await useFake();
       const f = writeJson("interval400.json", { intervalDay: 400 });
@@ -222,6 +240,29 @@ describe("maintenance on Kuma 2.x", () => {
       );
       expect(r.code).toBe(0);
       expect(sentEdit(k).dateRange).toEqual(["2030-01-01T02:00:00", "2030-01-01T05:00:00"]);
+    });
+
+    test("--end before the stored start on a cron window exits 2", async () => {
+      const k = await useFake({
+        maintenances: [
+          {
+            id: 1,
+            title: "cron win",
+            strategy: "cron",
+            cron: "0 4 * * *",
+            duration: 3600,
+            dateRange: ["2030-01-01T05:00:00"],
+          },
+        ],
+      });
+      const r = await run(
+        sb,
+        ["maintenance", "edit", "1", "--end", "2030-01-01T02:00:00"],
+        creds(k.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("end must be after start");
+      expect(callsOf(k, "editMaintenance")).toHaveLength(0);
     });
 
     test("--set intervalDay above 31 on recurring-interval is accepted", async () => {

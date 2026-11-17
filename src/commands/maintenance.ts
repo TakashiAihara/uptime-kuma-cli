@@ -415,6 +415,24 @@ function validateMaintenance(
       );
     }
   }
+  // On 2.x a cron/recurring window may carry both ends, and Kuma stores an
+  // end before the start without complaint — the window would sit scheduled
+  // then ended and never run. Judge the merged range's ordering like single's
+  // whenever dateRange is judged; on 1.x the refusal above already rejects
+  // any end, so only the 2.x path needs it.
+  if (
+    opts.kuma2 &&
+    strategy !== undefined &&
+    (strategy === "cron" || strategy.startsWith("recurring-")) &&
+    need("dateRange")
+  ) {
+    const range = m.dateRange as unknown[];
+    const start = range[0];
+    const end = range[1];
+    if (isLocalDateTime(start) && isLocalDateTime(end) && compareLocalDateTimes(end, start) <= 0) {
+      fail(2, '"dateRange" end must be after start');
+    }
+  }
 }
 
 // The attach subcommands share one shape: get*/add* pairs that replace the
