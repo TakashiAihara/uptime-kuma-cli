@@ -1,11 +1,15 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { cpSync, existsSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { type Sandbox, sandbox } from "./helpers/run";
 
 const REPO = resolve(import.meta.dir, "..");
 const BUILD = join(REPO, "scripts/build.ts");
 const PKG_VERSION = "7.7.7";
+const OS = process.platform === "darwin" ? "darwin" : "linux";
+const ARCH = process.arch === "arm64" ? "arm64" : "x64";
+const TARGET = `${OS}-${ARCH}`;
+const BINARY = `uptime-kuma-cli-${TARGET}`;
 
 /**
  * scripts/build.ts is the only place RELEASE_TAG turns into a --define, and release.yml only
@@ -30,7 +34,7 @@ beforeEach(() => {
 afterEach(() => sb.cleanup());
 
 function build(env: Record<string, string>): void {
-  const run = Bun.spawnSync([process.execPath, BUILD, "linux-x64"], {
+  const run = Bun.spawnSync([process.execPath, BUILD, TARGET], {
     cwd: sb.dir,
     env: { PATH: process.env.PATH ?? "", HOME: sb.home, ...env },
   });
@@ -39,7 +43,7 @@ function build(env: Record<string, string>): void {
 }
 
 function version(env: Record<string, string> = {}): string {
-  const run = Bun.spawnSync([join(sb.dir, "dist/uptime-kuma-cli-linux-x64"), "--version"], {
+  const run = Bun.spawnSync([join(sb.dir, "dist", BINARY), "--version"], {
     env: { PATH: process.env.PATH ?? "", HOME: sb.home, ...env },
   });
   expect(run.exitCode).toBe(0);
@@ -62,9 +66,6 @@ describe("scripts/build.ts", () => {
   test("builds only that target when one is named", () => {
     build({ RELEASE_TAG: "v3.2.1-rc.4" });
 
-    expect(existsSync(join(sb.dir, "dist/uptime-kuma-cli-linux-x64"))).toBe(true);
-    for (const target of ["linux-arm64", "darwin-x64", "darwin-arm64"]) {
-      expect(existsSync(join(sb.dir, `dist/uptime-kuma-cli-${target}`))).toBe(false);
-    }
+    expect(readdirSync(join(sb.dir, "dist"))).toEqual([BINARY]);
   });
 });

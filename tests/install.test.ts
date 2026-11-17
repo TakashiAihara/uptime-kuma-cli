@@ -26,18 +26,11 @@ const OLD = "#!/bin/sh\necho old-install\n";
 
 // A PATH holding only the tools install.sh uses. A real gh sneaking in would make
 // "no gh" impossible to set up
-const TOOLS = [
-  "uname",
-  "mktemp",
-  "rm",
-  "mkdir",
-  "mv",
-  "chmod",
-  "grep",
-  "awk",
-  "sha256sum",
-  "sleep",
-];
+const TOOLS = ["uname", "mktemp", "rm", "mkdir", "mv", "chmod", "grep", "awk", "sleep"];
+// install.sh hashes with sha256sum, or shasum where sha256sum is missing (stock
+// macOS has only the latter); linking whichever the host has lets the script
+// make the same choice it would on a real machine
+const CHECKSUM = ["sha256sum", "shasum"];
 
 type Release = { binary?: string; sums?: string };
 
@@ -92,7 +85,9 @@ beforeEach(() => {
   bin = join(sb.dir, "bin");
   installDir = join(sb.dir, "install");
   mkdirSync(bin);
-  for (const t of TOOLS) {
+  const checksums = CHECKSUM.filter((t) => Bun.which(t));
+  if (checksums.length === 0) throw new Error("sha256sum or shasum is needed to run install.sh");
+  for (const t of [...TOOLS, ...checksums]) {
     const real = Bun.which(t);
     if (!real) throw new Error(`${t} is needed to run install.sh`);
     symlinkSync(real, join(bin, t));
@@ -179,26 +174,30 @@ describe("install.sh", () => {
     expect(readFileSync(installed(), "utf8")).toBe(OLD);
   });
 
-  test("under dash, a TERM mid-run leaves no work dir in the install dir", async () => {
-    const dash = Bun.which("dash");
-    if (!dash) throw new Error("dash is needed for this test");
-    startServer({ "v1.0.0": release("#!/bin/sh\nsleep 2\n") });
-    shimCurl();
-    const proc = Bun.spawn([dash, INSTALL_SH], {
-      cwd: sb.dir,
-      env: { PATH: bin, HOME: sb.home, UPTIME_KUMA_CLI_INSTALL_DIR: installDir },
-      stdin: "ignore",
-      stdout: "ignore",
-      stderr: "ignore",
-    });
-    for (let i = 0; i < 100 && leftovers().length === 0; i++) await Bun.sleep(20);
-    expect(leftovers().length).toBe(1);
+  test.skipIf(!Bun.which("dash"))(
+    "under dash, a TERM mid-run leaves no work dir in the install dir",
+    async () => {
+      const dash = Bun.which("dash");
+      if (!dash) throw new Error("dash is needed for this test");
+      startServer({ "v1.0.0": release("#!/bin/sh\nsleep 2\n") });
+      shimCurl();
+      const proc = Bun.spawn([dash, INSTALL_SH], {
+        cwd: sb.dir,
+        env: { PATH: bin, HOME: sb.home, UPTIME_KUMA_CLI_INSTALL_DIR: installDir },
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      for (let i = 0; i < 100 && leftovers().length === 0; i++) await Bun.sleep(20);
+      expect(leftovers().length).toBe(1);
 
-    proc.kill("SIGTERM");
+      proc.kill("SIGTERM");
 
-    expect(await proc.exited).toBe(143);
-    expect(leftovers()).toEqual([]);
-  }, 15_000);
+      expect(await proc.exited).toBe(143);
+      expect(leftovers()).toEqual([]);
+    },
+    15_000,
+  );
 
   test("a binary that does not run stops without replacing the installed version", async () => {
     startServer({ "v1.0.0": release(BROKEN) });
