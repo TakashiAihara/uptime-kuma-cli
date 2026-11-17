@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { Server } from "socket.io";
@@ -239,8 +240,15 @@ export type FakeState = {
   // state.password — set it to simulate the account password having been
   // rotated after this socket logged in
   settingsPassword: string | null;
-  // login answers { tokenRequired: true } like an account with 2FA enabled
+  // the account has 2FA enabled: a login without token answers
+  // { tokenRequired: true }, a wrong or replayed one "Invalid Token!" on the
+  // 1.x profile and "authInvalidToken" on the 2.x profile
   twoFA: boolean;
+  // base32 TOTP secret the login token verifies against (user.twofa_secret)
+  twoFASecret: string;
+  // ms added to Date.now() when the login token is verified, modelling a
+  // server clock offset from the client's
+  twoFASkewMs: number;
   // addTag answer override; null uses the stored-tag answer
   addTagResult: Record<string, unknown> | null;
   // addMaintenance answer override; null uses the stored-row answer
@@ -437,6 +445,50 @@ const ADD_KEYS_2X = new Set([
   "wsSubprotocol",
 ]);
 
+// The base32 secret twoFASecret defaults to.
+export const FAKE_TOTP_SECRET = "AAAAAAAAAAAAAAAA";
+
+// notp.totp.verify(token, secret, { window: 1, time: 30 }) accepts the token
+// of the current 30-second counter or either neighbor. The decode and HOTP
+// are deliberately not src/lib.ts's totpToken — the fake must agree with the
+// spec, not with the code under test.
+const B32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+function fakeB32Decode(secret: string): Buffer | null {
+  const bytes: number[] = [];
+  let acc = 0;
+  let nbits = 0;
+  for (const raw of secret) {
+    const ch = raw.toUpperCase();
+    if (ch === "=" || /\s/.test(ch)) continue;
+    const v = B32.indexOf(ch);
+    if (v === -1) return null;
+    acc = (acc << 5) | v;
+    nbits += 5;
+    while (nbits >= 8) {
+      nbits -= 8;
+      bytes.push((acc >> nbits) & 0xff);
+    }
+  }
+  return bytes.length === 0 ? null : Buffer.from(bytes);
+}
+
+function fakeHotp(secret: string, counter: number): string | null {
+  const key = fakeB32Decode(secret);
+  if (key === null) return null;
+  const msg = Buffer.alloc(8);
+  msg.writeBigUInt64BE(BigInt(counter));
+  const digest = createHmac("sha1", key).update(msg).digest();
+  const binary = digest.readUInt32BE(digest[19]! & 0x0f) & 0x7fffffff;
+  const digits = String(binary);
+  return digits.slice(digits.length - 6);
+}
+
+function totpVerify(secret: string, token: string, atMs = Date.now()): boolean {
+  const counter = Math.floor(atMs / 30_000);
+  return [counter - 1, counter, counter + 1].some((c) => fakeHotp(secret, c) === token);
+}
+
 export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<FakeKuma> {
   const profile2x = init.profile === "2.x";
   const state: FakeState = {
@@ -503,6 +555,8 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     getSettingsResult: null,
     settingsPassword: null,
     twoFA: false,
+    twoFASecret: FAKE_TOTP_SECRET,
+    twoFASkewMs: 0,
     addTagResult: null,
     addMaintenanceResult: null,
     addAPIKeyResult: null,
@@ -524,6 +578,8 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
   const apiCache = new Map<string, { status: number; body: string }>();
   // status_page.id is AUTOINCREMENT: deleted ids are never reused
   let nextStatusPageId = Math.max(0, ...state.statusPages.map((p) => p.id));
+  // user.twofa_last_token: the last accepted login token, rejected on reuse
+  let twofaLastToken: string | null = null;
 
   // monitor.toJSON always carries tags (the monitor_tag⋈tag join, [] when none)
   const tagsOf = (m: Monitor): MonitorTagRow[] =>
@@ -837,10 +893,23 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
       });
     };
 
-    handle("login", (data: { username: string; password: string }) => {
+    handle("login", (data: { username: string; token?: string; password: string }) => {
       if (data.username !== state.username || data.password !== state.password)
         return { ok: false, msg: "Incorrect username or password." };
-      if (state.twoFA) return { tokenRequired: true };
+      if (state.twoFA) {
+        const token = data.token;
+        if (!token) return { tokenRequired: true };
+        if (
+          token === twofaLastToken ||
+          !totpVerify(state.twoFASecret, token, Date.now() + state.twoFASkewMs)
+        ) {
+          // Kuma 1.x says "Invalid Token!", 2.x the i18n key authInvalidToken
+          return profile2x
+            ? { ok: false, msg: "authInvalidToken", msgi18n: true }
+            : { ok: false, msg: "Invalid Token!" };
+        }
+        twofaLastToken = token;
+      }
       loggedIn = true;
       // afterLogin sets socket.userID = user.id; the fake's user id is 1
       (socket as { userID?: number }).userID = 1;

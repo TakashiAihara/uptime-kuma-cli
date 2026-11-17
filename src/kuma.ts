@@ -1,5 +1,5 @@
 import { io, type Socket } from "socket.io-client";
-import { CliError, fail, resolveCredentials, sleep, socketTimeoutMs } from "./lib.ts";
+import { CliError, fail, resolveCredentials, resolveTotp, sleep, socketTimeoutMs } from "./lib.ts";
 
 export interface Monitor extends Record<string, unknown> {
   id: number;
@@ -591,7 +591,7 @@ export async function connect(
     await Promise.race([sleep(10), disconnected]);
   }
 
-  const login = await emitAck(
+  let login = await emitAck(
     socket,
     "login",
     [{ username, password, token: "" }],
@@ -599,7 +599,39 @@ export async function connect(
     disconnected,
   );
   if (login?.tokenRequired === true) {
-    fail(2, "login requires 2FA; this CLI does not support 2FA logins");
+    // Kuma answers tokenRequired (not ok:false) when the account has
+    // 2FA and the login carried no token, and only then is a TOTP resolved —
+    // a totp_* command never runs for accounts without 2FA. The retry reuses
+    // the credentials resolved for the tokenless attempt, so a *_command
+    // cannot return a different secret than the first attempt used.
+    const totp = await resolveTotp();
+    login = await emitAck(
+      socket,
+      "login",
+      [{ username, password, token: totp.token }],
+      timeoutMs,
+      disconnected,
+    );
+    // Credentials were already proven by the tokenless attempt, so an
+    // invalid-token answer is about the token itself — "Invalid Token!" on
+    // Kuma 1.x, the i18n key "authInvalidToken" on 2.x. Only the
+    // CLI-generated secret path can mint the adjacent counters' tokens —
+    // each differs from the rejected one and verifies while the skew
+    // stays inside Kuma's ±1 window.
+    for (const retryToken of totp.retryTokens) {
+      if (
+        login?.ok !== false ||
+        (login?.msg !== "Invalid Token!" && login?.msg !== "authInvalidToken")
+      )
+        break;
+      login = await emitAck(
+        socket,
+        "login",
+        [{ username, password, token: retryToken }],
+        timeoutMs,
+        disconnected,
+      );
+    }
   }
   if (login?.ok !== true) {
     const msg = typeof login?.msg === "string" ? login.msg : "login failed";
