@@ -14,6 +14,7 @@ const release = () =>
       tag: { steps: { name: string; run?: string }[] };
       build: { steps: { name: string; run?: string; env?: Record<string, string> }[] };
       publish: {
+        concurrency: { group: string; queue: string; "cancel-in-progress": boolean };
         permissions?: Record<string, string>;
         steps: { name: string; run?: string; env?: Record<string, string> }[];
       };
@@ -134,6 +135,31 @@ describe("release.yml concurrency", () => {
 
   test("cancel-in-progress is false", () => {
     expect(release().concurrency["cancel-in-progress"]).toBe(false);
+  });
+});
+
+// The publish job is where MAIN_SHA is read and the release created, so it is the only
+// job that must serialize across triggers — the workflow-level groups above cannot do
+// that, since a hand-pushed tag and a dispatch each get their own run_id group. The
+// group name is a constant: an expression could split the triggers apart again, which
+// is the race this guards (#3).
+describe("release.yml publish concurrency", () => {
+  test("every trigger's publish shares one fixed group", () => {
+    const { group } = release().jobs.publish.concurrency;
+
+    expect(group).toBe("release-publish");
+    expect(group).not.toContain("${{");
+  });
+
+  // With the default single pending slot a newer publish cancels the one waiting, so a
+  // queued hand-cut release would be dropped. queue: max lets up to 100 wait in line
+  test("waiting publishes queue instead of being cancelled", () => {
+    expect(release().jobs.publish.concurrency.queue).toBe("max");
+  });
+
+  // A release cut off mid-upload is worse than a late one
+  test("a running publish is never cancelled", () => {
+    expect(release().jobs.publish.concurrency["cancel-in-progress"]).toBe(false);
   });
 });
 

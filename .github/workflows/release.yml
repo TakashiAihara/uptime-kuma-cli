@@ -264,6 +264,18 @@ jobs:
   publish:
     needs: [tag, build, verify]
     if: needs.tag.outputs.tag != ''
+    # Every trigger's publish shares one group, so the MAIN_SHA read and the release
+    # creation in the release step are not interleaved with another publish — without
+    # it, a run for an older commit could take Latest back from a newer release, and
+    # install.sh installs Latest. Only this job queues; tag, build and verify still run
+    # in parallel across runs. queue: max holds up to 100 waiting publishes rather than
+    # the default single pending slot a newer arrival would cancel, so a queued
+    # hand-cut release is not dropped; cancel-in-progress stays false so a running
+    # publish is never cut off.
+    concurrency:
+      group: release-publish
+      queue: max
+      cancel-in-progress: false
     permissions:
       contents: write
       # The checksum lives in the same release, so it proves nothing about authenticity.
