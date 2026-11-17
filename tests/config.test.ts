@@ -289,9 +289,19 @@ describe("credentials and url", () => {
 
   test("a token from the previous 30-second window is still accepted", async () => {
     kuma.state.twoFA = true;
-    const previous = totpToken(FAKE_TOTP_SECRET, Math.floor(Date.now() / 30_000) * 30_000 - 30_000);
-    const r = await run(sb, list, { ...creds(kuma.url), UPTIME_KUMA_TOTP: previous });
-    expect(r.code).toBe(0);
+    // pin the clock so token generation and the fake's verification
+    // share one counter even if a window boundary is near
+    setSystemTime(1_800_000_000_000);
+    try {
+      const previous = totpToken(
+        FAKE_TOTP_SECRET,
+        Math.floor(Date.now() / 30_000) * 30_000 - 30_000,
+      );
+      const r = await run(sb, list, { ...creds(kuma.url), UPTIME_KUMA_TOTP: previous });
+      expect(r.code).toBe(0);
+    } finally {
+      setSystemTime();
+    }
   });
 
   test("a replayed token is rejected like Kuma's twofa_last_token", async () => {
@@ -373,11 +383,16 @@ describe("credentials and url", () => {
     const log = join(sb.dir, "seen");
     writeConfig(
       sb,
-      `username_command = "if [ -n \\"$UPTIME_KUMA_TOTP\\" ]; then echo saw >> ${log}; fi; echo admin"`,
+      `username_command = "echo ran >> ${log}; if [ -n \\"$UPTIME_KUMA_TOTP\\" ]; then echo saw >> ${log}; fi; echo admin"`,
     );
-    const r = await run(sb, list, { ...creds(kuma.url), UPTIME_KUMA_TOTP: "123456" });
+    // no UPTIME_KUMA_USERNAME, so the command really runs; "ran" proves it did
+    const r = await run(sb, list, {
+      ...creds(kuma.url),
+      UPTIME_KUMA_USERNAME: undefined,
+      UPTIME_KUMA_TOTP: "123456",
+    });
     expect(r.code).toBe(0);
-    expect(await Bun.file(log).exists()).toBe(false);
+    expect(await Bun.file(log).text()).toBe("ran\n");
   });
 
   test("a dropped connection during a request exits 2 without waiting for the timeout", async () => {
