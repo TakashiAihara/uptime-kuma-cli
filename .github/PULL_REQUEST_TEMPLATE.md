@@ -10,12 +10,13 @@ Closes #N
 <!-- Append the result to each item: pass/fail counts for the
 integration runs, percentages for coverage. The two images are the
 ones in CI's `integration` matrix — update the tags here when it
-moves. If a check does not apply to this diff, say so instead of
-leaving the box silently unchecked. Commands: README "Testing" and
-"Integration tests". -->
+moves; both commands pin UPTIME_KUMA_IT_IMAGE so a leftover env var
+cannot run one image under the other's label. If a check does not
+apply to this diff, say so instead of leaving the box silently
+unchecked. Commands: README "Testing" and "Integration tests". -->
 
 - [ ] `bun run check` — typecheck, lint, format check, unit tests
-- [ ] `bun run test:integration` on `louislam/uptime-kuma:1.23.17`
+- [ ] `UPTIME_KUMA_IT_IMAGE=louislam/uptime-kuma:1.23.17 bun run test:integration`
 - [ ] `UPTIME_KUMA_IT_IMAGE=louislam/uptime-kuma:2.5.11 bun run test:integration`
 - [ ] coverage — whole-project and diff line coverage, both >= 90%
 - [ ] CI green on this PR
