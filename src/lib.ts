@@ -397,7 +397,7 @@ export type TotpResolution = {
   // still verify (Kuma's ±1 window) but differ. Next window first, then the
   // previous one, so a client clock running ahead of the server still has a
   // retry inside the server's window.
-  retryTokens: (() => string)[];
+  retryTokens: string[];
 };
 
 // Called only when the server answered tokenRequired, so a configured TOTP
@@ -420,11 +420,14 @@ export async function resolveTotp(): Promise<TotpResolution> {
       "totp_secret_command",
     );
     const secret = totpSecret(output);
+    // Mint all three from one counter: the retries are the adjacent
+    // counters of the token just sent, wherever the clock is when they run.
+    const counter = Math.floor(Date.now() / 30_000);
     return {
-      token: totpToken(secret),
+      token: totpToken(secret, counter * 30_000),
       retryTokens: [
-        () => totpToken(secret, Date.now() + 30_000),
-        () => totpToken(secret, Date.now() - 30_000),
+        totpToken(secret, (counter + 1) * 30_000),
+        totpToken(secret, (counter - 1) * 30_000),
       ],
     };
   }

@@ -479,7 +479,8 @@ function fakeHotp(secret: string, counter: number): string | null {
   msg.writeBigUInt64BE(BigInt(counter));
   const digest = createHmac("sha1", key).update(msg).digest();
   const binary = digest.readUInt32BE(digest[19]! & 0x0f) & 0x7fffffff;
-  return String(binary).slice(-6);
+  const digits = String(binary);
+  return digits.slice(digits.length - 6);
 }
 
 function totpVerify(secret: string, token: string, atMs = Date.now()): boolean {

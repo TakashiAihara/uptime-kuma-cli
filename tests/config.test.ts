@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, setSystemTime, test } from "bu
 import { readFileSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { join } from "node:path";
-import { totpToken } from "../src/lib.ts";
+import { resolveTotp, totpToken } from "../src/lib.ts";
 import { FAKE_TOTP_SECRET, type FakeKuma, startFakeKuma } from "./helpers/fake-kuma";
 import { creds, run, type Sandbox, sandbox, writeConfig } from "./helpers/run";
 
@@ -366,6 +366,54 @@ describe("credentials and url", () => {
       expect(tokens[5]).toMatch(/^\d{1,6}$/);
       expect(tokens[5]).not.toBe(tokens[1]);
     } finally {
+      setSystemTime();
+    }
+  });
+
+  test("a token whose binary has fewer than six digits verifies like notp", async () => {
+    kuma.state.twoFA = true;
+    kuma.state.twoFASecret = "CCCCCCCCCCCCCCCC";
+    // counter 21871 of this secret truncates to a 5-digit binary; notp keeps
+    // only the decimal's last character, and the fake must agree exactly
+    const atMs = 656_130_000;
+    setSystemTime(atMs);
+    try {
+      const token = totpToken("CCCCCCCCCCCCCCCC", atMs);
+      expect(token).toBe("8");
+      const r = await run(sb, list, { ...creds(kuma.url), UPTIME_KUMA_TOTP: token });
+      expect(r.code).toBe(0);
+    } finally {
+      setSystemTime();
+    }
+  });
+
+  test("retry tokens stay on the counters adjacent to the minted token", async () => {
+    writeConfig(sb, `totp_secret_command = "printenv IT_TOTP_SECRET"`);
+    const saved = { ...process.env };
+    const base = {
+      PATH: saved.PATH ?? "",
+      HOME: sb.home,
+      XDG_CONFIG_HOME: sb.xdg,
+      IT_TOTP_SECRET: "CCCCCCCCCCCCCCCC",
+    };
+    const resolve = async () => {
+      for (const k of Object.keys(process.env)) delete process.env[k];
+      Object.assign(process.env, base);
+      return resolveTotp();
+    };
+    // 656_130_000 is counter 21871; resolving again one counter each way
+    // afterwards must not move the first resolution's retries
+    setSystemTime(656_130_000);
+    try {
+      const minted = await resolve();
+      setSystemTime(656_160_000);
+      const next = await resolve();
+      setSystemTime(656_100_000);
+      const prev = await resolve();
+      expect(minted.retryTokens).toEqual([next.token, prev.token]);
+    } finally {
+      for (const k of Object.keys(process.env)) delete process.env[k];
+      Object.assign(process.env, saved);
       setSystemTime();
     }
   });

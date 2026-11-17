@@ -628,12 +628,12 @@ export async function connect(
     // Invalid Token answer is about the token itself; only the CLI-generated
     // secret path can mint the adjacent counters' tokens — each still
     // verifies (Kuma's ±1 window) and differs from the rejected one.
-    for (const retry of totp.retryTokens) {
+    for (const retryToken of totp.retryTokens) {
       if (login?.ok !== false || login?.msg !== "Invalid Token!") break;
       login = await emitAck(
         socket,
         "login",
-        [{ ...loginFields, token: retry() }],
+        [{ ...loginFields, token: retryToken }],
         timeoutMs,
         disconnected,
       );
