@@ -93,7 +93,7 @@ uptime-kuma-cli proxies delete 2 --yes
 
 uptime-kuma-cli docker-hosts list
 uptime-kuma-cli docker-hosts add --name "build" --type socket --daemon /var/run/docker.sock
-uptime-kuma-cli docker-hosts edit 2 --daemon tcp://docker.example.com:2375
+uptime-kuma-cli docker-hosts edit 2 --type tcp --daemon tcp://docker.example.com:2375
 uptime-kuma-cli docker-hosts test 2
 uptime-kuma-cli docker-hosts delete 2 --yes
 
