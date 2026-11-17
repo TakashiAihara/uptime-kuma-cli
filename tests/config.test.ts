@@ -451,6 +451,20 @@ describe("credentials and url", () => {
     }
   });
 
+  test("a non-token login failure stops the adjacent-window retries", async () => {
+    kuma.state.twoFA = true;
+    writeConfig(sb, `totp_secret_command = "printenv IT_TOTP_SECRET"`);
+    // the tokenless attempt falls through to tokenRequired; the token
+    // attempt gets Kuma's rate-limit reply, which is not an invalid-token
+    // answer, so no retry may be sent
+    kuma.state.fail.login = [null, "Too frequently, try again later."];
+    const r = await run(sb, list, { ...creds(kuma.url), IT_TOTP_SECRET: "CCCCCCCCCCCCCCCC" });
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("Too frequently, try again later.");
+    expect(loginTokens()).toHaveLength(2);
+    expect(loginTokens()[0]).toBe("");
+  });
+
   test.each([
     "otpauth://totp/x?secret=AAAA&digits=8",
     "otpauth://totp/x?secret=AAAA&algorithm=SHA256",

@@ -378,16 +378,18 @@ export function totpToken(secret: string, atMs: number = Date.now()): string {
 function totpSecret(output: string): string {
   const text = output.trim();
   if (!text.toLowerCase().startsWith("otpauth://")) return text;
-  const raw = /[?&]secret=([^&\s#]+)/i.exec(text)?.[1];
-  if (raw === undefined) {
+  const query = text.includes("?") ? text.slice(text.indexOf("?")) : "";
+  const params = new URLSearchParams(query);
+  // URLSearchParams decodes the value; every key is read case-sensitively so
+  // a "Secret="/"Algorithm=" URI fails closed instead of half-parsing.
+  const raw = params.get("secret");
+  if (!raw) {
     fail(2, "totp_secret_command printed an otpauth URI without a secret parameter");
   }
   // notp only knows SHA-1, 6 digits and 30-second periods, so a URI asking
   // for anything else would mint tokens Kuma never accepts — refuse it here
   // instead of failing later with Invalid Token.
   const kind = /^otpauth:\/\/([^/?]+)/i.exec(text)?.[1]?.toLowerCase();
-  const query = text.includes("?") ? text.slice(text.indexOf("?")) : "";
-  const params = new URLSearchParams(query);
   if (
     kind !== "totp" ||
     (params.get("algorithm") ?? "SHA1").toUpperCase() !== "SHA1" ||
@@ -399,11 +401,7 @@ function totpSecret(output: string): string {
       "totp_secret_command printed an otpauth URI with options Kuma cannot use (needs TOTP, SHA1, 6 digits, 30 s period)",
     );
   }
-  try {
-    return decodeURIComponent(raw);
-  } catch {
-    return raw;
-  }
+  return raw;
 }
 
 export type TotpResolution = {
