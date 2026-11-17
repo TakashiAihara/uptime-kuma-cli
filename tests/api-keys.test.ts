@@ -150,14 +150,13 @@ describe("api-keys add", () => {
   });
 
   test("add --expires today is accepted, the datepicker's minDate boundary", async () => {
-    const d = new Date();
-    const p = (n: number) => String(n).padStart(2, "0");
-    const today = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-    const r = await run(
-      sb,
-      ["api-keys", "add", "--name", "x", "--expires", `${today}T23:59`],
-      creds(kuma.url),
-    );
+    // run() wipes the environment, so the CLI's localToday() falls back to
+    // the OS zone; pin both sides to UTC or the dates can differ by a day
+    const today = new Date().toISOString().slice(0, 10);
+    const r = await run(sb, ["api-keys", "add", "--name", "x", "--expires", `${today}T23:59`], {
+      ...creds(kuma.url),
+      TZ: "UTC",
+    });
     expect(r.code).toBe(0);
     expect(r.json().expires).toBe(`${today} 23:59:00`);
   });
