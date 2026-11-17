@@ -22,7 +22,7 @@
     "socket.io-client": "4"
   },
   "devDependencies": {
-    "@types/bun": "1.4.3",
+    "@types/bun": "1.4.4",
     "@typescript/native-preview": "^7.0.0-dev.20260707.2",
     "lefthook": "^2.2.2",
     "oxfmt": "^0.78.0",
