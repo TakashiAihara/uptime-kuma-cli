@@ -3,6 +3,7 @@ import { Command, CommanderError } from "commander";
 import { registerApiKeys } from "./commands/api-keys.ts";
 import { registerBeats, registerEvents } from "./commands/beats.ts";
 import { registerDockerHosts } from "./commands/docker-hosts.ts";
+import { registerHousekeeping } from "./commands/housekeeping.ts";
 import { registerMaintenance } from "./commands/maintenance.ts";
 import { registerMonitors } from "./commands/monitors.ts";
 import { registerNotifications } from "./commands/notifications.ts";
@@ -33,6 +34,7 @@ function buildProgram(): Command {
   registerStatusPages(program);
   registerSettings(program);
   registerApiKeys(program);
+  registerHousekeeping(program);
 
   return program;
 }

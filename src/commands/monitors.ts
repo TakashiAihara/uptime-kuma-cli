@@ -1463,6 +1463,25 @@ export function registerMonitors(program: Command): void {
       printJson({ id, deleted: true });
     });
 
+  for (const [name, event, what] of [
+    ["clear-beats", "clearHeartbeats", "beats"],
+    ["clear-events", "clearEvents", "events"],
+  ] as const) {
+    monitors
+      .command(`${name} <id>`)
+      .description(`Clear a monitor's ${what}`)
+      .option("--yes", "confirm clearing")
+      .action(async (rawId, opts) => {
+        const id = parseId(rawId, "monitor id");
+        if (!opts.yes) fail(2, `would clear ${what} of monitor ${id}; pass --yes to clear`);
+        const s = await connect();
+        // Kuma 1.23 answers ok even for an unknown id, so the pushed list is the only check
+        if (!s.monitorById(id)) fail(1, `monitor ${id} not found`);
+        await s.request(event, [id]);
+        printJson({ id, cleared: what });
+      });
+  }
+
   monitors
     .command("tag <id>")
     .description("Attach a tag to a monitor")

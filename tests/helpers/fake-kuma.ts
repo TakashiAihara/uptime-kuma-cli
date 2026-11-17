@@ -253,9 +253,23 @@ export type FakeState = {
   dropInsteadOfLists: boolean;
   // drop the connection right after pushing the lists (and the heartbeats not silenced)
   dropAfterLists: boolean;
+  // bytes getDatabaseSize reports: Kuma's Database.getSize is the db file's
+  // stat size; shrinkDatabase's VACUUM effect on it is not modeled
+  databaseSize: number;
+  // getDatabaseSize answer override; null answers { ok: true, size: databaseSize }
+  databaseSizeResult: Record<string, unknown> | null;
+  // ms to delay a request event's successful ack, like a slow server-side
+  // handler (shrinkDatabase's VACUUM is the case that needs it)
+  ackDelay: Record<string, number>;
 };
 
-export type FakeKuma = { url: string; calls: Call[]; state: FakeState; close: () => Promise<void> };
+export type FakeKuma = {
+  url: string;
+  calls: Call[];
+  emitted: Call[];
+  state: FakeState;
+  close: () => Promise<void>;
+};
 
 const now = () => new Date().toISOString().replace("T", " ").slice(0, 19);
 const beatTime = (b: Beat): number => Date.parse(`${b.time.replace(" ", "T")}Z`);
@@ -495,9 +509,13 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     disconnectOn: null,
     dropInsteadOfLists: false,
     dropAfterLists: false,
+    databaseSize: 1048576,
+    databaseSizeResult: null,
+    ackDelay: {},
     ...init,
   };
   const calls: Call[] = [];
+  const emitted: Call[] = [];
   const http = createServer();
   const io = new Server(http);
   // apicache of the /api/status-page/:slug route: keyed by req.url (path +
@@ -752,6 +770,11 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
   };
 
   io.on("connection", (socket) => {
+    const emit = socket.emit.bind(socket);
+    socket.emit = ((event: string, ...args: unknown[]) => {
+      emitted.push({ event, args: structuredClone(args) });
+      return emit(event, ...args);
+    }) as typeof socket.emit;
     let loggedIn = false;
     // sendInfo(socket, true) on connection hides the version fields until
     // login; Kuma always sends it, so info: null still sends an empty one
@@ -804,7 +827,10 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
           return;
         }
         try {
-          cb(await fn(...args.slice(0, -1)));
+          const result = await fn(...args.slice(0, -1));
+          const delay = state.ackDelay[event] ?? 0;
+          if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+          cb(result);
         } catch (e) {
           cb({ ok: false, msg: (e as Error).message });
         }
@@ -995,6 +1021,53 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
       const data = (state.beats[Number(id)] ?? []).filter((b) => beatTime(b) > cutoff);
       return { ok: true, data: structuredClone(data) };
     });
+
+    // clearEvents of Kuma 1.23.17: msg and important are reset on every
+    // heartbeat row of the monitor — the rows stay so uptime keeps its
+    // history — then the important list is re-pushed with overwrite. 2.x
+    // answers the same but does not re-push.
+    handle("clearEvents", (monitorID: number) => {
+      const id = Number(monitorID);
+      for (const b of state.beats[id] ?? []) {
+        b.msg = "";
+        b.important = 0;
+      }
+      if (state.profile !== "2.x") socket.emit("importantHeartbeatList", id, [], true);
+      return { ok: true };
+    });
+
+    // clearHeartbeats deletes the monitor's heartbeat rows and re-pushes its
+    // (now empty) heartbeatList with overwrite. 2.x additionally clears the
+    // stat tables and restarts an active monitor; neither is modeled.
+    handle("clearHeartbeats", (monitorID: number) => {
+      const id = Number(monitorID);
+      state.beats[id] = [];
+      socket.emit("heartbeatList", id, [], true);
+      return { ok: true };
+    });
+
+    // clearStatistics deletes the whole heartbeat table — every monitor's
+    // beats, events and the stats derived from them — and re-pushes nothing.
+    // 2.x also clears the stat tables and restarts active monitors.
+    handle("clearStatistics", () => {
+      state.beats = {};
+      return { ok: true };
+    });
+
+    // getDatabaseSize answers the db file's size in bytes
+    // (fs.statSync(Database.path).size on 1.x, stat(sqlitePath) on 2.x — 0 on
+    // a non-sqlite backend); shrinkDatabase runs VACUUM, whose file-size
+    // effect the fake does not model. 1.23.17's handler does not await
+    // shrink() so its ok precedes VACUUM's end; 2.x awaits it — ackDelay
+    // models that wait when a test needs it.
+    handle("getDatabaseSize", () => {
+      const dbType = state.info?.dbType;
+      if (state.profile === "2.x" && dbType !== undefined && dbType !== "sqlite") {
+        return { ok: true, size: 0 };
+      }
+      return state.databaseSizeResult ?? { ok: true, size: state.databaseSize };
+    });
+    handle("shrinkDatabase", () => ({ ok: true }));
 
     handle("addNotification", (n: Record<string, unknown>, id: number | null) => {
       let row: NotificationRow | undefined;
@@ -1786,6 +1859,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
   return {
     url: `http://127.0.0.1:${port}`,
     calls,
+    emitted,
     state,
     close: () =>
       new Promise<void>((r) => {
