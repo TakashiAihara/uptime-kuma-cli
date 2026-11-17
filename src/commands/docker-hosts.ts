@@ -1,6 +1,6 @@
 import { Option, type Command } from "commander";
-import { fail, parseId, printJson } from "../lib.ts";
-import { connect } from "../kuma.ts";
+import { CliError, fail, parseId, printJson } from "../lib.ts";
+import { connect, type KumaSession } from "../kuma.ts";
 import { redactUrl } from "./monitors.ts";
 
 const TYPES = ["socket", "tcp"] as const;
@@ -34,6 +34,31 @@ function hostView(row: {
     dockerType: row.dockerType ?? null,
     dockerDaemon: redactUrl(row.dockerDaemon ?? null),
   };
+}
+
+// Kuma's testDockerHost failure msg can echo the daemon — a socket connect
+// error carries socketPath verbatim and an axios error can carry the baseURL
+// after Kuma's tcp:// -> http:// patch — so credential-bearing forms are
+// masked before the message reaches stderr.
+function scrubDaemon(msg: string, daemon: unknown): string {
+  if (typeof daemon !== "string" || daemon === "") return msg;
+  let out = msg;
+  for (const candidate of new Set([daemon, daemon.replace(/tcp:\/\//g, "http://")])) {
+    const masked = redactUrl(candidate);
+    if (typeof masked === "string" && masked !== candidate) {
+      out = out.split(candidate).join(masked);
+    }
+  }
+  return out;
+}
+
+async function testDaemon(s: KumaSession, host: Record<string, unknown>): Promise<any> {
+  try {
+    return await s.request("testDockerHost", [host]);
+  } catch (err) {
+    if (!(err instanceof CliError)) throw err;
+    fail(err.exitCode, scrubDaemon(err.message, host.dockerDaemon));
+  }
 }
 
 export function registerDockerHosts(program: Command): void {
@@ -110,7 +135,7 @@ export function registerDockerHosts(program: Command): void {
         const s = await connect();
         const row = s.dockerHostById(id);
         if (!row) fail(1, `docker host ${id} not found`);
-        const res = await s.request("testDockerHost", [hostPayload(row)]);
+        const res = await testDaemon(s, hostPayload(row));
         printJson({ id, ok: true, msg: res?.msg ?? null });
         return;
       }
@@ -123,7 +148,7 @@ export function registerDockerHosts(program: Command): void {
         dockerDaemon: parseNonEmpty(opts.daemon as string, "--daemon"),
       };
       const s = await connect();
-      const res = await s.request("testDockerHost", [host]);
+      const res = await testDaemon(s, host);
       printJson({ ok: true, msg: res?.msg ?? null });
     });
 

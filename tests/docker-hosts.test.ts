@@ -342,6 +342,41 @@ describe("docker-hosts", () => {
     expect(r.stderr).toContain("connect ENOENT /var/run/docker.sock");
   });
 
+  test("test <id> masks a credential-bearing daemon echoed in Kuma's failure", async () => {
+    const daemon = `u1:${TCP_PW}@docker.example.com:2375`;
+    kuma.state.dockerHosts = [
+      { id: 3, name: "cred socket", dockerType: "socket", dockerDaemon: daemon },
+    ];
+    kuma.state.fail.testDockerHost = `connect ENOENT ${daemon}`;
+    const r = await run(sb, ["docker-hosts", "test", "3"], creds(kuma.url));
+    expect(r.code).toBe(1);
+    expect(r.stderr).not.toContain(TCP_PW);
+    expect(r.stderr).toContain("connect ENOENT ***");
+  });
+
+  test("test flags mask a credential-bearing daemon in Kuma's failure", async () => {
+    const daemon = `u1:${TCP_PW}@docker.example.com:2375`;
+    kuma.state.fail.testDockerHost = `connect ENOENT ${daemon}`;
+    const r = await run(
+      sb,
+      ["docker-hosts", "test", "--type", "socket", "--daemon", daemon],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(1);
+    expect(r.stderr).not.toContain(TCP_PW);
+    expect(r.stderr).toContain("connect ENOENT ***");
+  });
+
+  test("test <id> masks the patched http form of a tcp daemon in Kuma's failure", async () => {
+    const daemon = `tcp://u1:${TCP_PW}@docker.example.com:2375`;
+    kuma.state.dockerHosts = [{ id: 3, name: "cred tcp", dockerType: "tcp", dockerDaemon: daemon }];
+    kuma.state.fail.testDockerHost = `connect ECONNREFUSED http://u1:${TCP_PW}@docker.example.com:2375`;
+    const r = await run(sb, ["docker-hosts", "test", "3"], creds(kuma.url));
+    expect(r.code).toBe(1);
+    expect(r.stderr).not.toContain(TCP_PW);
+    expect(r.stderr).toContain("http://u1:***@docker.example.com:2375/");
+  });
+
   test("delete removes the host and prints { id, deleted: true }", async () => {
     const r = await run(sb, ["docker-hosts", "delete", "2", "--yes"], creds(kuma.url));
     expect(r.code).toBe(0);
