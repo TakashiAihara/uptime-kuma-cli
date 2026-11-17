@@ -1,6 +1,6 @@
 # uptime-kuma-cli
 
-CLI for Uptime Kuma 1.23 over its Socket.IO API: monitors, beats, status changes, notifications, proxies, docker hosts, maintenance windows, tags, status pages, API keys and settings.
+CLI for Uptime Kuma 1.23 over its Socket.IO API: monitors, beats, status changes, notifications, proxies, docker hosts, maintenance windows, tags, status pages, API keys, settings and database upkeep.
 
 Existing CLIs cover monitors but not proxies, notification tests, or status changes; see `docs/design/cli.md` for the comparison and the full specification.
 
@@ -75,10 +75,15 @@ uptime-kuma-cli monitors delete 14 --yes
 uptime-kuma-cli monitors tag 14 --tag 3 --value eu
 uptime-kuma-cli monitors untag 14 --tag 3 --value eu
 uptime-kuma-cli monitors retag 14 --tag 3 --value us
+uptime-kuma-cli monitors clear-beats 14 --yes
+uptime-kuma-cli monitors clear-events 14 --yes
 
 uptime-kuma-cli beats 14 --hours 6 --limit 20
 uptime-kuma-cli beats latest
 uptime-kuma-cli events 14 --hours 720 --by-day
+uptime-kuma-cli clear-statistics --yes
+uptime-kuma-cli database size
+uptime-kuma-cli database shrink --yes
 
 uptime-kuma-cli notifications list
 uptime-kuma-cli notifications add --name "ntfy" --type ntfy --config-file ntfy.json
@@ -139,6 +144,7 @@ uptime-kuma-cli api-keys delete 3 --yes
 - `settings set` sends the whole merged settings object like the UI does — a partial object would reset `entryPage`, toggle `nscd` and could disconnect other clients; precedence is fetched < `--config-file` < `--set`. The editable keys follow the connected Kuma version: `domainExpiryNotifyDays` and `globalpingApiToken` need 2.x, `dnsCache` is 1.x-only, and a key for the other version exits 2 after connect. `steamAPIKey` and `globalpingApiToken` only go through `--config-file`, the literal `"***"` is refused there, and both print as `***`; a `primaryBaseURL` password prints as `***` too, is refused in `--set` (use `--config-file`) and its masked form is refused when fed back, and any `?` / `#` is refused; `serverTimezone` accepts only the names the connected version's UI offers that Kuma also takes, case-sensitively; turning `disableAuth` on re-checks the login password and turning it back off disconnects other clients; `chromeExecutable` / `nscd` changes take effect immediately; if the post-save re-read fails the sent object is printed with a warning and exit code 0
 - Push monitors get their token in the same `add` call; the output carries `pushToken` and `pushUrl`
 - `api-keys add` prints the clear key once — Kuma stores only its hash, so it cannot be read again; `--expires` takes a local ISO datetime without an offset or fractional seconds and is stored in the UI's `yyyy-MM-dd HH:mm:ss` form, omitting it means the key never expires. The first add also switches `/metrics` to API-key-only auth — login credentials stop working there and deleting every key does not switch it back
+- `monitors clear-beats` deletes a monitor's heartbeat rows; `monitors clear-events` only clears the messages and important flags so `events` shows nothing while `beats` keeps the history; `clear-statistics` does the beat delete for every monitor; `database shrink` runs VACUUM and `database size` reports the file size in bytes — all of them need `--yes` except `database size`
 - `--paused` creates the monitor without starting it (push to a paused monitor returns HTTP 404, so resume before the pusher starts)
 - Kuma only notifies on status changes; with `resendInterval` 0 a monitor that stays down does not notify again
 - Notification configs, proxy passwords and secret monitor fields (basic auth, OAuth secret, TLS key, headers, body, ...) are never printed; pass secrets with `--config-file` / `--password-file`. The Kuma 2.x monitor secrets `bearer_token`, `gamedigToken`, `rabbitmqPassword`, `sshPassword`, `sshPrivateKey` and `sshPassphrase` print as `***` the same way

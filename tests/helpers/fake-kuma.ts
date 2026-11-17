@@ -253,6 +253,11 @@ export type FakeState = {
   dropInsteadOfLists: boolean;
   // drop the connection right after pushing the lists (and the heartbeats not silenced)
   dropAfterLists: boolean;
+  // bytes getDatabaseSize reports: Kuma's Database.getSize is the db file's
+  // stat size; shrinkDatabase's VACUUM effect on it is not modeled
+  databaseSize: number;
+  // getDatabaseSize answer override; null answers { ok: true, size: databaseSize }
+  databaseSizeResult: Record<string, unknown> | null;
 };
 
 export type FakeKuma = { url: string; calls: Call[]; state: FakeState; close: () => Promise<void> };
@@ -495,6 +500,8 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     disconnectOn: null,
     dropInsteadOfLists: false,
     dropAfterLists: false,
+    databaseSize: 1048576,
+    databaseSizeResult: null,
     ...init,
   };
   const calls: Call[] = [];
@@ -995,6 +1002,47 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
       const data = (state.beats[Number(id)] ?? []).filter((b) => beatTime(b) > cutoff);
       return { ok: true, data: structuredClone(data) };
     });
+
+    // clearEvents of Kuma 1.23.17: msg and important are reset on every
+    // heartbeat row of the monitor — the rows stay so uptime keeps its
+    // history — then the important list is re-pushed with overwrite. 2.x
+    // answers the same but does not re-push.
+    handle("clearEvents", (monitorID: number) => {
+      const id = Number(monitorID);
+      for (const b of state.beats[id] ?? []) {
+        b.msg = "";
+        b.important = 0;
+      }
+      if (state.profile !== "2.x") socket.emit("importantHeartbeatList", id, [], true);
+      return { ok: true };
+    });
+
+    // clearHeartbeats deletes the monitor's heartbeat rows and re-pushes its
+    // (now empty) heartbeatList with overwrite. 2.x additionally clears the
+    // stat tables and restarts an active monitor; neither is modeled.
+    handle("clearHeartbeats", (monitorID: number) => {
+      const id = Number(monitorID);
+      state.beats[id] = [];
+      socket.emit("heartbeatList", id, [], true);
+      return { ok: true };
+    });
+
+    // clearStatistics deletes the whole heartbeat table — every monitor's
+    // beats, events and the stats derived from them — and re-pushes nothing.
+    // 2.x also clears the stat tables and restarts active monitors.
+    handle("clearStatistics", () => {
+      state.beats = {};
+      return { ok: true };
+    });
+
+    // getDatabaseSize answers the db file's size in bytes
+    // (fs.statSync(Database.path).size); shrinkDatabase runs VACUUM, whose
+    // file-size effect the fake does not model.
+    handle(
+      "getDatabaseSize",
+      () => state.databaseSizeResult ?? { ok: true, size: state.databaseSize },
+    );
+    handle("shrinkDatabase", () => ({ ok: true }));
 
     handle("addNotification", (n: Record<string, unknown>, id: number | null) => {
       let row: NotificationRow | undefined;

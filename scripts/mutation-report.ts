@@ -34,6 +34,10 @@ export const MUTATION_TESTS: Record<string, { cmd: string; timeout: number }> = 
     cmd: "bun test tests/docker-hosts.test.ts",
     timeout: 60,
   },
+  "src/commands/housekeeping.ts": {
+    cmd: "bun test tests/housekeeping.test.ts",
+    timeout: 60,
+  },
   "src/commands/maintenance.ts": {
     cmd: "bun test tests/maintenance.test.ts",
     timeout: 120,

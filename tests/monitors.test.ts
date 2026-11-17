@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { type FakeKuma, startFakeKuma } from "./helpers/fake-kuma";
+import { beat, type FakeKuma, startFakeKuma } from "./helpers/fake-kuma";
 import { creds, run, type Sandbox, sandbox } from "./helpers/run";
 
 let kuma: FakeKuma;
@@ -4723,6 +4723,109 @@ describe("monitors delete", () => {
     expect(r.code).toBe(1);
     expect(r.stderr).toContain("cannot delete");
     expect(kuma.state.monitors.map((m) => m.id).sort((a, b) => a - b)).toEqual([2, 7, 9]);
+  });
+});
+
+describe("monitors clear-beats", () => {
+  beforeEach(() => {
+    kuma.state.beats = {
+      7: [beat(7, 30, 1), beat(7, 10, 0, 1, "down")],
+      2: [beat(2, 5, 1)],
+    };
+  });
+
+  test("deletes the monitor's beats and prints { id, cleared: 'beats' }", async () => {
+    const r = await run(sb, ["monitors", "clear-beats", "7", "--yes"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json()).toEqual({ id: 7, cleared: "beats" });
+    expect(kuma.calls.find((c) => c.event === "clearHeartbeats")!.args).toEqual([7]);
+    expect(kuma.state.beats[7]).toEqual([]);
+    expect(kuma.state.beats[2]).toHaveLength(1);
+  });
+
+  test("without --yes exits 2 before connecting", async () => {
+    const r = await run(sb, ["monitors", "clear-beats", "7"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("would clear beats of monitor 7");
+    expect(r.stderr).toContain("--yes");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("an invalid id exits 2 before connecting", async () => {
+    const r = await run(sb, ["monitors", "clear-beats", "abc", "--yes"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("positive integer");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("an unknown id exits 1 without sending clearHeartbeats", async () => {
+    const r = await run(sb, ["monitors", "clear-beats", "404", "--yes"], creds(kuma.url));
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("monitor 404 not found");
+    expect(kuma.calls.find((c) => c.event === "clearHeartbeats")).toBeUndefined();
+    expect(kuma.state.beats[7]).toHaveLength(2);
+  });
+
+  test("Kuma's ok:false exits 1 with its message", async () => {
+    kuma.state.fail.clearHeartbeats = "cannot clear";
+    const r = await run(sb, ["monitors", "clear-beats", "7", "--yes"], creds(kuma.url));
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("cannot clear");
+    expect(kuma.state.beats[7]).toHaveLength(2);
+  });
+});
+
+describe("monitors clear-events", () => {
+  beforeEach(() => {
+    kuma.state.beats = {
+      7: [beat(7, 30, 1, 1, "up"), beat(7, 10, 0, 1, "down"), beat(7, 5, 1, 0, "ok")],
+      2: [beat(2, 5, 0, 1, "keep")],
+    };
+  });
+
+  test("clears msg and important on the monitor's beats and prints the result", async () => {
+    const r = await run(sb, ["monitors", "clear-events", "7", "--yes"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json()).toEqual({ id: 7, cleared: "events" });
+    expect(kuma.calls.find((c) => c.event === "clearEvents")!.args).toEqual([7]);
+    expect(kuma.state.beats[7]).toHaveLength(3);
+    for (const b of kuma.state.beats[7]!) {
+      expect(b.msg).toBe("");
+      expect(b.important).toBe(0);
+    }
+    // other monitors keep their beats and flags
+    expect(kuma.state.beats[2]![0]).toMatchObject({ msg: "keep", important: 1 });
+  });
+
+  test("without --yes exits 2 before connecting", async () => {
+    const r = await run(sb, ["monitors", "clear-events", "7"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("would clear events of monitor 7");
+    expect(r.stderr).toContain("--yes");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("an invalid id exits 2 before connecting", async () => {
+    const r = await run(sb, ["monitors", "clear-events", "abc", "--yes"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("positive integer");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("an unknown id exits 1 without sending clearEvents", async () => {
+    const r = await run(sb, ["monitors", "clear-events", "404", "--yes"], creds(kuma.url));
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("monitor 404 not found");
+    expect(kuma.calls.find((c) => c.event === "clearEvents")).toBeUndefined();
+    expect(kuma.state.beats[7]).toHaveLength(3);
+  });
+
+  test("Kuma's ok:false exits 1 with its message", async () => {
+    kuma.state.fail.clearEvents = "cannot clear";
+    const r = await run(sb, ["monitors", "clear-events", "7", "--yes"], creds(kuma.url));
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("cannot clear");
+    expect(kuma.state.beats[7]![0]).toMatchObject({ msg: "up", important: 1 });
   });
 });
 
