@@ -156,7 +156,7 @@ uptime-kuma-cli settings set --config-file settings.json
 ## Contributing
 
 - Open a pull request; CI runs `check`, `static`, `coverage`, `integration` (Kuma 1.23 and 2.x) and `mutation` (report-only). Branch protection on `main` requires `check`, both `integration` jobs, `opencode / review` and `coderabbit-review` to pass, and all review conversations to be resolved before merge
-- `.github/PULL_REQUEST_TEMPLATE.md` is the PR body: it asks for the verification results (both integration images with pass/fail counts, coverage numbers) and a per-commit record of the CodeRabbit / opencode reviews and what was done with their findings
+- `.github/PULL_REQUEST_TEMPLATE.md` is the PR body: it asks for the verification results (both integration images with pass/fail counts, coverage numbers) and a review log — one row per review round with the reviewed commit, the findings, and what was done with them
 - CodeRabbit and opencode review every PR automatically. `coderabbit-review` is a commit status this repo publishes itself: it turns green only when CodeRabbit's own status reports `Review completed` — CodeRabbit's check stays green even when it is rate limited or skips the review, so it cannot be required directly
 - When `coderabbit-review` fails, the status description says why; comment `@coderabbitai review` on the PR to request a new review (for a paused review `@coderabbitai resume` also works; when CodeRabbit reports no files to review, `@coderabbitai full review` reviews the whole diff), then resolve every review thread — unresolved threads block the merge
 
