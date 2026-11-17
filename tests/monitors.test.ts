@@ -4795,6 +4795,10 @@ describe("monitors clear-events", () => {
     }
     // other monitors keep their beats and flags
     expect(kuma.state.beats[2]![0]).toMatchObject({ msg: "keep", important: 1 });
+    // 1.x re-pushes importantHeartbeatList after clearing
+    expect(
+      kuma.emitted.filter((e) => e.event === "importantHeartbeatList" && e.args[2] === true),
+    ).toHaveLength(1);
   });
 
   test("without --yes exits 2 before connecting", async () => {
@@ -4826,6 +4830,23 @@ describe("monitors clear-events", () => {
     expect(r.code).toBe(1);
     expect(r.stderr).toContain("cannot clear");
     expect(kuma.state.beats[7]![0]).toMatchObject({ msg: "up", important: 1 });
+  });
+
+  test("on 2.x does not re-push importantHeartbeatList", async () => {
+    const k2 = await startFakeKuma({
+      profile: "2.x",
+      monitors: [http(7, "Taba")],
+      beats: { 7: [beat(7, 30, 1, 1, "up")] },
+    });
+    try {
+      const r = await run(sb, ["monitors", "clear-events", "7", "--yes"], creds(k2.url));
+      expect(r.code).toBe(0);
+      expect(
+        k2.emitted.filter((e) => e.event === "importantHeartbeatList" && e.args[2] === true),
+      ).toHaveLength(0);
+    } finally {
+      await k2.close();
+    }
   });
 });
 

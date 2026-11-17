@@ -80,11 +80,23 @@ describe("database size", () => {
 });
 
 describe("database shrink", () => {
-  test("shrinks the database and prints { shrunk: true }", async () => {
+  test("on 1.x prints { started: true } — Kuma acks before VACUUM finishes", async () => {
     const r = await run(sb, ["database", "shrink", "--yes"], creds(kuma.url));
     expect(r.code).toBe(0);
-    expect(r.json()).toEqual({ shrunk: true });
+    expect(r.json()).toEqual({ started: true });
     expect(kuma.calls.find((c) => c.event === "shrinkDatabase")!.args).toEqual([]);
+  });
+
+  test("on 2.x prints { shrunk: true } — the ack follows the awaited VACUUM", async () => {
+    const k2 = await startFakeKuma({ profile: "2.x" });
+    try {
+      const r = await run(sb, ["database", "shrink", "--yes"], creds(k2.url));
+      expect(r.code).toBe(0);
+      expect(r.json()).toEqual({ shrunk: true });
+      expect(k2.calls.find((c) => c.event === "shrinkDatabase")!.args).toEqual([]);
+    } finally {
+      await k2.close();
+    }
   });
 
   test("without --yes exits 2 before connecting", async () => {
@@ -103,20 +115,31 @@ describe("database shrink", () => {
   });
 
   test("the ack wait outlives UPTIME_KUMA_TIMEOUT for a slow VACUUM", async () => {
-    kuma.state.ackDelay.shrinkDatabase = 3500;
-    const r = await run(sb, ["database", "shrink", "--yes"], creds(kuma.url));
-    expect(r.code).toBe(0);
-    expect(r.json()).toEqual({ shrunk: true });
+    // a slow ack is a 2.x shape: 1.23.17 answers before VACUUM finishes
+    const k2 = await startFakeKuma({ profile: "2.x" });
+    try {
+      k2.state.ackDelay.shrinkDatabase = 3500;
+      const r = await run(sb, ["database", "shrink", "--yes"], creds(k2.url));
+      expect(r.code).toBe(0);
+      expect(r.json()).toEqual({ shrunk: true });
+    } finally {
+      await k2.close();
+    }
   }, 15_000);
 
   test("UPTIME_KUMA_SHRINK_TIMEOUT bounds the ack wait", async () => {
-    kuma.state.ackDelay.shrinkDatabase = 3500;
-    const r = await run(sb, ["database", "shrink", "--yes"], {
-      ...creds(kuma.url),
-      UPTIME_KUMA_SHRINK_TIMEOUT: "2",
-    });
-    expect(r.code).toBe(2);
-    expect(r.stderr).toContain("timed out during shrinkDatabase");
+    const k2 = await startFakeKuma({ profile: "2.x" });
+    try {
+      k2.state.ackDelay.shrinkDatabase = 3500;
+      const r = await run(sb, ["database", "shrink", "--yes"], {
+        ...creds(k2.url),
+        UPTIME_KUMA_SHRINK_TIMEOUT: "2",
+      });
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("timed out during shrinkDatabase");
+    } finally {
+      await k2.close();
+    }
   }, 15_000);
 
   test("an invalid UPTIME_KUMA_SHRINK_TIMEOUT exits 2 before connecting", async () => {
@@ -127,5 +150,50 @@ describe("database shrink", () => {
     expect(r.code).toBe(2);
     expect(r.stderr).toContain("UPTIME_KUMA_SHRINK_TIMEOUT");
     expect(kuma.calls).toHaveLength(0);
+  });
+});
+
+describe("database commands on a non-sqlite 2.x backend", () => {
+  const mariadb = async () => {
+    const k2 = await startFakeKuma({ profile: "2.x" });
+    k2.state.info = { ...k2.state.info, dbType: "mariadb" };
+    return k2;
+  };
+
+  test("database size exits 2 naming the backend, without requesting", async () => {
+    const k2 = await mariadb();
+    try {
+      const r = await run(sb, ["database", "size"], creds(k2.url));
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain('"database size" needs a sqlite database');
+      expect(r.stderr).toContain('"mariadb"');
+      expect(k2.calls.find((c) => c.event === "getDatabaseSize")).toBeUndefined();
+    } finally {
+      await k2.close();
+    }
+  });
+
+  test("database shrink exits 2 naming the backend, without requesting", async () => {
+    const k2 = await mariadb();
+    try {
+      const r = await run(sb, ["database", "shrink", "--yes"], creds(k2.url));
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain('"database shrink" needs a sqlite database');
+      expect(r.stderr).toContain('"mariadb"');
+      expect(k2.calls.find((c) => c.event === "shrinkDatabase")).toBeUndefined();
+    } finally {
+      await k2.close();
+    }
+  });
+
+  test("a sqlite 2.x backend still answers database size", async () => {
+    const k2 = await startFakeKuma({ profile: "2.x" });
+    try {
+      const r = await run(sb, ["database", "size"], creds(k2.url));
+      expect(r.code).toBe(0);
+      expect(r.json()).toEqual({ sizeBytes: 1048576 });
+    } finally {
+      await k2.close();
+    }
   });
 });

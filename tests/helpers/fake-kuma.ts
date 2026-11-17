@@ -263,7 +263,13 @@ export type FakeState = {
   ackDelay: Record<string, number>;
 };
 
-export type FakeKuma = { url: string; calls: Call[]; state: FakeState; close: () => Promise<void> };
+export type FakeKuma = {
+  url: string;
+  calls: Call[];
+  emitted: Call[];
+  state: FakeState;
+  close: () => Promise<void>;
+};
 
 const now = () => new Date().toISOString().replace("T", " ").slice(0, 19);
 const beatTime = (b: Beat): number => Date.parse(`${b.time.replace(" ", "T")}Z`);
@@ -509,6 +515,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     ...init,
   };
   const calls: Call[] = [];
+  const emitted: Call[] = [];
   const http = createServer();
   const io = new Server(http);
   // apicache of the /api/status-page/:slug route: keyed by req.url (path +
@@ -763,6 +770,11 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
   };
 
   io.on("connection", (socket) => {
+    const emit = socket.emit.bind(socket);
+    socket.emit = ((event: string, ...args: unknown[]) => {
+      emitted.push({ event, args: structuredClone(args) });
+      return emit(event, ...args);
+    }) as typeof socket.emit;
     let loggedIn = false;
     // sendInfo(socket, true) on connection hides the version fields until
     // login; Kuma always sends it, so info: null still sends an empty one
@@ -1043,12 +1055,18 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     });
 
     // getDatabaseSize answers the db file's size in bytes
-    // (fs.statSync(Database.path).size); shrinkDatabase runs VACUUM, whose
-    // file-size effect the fake does not model.
-    handle(
-      "getDatabaseSize",
-      () => state.databaseSizeResult ?? { ok: true, size: state.databaseSize },
-    );
+    // (fs.statSync(Database.path).size on 1.x, stat(sqlitePath) on 2.x — 0 on
+    // a non-sqlite backend); shrinkDatabase runs VACUUM, whose file-size
+    // effect the fake does not model. 1.23.17's handler does not await
+    // shrink() so its ok precedes VACUUM's end; 2.x awaits it — ackDelay
+    // models that wait when a test needs it.
+    handle("getDatabaseSize", () => {
+      const dbType = state.info?.dbType;
+      if (state.profile === "2.x" && dbType !== undefined && dbType !== "sqlite") {
+        return { ok: true, size: 0 };
+      }
+      return state.databaseSizeResult ?? { ok: true, size: state.databaseSize };
+    });
     handle("shrinkDatabase", () => ({ ok: true }));
 
     handle("addNotification", (n: Record<string, unknown>, id: number | null) => {
@@ -1841,6 +1859,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
   return {
     url: `http://127.0.0.1:${port}`,
     calls,
+    emitted,
     state,
     close: () =>
       new Promise<void>((r) => {

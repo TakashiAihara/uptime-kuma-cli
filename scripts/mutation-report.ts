@@ -67,7 +67,7 @@ export const MUTATION_TESTS: Record<string, { cmd: string; timeout: number }> = 
     timeout: 60,
   },
   "src/kuma.ts": {
-    cmd: "bun test tests/monitors.test.ts tests/tags.test.ts tests/settings.test.ts tests/docker-hosts.test.ts tests/api-keys.test.ts",
+    cmd: "bun test tests/monitors.test.ts tests/tags.test.ts tests/settings.test.ts tests/docker-hosts.test.ts tests/api-keys.test.ts tests/housekeeping.test.ts",
     timeout: 180,
   },
   // the local-datetime helpers live here and are exercised through the

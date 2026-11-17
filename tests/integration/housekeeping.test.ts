@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { sandbox, type Sandbox } from "../helpers/run";
-import { cliRun } from "./helpers";
+import { cliRun, on2x } from "./helpers";
 
 // Runs only when scripts/integration.ts provides UPTIME_KUMA_IT_*; a plain
 // `bun test` skips the whole file.
@@ -31,7 +31,7 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("housekeeping (real Kuma)", () 
   test("database shrink --yes succeeds", async () => {
     const r = await cliRun(sb, ["database", "shrink", "--yes"]);
     expect(r.code).toBe(0);
-    expect(r.json()).toEqual({ shrunk: true });
+    expect(r.json()).toEqual(on2x ? { shrunk: true } : { started: true });
   }, 120_000);
 
   test("add and resume a push monitor", async () => {
