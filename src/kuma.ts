@@ -293,6 +293,10 @@ export class KumaSession {
     return [...this.dockerHostList].sort((a, b) => a.id - b.id);
   }
 
+  dockerHostById(id: number): DockerHostRow | undefined {
+    return this.dockerHosts().find((h) => h.id === id);
+  }
+
   statusPages(): StatusPageRow[] {
     const list = this.statusPageList;
     if (list === undefined) fail(70, "statusPageList was not awaited");

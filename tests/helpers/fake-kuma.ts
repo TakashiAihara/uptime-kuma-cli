@@ -65,6 +65,16 @@ export type IncidentRow = {
 
 export type Call = { event: string; args: unknown[] };
 export type TagRow = { id: number; name: string; color: string };
+// dockerHostList rows are DockerHost.toJSON() ({ id, userID, dockerDaemon,
+// dockerType, name }); the columns are nullable and fixtures may set only id
+// for the monitor docker_host check
+export type DockerHostRow = {
+  id: number;
+  userID?: number;
+  dockerDaemon?: string | null;
+  dockerType?: string | null;
+  name?: string | null;
+};
 // monitor.toJSON sends monitor.tags as the monitor_tag⋈tag join:
 // mt.* (id, monitor_id, tag_id, value) plus tag.name and tag.color
 export type MonitorTagRow = {
@@ -125,7 +135,7 @@ export type FakeState = {
   // rows returned by getTags; Kuma 1.23 does not push a tag list after login
   tags: TagRow[];
   // rows pushed as dockerHostList after login; the CLI checks docker_host ids against them
-  dockerHosts: { id: number }[];
+  dockerHosts: DockerHostRow[];
   // rows pushed as statusPageList after login (StatusPage.toJSON values)
   statusPages: StatusPageRow[];
   // incident rows; the public route shows the pinned+active one per page
@@ -1057,6 +1067,57 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
       );
       return { ok: true, msg: "Deleted" };
     });
+
+    // docker-socket-handler.js of Kuma 1.23.17: addDockerHost (dockerHost,
+    // dockerHostID) saves the three fields it reads and re-pushes
+    // dockerHostList; an id that is not the user's own answers ok:false
+    // "docker host not found". testDockerHost would dial the daemon for real;
+    // the fake answers a canned success and state.fail covers the failure.
+    handle(
+      "addDockerHost",
+      (
+        dockerHost: { name?: string; dockerType?: string; dockerDaemon?: string },
+        dockerHostID: number | null,
+      ) => {
+        let row: DockerHostRow | undefined;
+        if (dockerHostID) {
+          row = state.dockerHosts.find((h) => h.id === Number(dockerHostID));
+          if (!row) throw new Error("docker host not found");
+        } else {
+          row = { id: Math.max(0, ...state.dockerHosts.map((h) => h.id)) + 1 };
+          state.dockerHosts.push(row);
+        }
+        row.userID = 1;
+        row.dockerDaemon = dockerHost.dockerDaemon ?? null;
+        row.dockerType = dockerHost.dockerType ?? null;
+        row.name = dockerHost.name ?? null;
+        socket.emit(
+          "dockerHostList",
+          state.dockerHosts.map((h) => structuredClone(h)),
+        );
+        return { ok: true, msg: "Saved", id: row.id };
+      },
+    );
+
+    handle("deleteDockerHost", (dockerHostID: number) => {
+      const i = state.dockerHosts.findIndex((h) => h.id === Number(dockerHostID));
+      if (i < 0) throw new Error("docker host not found");
+      state.dockerHosts.splice(i, 1);
+      // DockerHost.delete nulls monitor.docker_host before trashing the row
+      for (const m of state.monitors) {
+        if (m.docker_host === Number(dockerHostID)) m.docker_host = null;
+      }
+      socket.emit(
+        "dockerHostList",
+        state.dockerHosts.map((h) => structuredClone(h)),
+      );
+      return { ok: true, msg: "Deleted" };
+    });
+
+    handle("testDockerHost", () => ({
+      ok: true,
+      msg: "Connected Successfully. Amount of containers: 2",
+    }));
 
     handle("getTags", () => ({ ok: true, tags: structuredClone(state.tags) }));
 

@@ -26,6 +26,10 @@ const DEFAULT_TIMEOUT = 300;
 // when a new src file has no entry here.
 export const MUTATION_TESTS: Record<string, { cmd: string; timeout: number }> = {
   "src/commands/beats.ts": { cmd: "bun test tests/beats.test.ts", timeout: 60 },
+  "src/commands/docker-hosts.ts": {
+    cmd: "bun test tests/docker-hosts.test.ts",
+    timeout: 60,
+  },
   "src/commands/maintenance.ts": {
     cmd: "bun test tests/maintenance.test.ts",
     timeout: 120,
@@ -55,7 +59,7 @@ export const MUTATION_TESTS: Record<string, { cmd: string; timeout: number }> = 
     timeout: 60,
   },
   "src/kuma.ts": {
-    cmd: "bun test tests/monitors.test.ts tests/tags.test.ts tests/settings.test.ts",
+    cmd: "bun test tests/monitors.test.ts tests/tags.test.ts tests/settings.test.ts tests/docker-hosts.test.ts",
     timeout: 180,
   },
   "src/lib.ts": { cmd: "bun test tests/config.test.ts tests/tags.test.ts", timeout: 60 },

@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { Command, CommanderError } from "commander";
 import { registerBeats, registerEvents } from "./commands/beats.ts";
+import { registerDockerHosts } from "./commands/docker-hosts.ts";
 import { registerMaintenance } from "./commands/maintenance.ts";
 import { registerMonitors } from "./commands/monitors.ts";
 import { registerNotifications } from "./commands/notifications.ts";
@@ -25,6 +26,7 @@ function buildProgram(): Command {
   registerEvents(program);
   registerNotifications(program);
   registerProxies(program);
+  registerDockerHosts(program);
   registerTags(program);
   registerMaintenance(program);
   registerStatusPages(program);
