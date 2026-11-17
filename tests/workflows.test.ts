@@ -373,11 +373,19 @@ describe("ci.yml dependency audit", () => {
   // Dependabot's alerts read package.json, not bun.lock. Removing the step
   // silently drops that coverage, so pin that the check job still runs it.
   // The run line may carry the --ignore flags README documents for accepting
-  // a finding; anything else (e.g. `|| true`) fails the gate it guards.
+  // a finding; the value takes advisory-ID characters only, so a shell
+  // operator like `||` cannot be smuggled in to mask the failure.
+  const AUDIT_RUN = /^bun audit(?: --ignore[= ][A-Za-z0-9-]+)*$/;
+
   test("the check job fails on known vulnerabilities in bun.lock", () => {
     const audit = ci().jobs.check.steps.find((s) => s.name === "dependency audit");
 
-    expect(audit?.run?.trim()).toMatch(/^bun audit(?: --ignore[= ]\S+)*$/);
+    expect(audit?.run?.trim()).toMatch(AUDIT_RUN);
+  });
+
+  test("the audit pin rejects run lines that mask a failure", () => {
+    expect("bun audit || true").not.toMatch(AUDIT_RUN);
+    expect("bun audit --ignore=123||true").not.toMatch(AUDIT_RUN);
   });
 });
 
