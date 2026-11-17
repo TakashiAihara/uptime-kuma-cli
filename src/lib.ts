@@ -379,8 +379,10 @@ function totpSecret(output: string): string {
   const text = output.trim();
   if (!text.toLowerCase().startsWith("otpauth://")) return text;
   // a fragment is not part of the query; without this the "#..." tail would
-  // glue itself onto the last parameter's value
-  const hash = text.indexOf("#");
+  // glue itself onto the last parameter's value. Only a "#" after the "?"
+  // counts: Kuma embeds the username unencoded in the label, so a "#"
+  // there is part of the name, not markup.
+  const hash = text.indexOf("#", text.indexOf("?"));
   const uri = hash === -1 ? text : text.slice(0, hash);
   const query = uri.includes("?") ? uri.slice(uri.indexOf("?")) : "";
   const params = new URLSearchParams(query);
@@ -428,9 +430,10 @@ export type TotpResolution = {
   // token equal to the last accepted one and a TOTP repeats every 30 s, so a
   // second login inside one window collides; the adjacent counters' tokens
   // still verify (Kuma's ±1 window) but differ. The previous window goes
-  // first: its code has already rotated out of the authenticator app, so
-  // spending it cannot collide with a code the user still sees; the next
-  // window's code stays unused unless the previous one cannot verify.
+  // first: its code has usually rotated out of the authenticator app, so
+  // spending it is unlikely to collide with a code the user still sees;
+  // the next window's code stays unused unless the previous one cannot
+  // verify.
   retryTokens: string[];
 };
 
@@ -439,12 +442,8 @@ export type TotpResolution = {
 // a command that prints a ready token, then a command that prints the secret
 // the CLI turns into one.
 export async function resolveTotp(): Promise<TotpResolution> {
-  const envToken = process.env.UPTIME_KUMA_TOTP;
-  if (envToken !== undefined) {
-    const token = envToken.trim();
-    if (!token) fail(2, "UPTIME_KUMA_TOTP is set but empty");
-    return { token, retryTokens: [] };
-  }
+  const envToken = process.env.UPTIME_KUMA_TOTP?.trim();
+  if (envToken) return { token: envToken, retryTokens: [] };
   const config = loadConfig();
   const timeoutMs = commandTimeoutMs();
   if (config.totp_command !== undefined) {

@@ -205,12 +205,12 @@ describe("credentials and url", () => {
     expect(r.code).toBe(0);
   });
 
-  test("an otpauth URI ignores a fragment", async () => {
+  test.each([
+    "otpauth://totp/a:b?secret=%41%41%41%41%41%41%41%41%41%41%41%41%41%41%41%41#note",
+    "otpauth://totp/user#name?secret=%41%41%41%41%41%41%41%41%41%41%41%41%41%41%41%41",
+  ])("an otpauth URI tolerates a hash: %s", async (uri) => {
     kuma.state.twoFA = true;
-    writeConfig(
-      sb,
-      `totp_secret_command = 'echo "otpauth://totp/a:b?secret=%41%41%41%41%41%41%41%41%41%41%41%41%41%41%41%41#note"'`,
-    );
+    writeConfig(sb, `totp_secret_command = "echo '${uri}'"`);
     const r = await run(sb, list, creds(kuma.url));
     expect(r.code).toBe(0);
   });
@@ -350,7 +350,7 @@ describe("credentials and url", () => {
     for (const token of tokens.slice(1)) expect(token).toMatch(/^\d{1,6}$/);
   });
 
-  test("a same-window relogin bumps the secret-derived token to the next counter", async () => {
+  test("a same-window relogin retries the previous counter's token", async () => {
     kuma.state.twoFA = true;
     writeConfig(sb, `totp_secret_command = "printenv IT_TOTP_SECRET"`);
     const env = { ...creds(kuma.url), IT_TOTP_SECRET: kuma.state.twoFASecret };
@@ -363,7 +363,9 @@ describe("credentials and url", () => {
       const tokens = loginTokens();
       expect(tokens).toHaveLength(5);
       expect(tokens[3]).toBe(tokens[1]);
-      expect(tokens[4]).not.toBe(tokens[1]);
+      // pinned clock: counter 60_000_000, so the first retry is the
+      // previous window's token (counter 59_999_999)
+      expect(tokens[4]).toBe(totpToken(FAKE_TOTP_SECRET, 1_799_999_970_000));
     } finally {
       setSystemTime();
     }
@@ -388,6 +390,32 @@ describe("credentials and url", () => {
       // pinned clock: counter 60_000_000, so the winning retry is the
       // previous window's token (counter 59_999_999)
       expect(tokens[4]).toBe(totpToken(secret, 1_799_999_970_000));
+    } finally {
+      setSystemTime();
+    }
+  });
+
+  test("a same-window relogin logs in when the server clock is ahead", async () => {
+    kuma.state.twoFA = true;
+    const secret = "BBBBBBBBBBBBBBBB";
+    kuma.state.twoFASecret = secret;
+    // the fake's clock runs 40 s ahead, so the client's previous-window
+    // token falls outside the server's ±1 window and only the
+    // next-window retry verifies
+    kuma.state.twoFASkewMs = 40_000;
+    writeConfig(sb, `totp_secret_command = "printenv IT_TOTP_SECRET"`);
+    const env = { ...creds(kuma.url), IT_TOTP_SECRET: secret };
+    setSystemTime(1_800_000_000_000);
+    try {
+      expect((await run(sb, list, env)).code).toBe(0);
+      expect((await run(sb, list, env)).code).toBe(0);
+      const tokens = loginTokens();
+      expect(tokens).toHaveLength(6);
+      // pinned clock: counter 60_000_000 vs the server's 60_000_001, so
+      // the first retry (previous window) fails and the second (next)
+      // verifies — the order is pinned by the exact tokens
+      expect(tokens[4]).toBe(totpToken(secret, 1_799_999_970_000));
+      expect(tokens[5]).toBe(totpToken(secret, 1_800_000_030_000));
     } finally {
       setSystemTime();
     }
@@ -536,15 +564,18 @@ describe("credentials and url", () => {
     }
   });
 
-  test("a blank UPTIME_KUMA_TOTP exits 2 instead of falling through", async () => {
+  test("a blank UPTIME_KUMA_TOTP falls through to totp_command", async () => {
     kuma.state.twoFA = true;
-    writeConfig(sb, `totp_command = "echo 123456"`);
+    writeConfig(sb, `totp_command = "${writeTotpGen()}"`);
     const r = await run(sb, list, {
       ...creds(kuma.url),
+      IT_TOTP_SECRET: FAKE_TOTP_SECRET,
       UPTIME_KUMA_TOTP: "   ",
     });
-    expect(r.code).toBe(2);
-    expect(r.stderr).toContain("UPTIME_KUMA_TOTP is set but empty");
+    expect(r.code).toBe(0);
+    const tokens = loginTokens();
+    expect(tokens).toHaveLength(2);
+    expect(tokens[1]).toMatch(/^\d{1,6}$/);
   });
   test("an account without 2FA sends no token and runs no totp command", async () => {
     const marker = join(sb.dir, "ran");

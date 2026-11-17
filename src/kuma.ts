@@ -616,8 +616,8 @@ export async function connect(
     // invalid-token answer is about the token itself — "Invalid Token!" on
     // Kuma 1.x, the i18n key "authInvalidToken" on 2.x. Only the
     // CLI-generated secret path can mint the adjacent counters' tokens —
-    // each still verifies (Kuma's ±1 window) and differs from the rejected
-    // one.
+    // each differs from the rejected one and verifies while the skew
+    // stays inside Kuma's ±1 window.
     for (const retryToken of totp.retryTokens) {
       if (
         login?.ok !== false ||
