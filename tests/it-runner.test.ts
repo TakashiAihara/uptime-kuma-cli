@@ -90,6 +90,10 @@ if (process.env.FAKE_TEST_HANG === "1") {
     process.on("SIGTERM", term);
     process.on("SIGINT", term);
   }
+  const gc = process.env.FAKE_BUILD_GRANDCHILD;
+  if (process.env.FAKE_TEST_GC === "1" && gc !== undefined) {
+    Bun.spawn([gc], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+  }
   appendFileSync(log, "bun-test-child started\\n");
   await new Promise((r) => setTimeout(r, 120_000));
 }
@@ -441,6 +445,27 @@ describe("scripts/integration.ts signal handling", () => {
     expect(await runner.exited).toBe(130);
     const gcPid = Number(readFileSync(pidFile, "utf8").trim());
     expect(await processGone(gcPid)).toBe(true);
+  }, 30_000);
+
+  test("SIGINT during bun test leaves no test grandchild behind", async () => {
+    const pidFile = join(sb.dir, "grandchild.pid");
+    runner = startRunner(sb, kuma.port, {
+      FAKE_TEST_HANG: "1",
+      FAKE_TEST_GC: "1",
+      FAKE_GC_IGNORE_TERM: "1",
+      FAKE_GC_PIDFILE: pidFile,
+    });
+    await waitForLog(runner.log, "grandchild started");
+    runner.proc.kill("SIGINT");
+    expect(await runner.exited).toBe(130);
+    const gcPid = Number(readFileSync(pidFile, "utf8").trim());
+    expect(await processGone(gcPid)).toBe(true);
+  }, 30_000);
+
+  test("an invalid UPTIME_KUMA_IT_DOWN_TIMEOUT_MS fails fast", async () => {
+    runner = startRunner(sb, kuma.port, { UPTIME_KUMA_IT_DOWN_TIMEOUT_MS: "abc" });
+    expect(await runner.exited).toBe(1);
+    expect(await runner.output()).toContain("UPTIME_KUMA_IT_DOWN_TIMEOUT_MS");
   }, 30_000);
 
   test("a timed-out down -v is reaped before the next compose call", async () => {

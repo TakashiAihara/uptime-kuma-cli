@@ -34,7 +34,22 @@ const PASSWORD = "it-Passw0rd-1234";
 const CALL_TIMEOUT_MS = 30_000;
 const COMPOSE_UP_TIMEOUT_MS = 300_000;
 // Overridable so tests can reach the timeout path without waiting a minute.
-const COMPOSE_DOWN_TIMEOUT_MS = Number(process.env.UPTIME_KUMA_IT_DOWN_TIMEOUT_MS) || 60_000;
+// setTimeout overflows above 2^31-1 and fires after ~1ms, so the bound is
+// the timer's own range, not just "positive" — the same check
+// UPTIME_KUMA_IT_BIN_TIMEOUT_MS gets in tests/helpers/run.ts.
+const DOWN_TIMEOUT_ENV = process.env.UPTIME_KUMA_IT_DOWN_TIMEOUT_MS;
+const COMPOSE_DOWN_TIMEOUT_MS = DOWN_TIMEOUT_ENV === undefined ? 60_000 : Number(DOWN_TIMEOUT_ENV);
+if (
+  DOWN_TIMEOUT_ENV !== undefined &&
+  (!Number.isInteger(COMPOSE_DOWN_TIMEOUT_MS) ||
+    COMPOSE_DOWN_TIMEOUT_MS <= 0 ||
+    COMPOSE_DOWN_TIMEOUT_MS > 2_147_483_647)
+) {
+  console.error(
+    `UPTIME_KUMA_IT_DOWN_TIMEOUT_MS must be an integer between 1 and 2147483647, got "${DOWN_TIMEOUT_ENV}"`,
+  );
+  process.exit(1);
+}
 // A signalled `down -v` exits non-zero (Ctrl-C reaches it through the shared
 // process group), so teardown retries: the next attempt usually finishes the
 // removal the signal interrupted.
@@ -74,7 +89,7 @@ async function compose(args: string[], timeoutMs: number): Promise<number> {
     return await Promise.race([
       proc.exited,
       sleep(timeoutMs).then(async () => {
-        proc.kill();
+        killChild(proc);
         await awaitChildren([proc]);
         return -1;
       }),
@@ -165,8 +180,12 @@ let testProc: Child | undefined;
 
 async function runTests(kumaVersion: string): Promise<number> {
   console.log("running bun test tests/integration");
+  // detached gives the test run its own process group so a signal (or the
+  // timeout below) reaches the compiled-binary grandchildren the suite
+  // spawns, not just the bun test wrapper.
   const proc = Bun.spawn(["bun", "test", "tests/integration"], {
     cwd: REPO_ROOT,
+    detached: true,
     env: {
       ...process.env,
       UPTIME_KUMA_IT_URL: BASE_URL,
@@ -182,10 +201,11 @@ async function runTests(kumaVersion: string): Promise<number> {
     stderr: "inherit",
   });
   testProc = proc;
+  groupKillPids.add(proc.pid);
   const code = await Promise.race([
     proc.exited,
     sleep(TEST_LIMIT_MS).then(async () => {
-      proc.kill();
+      killChild(proc);
       await awaitChildren([proc]);
       return -1;
     }),
