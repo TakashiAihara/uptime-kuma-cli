@@ -1330,7 +1330,10 @@ export function registerMonitors(program: Command): void {
       };
       if (pushToken !== undefined) {
         out.pushToken = pushToken;
-        out.pushUrl = `${pushBase}/api/push/${encodeURIComponent(pushToken)}?status=up&msg=OK&ping=`;
+        // a password in primaryBaseURL (or the CLI url) prints as *** like settings get does;
+        // only the base is parsed, so a token like ".." is not resolved away as a dot segment
+        const shownBase = String(redactUrl(pushBase)).replace(/\/+$/, "");
+        out.pushUrl = `${shownBase}/api/push/${encodeURIComponent(pushToken)}?status=up&msg=OK&ping=`;
       }
       if (tagSpecs.length > 0) {
         const attached: Record<string, unknown>[] = [];
