@@ -7,8 +7,11 @@
  * louislam/uptime-kuma:1.23.17) from tests/integration/compose.yaml on
  * 127.0.0.1:${UPTIME_KUMA_IT_PORT:-3901} — the compose file sets
  * UPTIME_KUMA_DB_TYPE=sqlite, which 2.x needs to pick its database — creates
- * the first-run admin over Socket.IO, then runs `bun test tests/integration`
- * with UPTIME_KUMA_IT_* pointing at it. `down -v` (which also removes the
+ * the first-run admin over Socket.IO, builds the host binary with
+ * scripts/build.ts, then runs `bun test tests/integration` with
+ * UPTIME_KUMA_IT_* pointing at it and UPTIME_KUMA_IT_BIN at that binary, so
+ * the suite exercises the compiled artifact rather than only runCli.
+ * `down -v` (which also removes the
  * anonymous data volume) always runs before `up`, clearing a project left by
  * UPTIME_KUMA_IT_KEEP=1 or a killed run when the port matches — the project
  * name includes the port. UPTIME_KUMA_IT_KEEP=1 skips only the teardown
@@ -148,6 +151,9 @@ async function runTests(kumaVersion: string): Promise<number> {
       UPTIME_KUMA_IT_USERNAME: USERNAME,
       UPTIME_KUMA_IT_PASSWORD: PASSWORD,
       UPTIME_KUMA_IT_KUMA_VERSION: kumaVersion,
+      // after the ...process.env spread so an inherited value cannot point
+      // the suite at a stale binary instead of the build above
+      UPTIME_KUMA_IT_BIN: BIN,
     },
     stdin: "inherit",
     stdout: "inherit",
@@ -201,6 +207,24 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
     void teardown().finally(() => process.exit(code));
   });
 }
+
+// The suite runs the compiled binary, so the host target is built before
+// anything else — a compile error should not wait behind a multi-minute image
+// pull. Target names mirror TARGETS in scripts/build.ts; a host outside them
+// (windows, 32-bit linux) has no runnable binary.
+const HOST_TARGET = `${process.platform}-${process.arch}`;
+if (!["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"].includes(HOST_TARGET)) {
+  console.error(`no release target for ${HOST_TARGET}`);
+  process.exit(1);
+}
+console.log(`building dist/uptime-kuma-cli-${HOST_TARGET}`);
+const build = Bun.spawnSync(["bun", "scripts/build.ts", HOST_TARGET], {
+  cwd: REPO_ROOT,
+  stdout: "inherit",
+  stderr: "inherit",
+});
+if (build.exitCode !== 0) process.exit(build.exitCode ?? 1);
+const BIN = join(REPO_ROOT, "dist", `uptime-kuma-cli-${HOST_TARGET}`);
 
 let exitCode = 1;
 try {

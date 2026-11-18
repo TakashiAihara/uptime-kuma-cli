@@ -1,4 +1,12 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  accessSync,
+  constants,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { format } from "node:util";
@@ -23,13 +31,59 @@ export function writeConfig(sb: Sandbox, toml: string) {
   writeFileSync(join(d, "config.toml"), toml);
 }
 
-// In-process equivalent of spawning `bun src/cli.ts`: same clean env, same
-// captured stdout/stderr and exit code, but the run stays inside the test
-// process so `bun test --coverage` instruments src/commands too. console.*
-// bypasses process.stdout.write under Bun, so both are patched. The patched
-// globals are process-wide, so concurrent run() calls are rejected outright
-// instead of corrupting each other's env and captured output.
+// In-process equivalent of spawning the CLI: same clean env, same captured
+// stdout/stderr and exit code, but the run stays inside the test process so
+// `bun test --coverage` instruments src/commands too. console.* bypasses
+// process.stdout.write under Bun, so both are patched. The patched globals are
+// process-wide, so concurrent run() calls are rejected outright instead of
+// corrupting each other's env and captured output. UPTIME_KUMA_IT_BIN points
+// run() at a compiled binary instead, so the integration suite exercises the
+// artifact users install rather than runCli; the spawn path patches nothing
+// but shares the same guard so callers see one behavior.
 let runActive = false;
+
+// Well past the longest call the suite makes legitimately — per-test budgets
+// top out at 5 minutes, so a call still running then belongs to a failed
+// test — and it keeps a hung binary from holding `bun test` open past the
+// test timeouts that would otherwise be the only bound.
+const BIN_TIMEOUT_MS = 300_000;
+
+async function runBinary(
+  bin: string,
+  args: string[],
+  env: Record<string, string>,
+): Promise<Result> {
+  if (bin === "") throw new Error("UPTIME_KUMA_IT_BIN is set but empty");
+  if (!existsSync(bin)) {
+    throw new Error(`UPTIME_KUMA_IT_BIN=${bin} does not exist`);
+  }
+  try {
+    accessSync(bin, constants.X_OK);
+  } catch {
+    throw new Error(`UPTIME_KUMA_IT_BIN=${bin} is not executable`);
+  }
+  const proc = Bun.spawn([bin, ...args], {
+    env,
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const stdoutP = new Response(proc.stdout).text();
+  const stderrP = new Response(proc.stderr).text();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutP = new Promise<"timeout">((r) => {
+    timer = setTimeout(() => r("timeout"), BIN_TIMEOUT_MS);
+  });
+  const code = await Promise.race([proc.exited, timeoutP]);
+  clearTimeout(timer);
+  if (code === "timeout") {
+    proc.kill();
+    await Promise.allSettled([stdoutP, stderrP, proc.exited]);
+    throw new Error(`${bin} ${args.join(" ")} did not exit within ${BIN_TIMEOUT_MS}ms`);
+  }
+  const [stdout, stderr] = await Promise.all([stdoutP, stderrP]);
+  return { code, stdout, stderr, json: () => JSON.parse(stdout) };
+}
 
 export async function run(
   sb: Sandbox,
@@ -37,7 +91,7 @@ export async function run(
   env: Record<string, string | undefined> = {},
 ): Promise<Result> {
   if (runActive) {
-    throw new Error("run() cannot run concurrently: it patches process-wide globals");
+    throw new Error("run() cannot run concurrently");
   }
   runActive = true;
   const base: Record<string, string> = {
@@ -49,6 +103,15 @@ export async function run(
   for (const [k, v] of Object.entries(env)) {
     if (v === undefined) delete base[k];
     else base[k] = v;
+  }
+
+  const bin = process.env.UPTIME_KUMA_IT_BIN;
+  if (bin !== undefined) {
+    try {
+      return await runBinary(bin, args, base);
+    } finally {
+      runActive = false;
+    }
   }
 
   const savedEnv = { ...process.env };
