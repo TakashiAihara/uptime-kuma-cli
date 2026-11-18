@@ -712,6 +712,17 @@ describe("monitors add", () => {
     expect(r.stdout).not.toContain("s3cret");
   });
 
+  test("pushUrl masks a password in the CLI url when no Primary Base URL is set", async () => {
+    const withAuth = kuma.url.replace("://", "://user:s3cret@");
+    const r = await run(sb, ["monitors", "add", "--type", "push", "--name", "pb"], creds(withAuth));
+    expect(r.code).toBe(0);
+    const out = r.json();
+    expect(out.pushUrl).toBe(
+      `${kuma.url.replace("://", "://user:***@")}/api/push/${out.pushToken}?status=up&msg=OK&ping=`,
+    );
+    expect(r.stdout).not.toContain("s3cret");
+  });
+
   test.each([
     [["--type", "push", "--name", "x", "--push-token", ""], "--push-token"],
     [["--type", "push", "--name", "x", "--interval", ""], "--interval"],
