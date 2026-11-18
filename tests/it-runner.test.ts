@@ -50,7 +50,12 @@ const FAKE_BUN = `#!/bin/sh
 echo "bun $*" >> "$FAKE_LOG"
 case "$1" in
   *build.ts)
-    [ -n "$FAKE_BUILD_SLEEP" ] && sleep "$FAKE_BUILD_SLEEP"
+    if [ -n "$FAKE_BUILD_SLEEP" ]; then
+      sleep "$FAKE_BUILD_SLEEP" &
+      pid=$!
+      trap 'echo "build termed" >> "$FAKE_LOG"; kill "$pid" 2>/dev/null; exit 0' TERM
+      wait "$pid"
+    fi
     mkdir -p dist
     printf '#!/bin/sh\\nexit 0\\n' > "dist/uptime-kuma-cli-$2"
     chmod +x "dist/uptime-kuma-cli-$2"
@@ -271,16 +276,16 @@ describe("scripts/integration.ts signal handling", () => {
     expect(lastDown).toBeGreaterThan(termed);
   }, 30_000);
 
-  test("SIGINT during the build skips up and still tears down", async () => {
-    runner = startRunner(sb, kuma.port, { FAKE_BUILD_SLEEP: "2" });
+  test("SIGINT during the build kills it and still tears down", async () => {
+    runner = startRunner(sb, kuma.port, { FAKE_BUILD_SLEEP: "60" });
     await waitForLog(runner.log, "build.ts");
     runner.proc.kill("SIGINT");
     expect(await runner.exited).toBe(130);
     const log = readFileSync(runner.log, "utf8");
+    expect(log).toContain("build termed");
     expect(log).not.toContain("up -d --wait");
-    // The pre-up down may be killed before its fake docker logs the call, so
-    // only the teardown down -v is guaranteed to appear.
-    expect(countLines(log, "down -v")).toBeGreaterThanOrEqual(1);
+    expect(log).not.toContain("bun-test-child");
+    expect(countLines(log, "down -v")).toBe(1);
   }, 30_000);
 
   test("SIGTERM during the final down -v retries teardown and exits 143", async () => {

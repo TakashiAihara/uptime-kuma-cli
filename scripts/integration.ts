@@ -274,7 +274,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
     // Kill what the main flow may be waiting on so its awaits resolve; the
     // exit path then waits for them before teardown, so nothing (like `up`)
     // keeps working while the down -v runs.
-    const children = [testProc, composeProc].filter((p): p is Child => p !== undefined);
+    const children = [testProc, composeProc, buildProc].filter((p): p is Child => p !== undefined);
     for (const child of children) child.kill();
     void exitAfterTeardown(code, children);
   });
@@ -283,24 +283,35 @@ for (const name of ["src", "package.json", "node_modules"]) {
   symlinkSync(join(REPO_ROOT, name), join(buildDir, name));
 }
 console.log(`building uptime-kuma-cli-${HOST_TARGET}`);
-const build = Bun.spawnSync(["bun", join(REPO_ROOT, "scripts", "build.ts"), HOST_TARGET], {
+// spawn, not spawnSync: the event loop must stay free so the signal
+// handlers can kill a hung build through buildProc like the other children.
+let buildProc: Child | undefined;
+const build = Bun.spawn(["bun", join(REPO_ROOT, "scripts", "build.ts"), HOST_TARGET], {
   cwd: buildDir,
   stdout: "inherit",
   stderr: "inherit",
 });
-if (build.exitCode !== 0) {
+buildProc = build;
+await build.exited;
+buildProc = undefined;
+// A null exitCode means the build child died to a signal — in practice
+// Ctrl+C hitting the whole foreground group — so report 130, not 1. When a
+// handled signal already started the teardown, let it own the exit instead.
+if (build.exitCode !== 0 && signalExit === null) {
   rmSync(buildDir, { recursive: true, force: true });
-  // A null exitCode means the build child died to a signal — in practice
-  // Ctrl+C hitting the whole foreground group — so report 130, not 1.
   process.exit(build.exitCode ?? 130);
 }
 const BIN = join(buildDir, "dist", `uptime-kuma-cli-${HOST_TARGET}`);
 
 let exitCode = 1;
 try {
-  // Remove what a KEEP=1 or killed run left behind; the result does not matter
-  await compose(["down", "-v"], COMPOSE_DOWN_TIMEOUT_MS);
-  // A signal during the build fires its handler at this first await; bail
+  // Remove what a KEEP=1 or killed run left behind; the result does not
+  // matter — but only when no signal already started the teardown, whose
+  // own down -v must not overlap this one.
+  if (signalExit === null) {
+    await compose(["down", "-v"], COMPOSE_DOWN_TIMEOUT_MS);
+  }
+  // A signal during the build fires its handler at the build await; bail
   // before compose up so the handler's exit cannot orphan the up child. The
   // flag is re-checked after every await: a signal kills the in-flight
   // compose child, and nothing may start the next phase behind the teardown.
