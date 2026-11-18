@@ -701,6 +701,17 @@ describe("monitors add", () => {
     expect(kuma.calls.filter((c) => c.event === "getSettings")).toHaveLength(0);
   });
 
+  test("pushUrl masks a password in the Primary Base URL", async () => {
+    kuma.state.info!.primaryBaseURL = "https://user:s3cret@status.example.org/";
+    const r = await run(sb, ["monitors", "add", "--type", "push", "--name", "pb"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const out = r.json();
+    expect(out.pushUrl).toBe(
+      `https://user:***@status.example.org/api/push/${out.pushToken}?status=up&msg=OK&ping=`,
+    );
+    expect(r.stdout).not.toContain("s3cret");
+  });
+
   test.each([
     [["--type", "push", "--name", "x", "--push-token", ""], "--push-token"],
     [["--type", "push", "--name", "x", "--interval", ""], "--interval"],
