@@ -2106,15 +2106,48 @@ describe("maintenance", () => {
       expect(kuma.calls).toHaveLength(0);
     });
 
-    test("an invalid --set-ids entry exits 2 before connecting", async () => {
+    test("--add resolves a monitor name", async () => {
+      kuma.state.maintenanceMonitors[1] = [3];
+      const r = await run(sb, ["maintenance", "monitors", "1", "--add", "web"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      expect(callsOf("addMonitorMaintenance")[0]!.args).toEqual([1, [{ id: 3 }, { id: 5 }]]);
+      expect(r.json()).toEqual([
+        { id: 3, name: "db" },
+        { id: 5, name: "web" },
+      ]);
+    });
+
+    test("--remove resolves a monitor name", async () => {
+      kuma.state.maintenanceMonitors[1] = [3, 5];
+      const r = await run(sb, ["maintenance", "monitors", "1", "--remove", "web"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      expect(callsOf("addMonitorMaintenance")[0]!.args).toEqual([1, [{ id: 3 }]]);
+      expect(r.json()).toEqual([{ id: 3, name: "db" }]);
+    });
+
+    test("--set-ids resolves monitor names", async () => {
+      const r = await run(
+        sb,
+        ["maintenance", "monitors", "1", "--set-ids", "web,db"],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(0);
+      expect(callsOf("addMonitorMaintenance")[0]!.args).toEqual([1, [{ id: 3 }, { id: 5 }]]);
+      expect(r.json()).toEqual([
+        { id: 3, name: "db" },
+        { id: 5, name: "web" },
+      ]);
+    });
+
+    test("an unknown monitor name in --set-ids exits 2 without sending addMonitorMaintenance", async () => {
       const r = await run(
         sb,
         ["maintenance", "monitors", "1", "--set-ids", "3,x"],
         creds(kuma.url),
       );
       expect(r.code).toBe(2);
-      expect(r.stderr).toContain("positive integer");
-      expect(kuma.calls).toHaveLength(0);
+      expect(r.stderr).toContain('no monitor named "x"');
+      expect(kuma.calls.find((c) => c.event === "addMonitorMaintenance")).toBeUndefined();
     });
 
     test("addMonitorMaintenance ok:false exits 1 with Kuma's message", async () => {
@@ -2266,6 +2299,19 @@ describe("maintenance", () => {
     test("an invalid maintenance id exits 2 before connecting", async () => {
       const r = await run(sb, ["maintenance", "status-pages", "abc"], creds(kuma.url));
       expect(r.code).toBe(2);
+      expect(kuma.calls).toHaveLength(0);
+    });
+
+    test("an invalid target id exits 2 before connecting", async () => {
+      for (const args of [
+        ["--add", "abc"],
+        ["--remove", "abc"],
+        ["--set-ids", "4,x"],
+      ]) {
+        const r = await run(sb, ["maintenance", "status-pages", "1", ...args], creds(kuma.url));
+        expect(r.code).toBe(2);
+        expect(r.stderr).toContain("positive integer");
+      }
       expect(kuma.calls).toHaveLength(0);
     });
 

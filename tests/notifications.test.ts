@@ -242,6 +242,53 @@ describe("notifications", () => {
     );
   });
 
+  test("edit resolves a notification name to its id", async () => {
+    const r = await run(
+      sb,
+      ["notifications", "edit", "ntfy home", "--set", "ntfytopic=home2"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect(r.json()).toEqual({ id: 3, name: "ntfy home", type: "ntfy" });
+    expect(kuma.calls.find((c) => c.event === "addNotification")!.args[1]).toBe(3);
+  });
+
+  test("test resolves a notification name to its id", async () => {
+    const r = await run(sb, ["notifications", "test", "matrix"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json()).toEqual({ id: 1, ok: true, msg: "Sent Successfully." });
+    expect(kuma.calls.find((c) => c.event === "testNotification")).toBeDefined();
+  });
+
+  test("delete resolves a notification name and sends the numeric id", async () => {
+    const r = await run(sb, ["notifications", "delete", "ntfy home", "--yes"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json()).toEqual({ id: 3, deleted: true });
+    expect(kuma.calls.find((c) => c.event === "deleteNotification")!.args).toEqual([3]);
+  });
+
+  test("an unknown notification name exits 2 naming it", async () => {
+    const r = await run(sb, ["notifications", "test", "No Such"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('no notification named "No Such"');
+    expect(kuma.calls.find((c) => c.event === "testNotification")).toBeUndefined();
+  });
+
+  test("an ambiguous notification name exits 2 naming the candidate ids", async () => {
+    kuma.state.notifications.push({
+      id: 9,
+      name: "matrix",
+      active: true,
+      isDefault: false,
+      userId: 1,
+      config: JSON.stringify({ name: "matrix", type: "matrix" }),
+    });
+    const r = await run(sb, ["notifications", "test", "matrix"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('notification name "matrix" is ambiguous: ids 1, 9');
+    expect(kuma.calls.find((c) => c.event === "testNotification")).toBeUndefined();
+  });
+
   test("a failed test exits 1 with Kuma's message", async () => {
     kuma.state.testNotificationResult = { ok: false, msg: "Error: 401 Unauthorized" };
     const r = await run(sb, ["notifications", "test", "3"], creds(kuma.url));
@@ -265,11 +312,11 @@ describe("notifications", () => {
     expect(kuma.calls).toHaveLength(0);
   });
 
-  test("delete with an invalid id exits 2 before connecting", async () => {
+  test("delete with an unknown notification name exits 2 without sending deleteNotification", async () => {
     const r = await run(sb, ["notifications", "delete", "abc", "--yes"], creds(kuma.url));
     expect(r.code).toBe(2);
-    expect(r.stderr).toContain("positive integer");
-    expect(kuma.calls).toHaveLength(0);
+    expect(r.stderr).toContain('no notification named "abc"');
+    expect(kuma.calls.find((c) => c.event === "deleteNotification")).toBeUndefined();
   });
 
   test("an unknown id exits 1 with Kuma's 'notification not found'", async () => {

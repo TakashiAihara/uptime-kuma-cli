@@ -2,6 +2,7 @@ import { Option, type Command } from "commander";
 import {
   CliError,
   fail,
+  isIdLiteral,
   notificationIdArray,
   notificationIdObject,
   parseId,
@@ -353,10 +354,12 @@ function refuseSecretSets(sets: Record<string, unknown>): void {
   }
 }
 
-// "none" clears the parent; anything else must be a monitor id.
-function parseParent(value: string): number | null {
+// "none" clears the parent; a positive integer is a group monitor id; any
+// other value is an exact monitor name resolved against monitorList after
+// connect.
+function parseParent(value: string): number | null | string {
   if (value === "none") return null;
-  return parseId(value, "--parent");
+  return isIdLiteral(value) ? Number(value) : value;
 }
 
 // parent reaches Kuma as a number or null. A numeric string would slip past
@@ -374,6 +377,14 @@ function normalizeParent(value: unknown): number | null {
     fail(2, `parent must be a monitor id, got ${JSON.stringify(value)}`);
   }
   return n;
+}
+
+// The --parent flag may carry a monitor name, which only resolves once the
+// pushed monitorList is here; hatch parents were already normalized to
+// number|null by validateHatchValues.
+function resolveParent(s: KumaSession, value: unknown): number | null {
+  if (typeof value === "string") return s.resolveMonitorId(value);
+  return normalizeParent(value);
 }
 
 // The pushed monitorList is the only source for the parent check: it must be
@@ -821,11 +832,11 @@ export function registerMonitors(program: Command): void {
     });
 
   monitors
-    .command("get <id>")
+    .command("get <id|name>")
     .description("Show one monitor")
     .action(async (rawId) => {
-      const id = parseId(rawId, "monitor id");
       const s = await connect();
+      const id = s.resolveMonitorId(rawId);
       const m = s.monitorById(id);
       if (!m) fail(1, `monitor ${id} not found`);
       printJson({
@@ -836,11 +847,11 @@ export function registerMonitors(program: Command): void {
     });
 
   monitors
-    .command("stats [id]")
+    .command("stats [id|name]")
     .description("Uptime, ping and certificate stats of monitors")
     .action(async (rawId) => {
-      const id = rawId === undefined ? undefined : parseId(rawId, "monitor id");
       const s = await connect();
+      const id = rawId === undefined ? undefined : s.resolveMonitorId(rawId);
       const all = s.monitors();
       const targets = id === undefined ? all : all.filter((m) => m.id === id);
       if (id !== undefined && targets.length === 0) fail(1, `monitor ${id} not found`);
@@ -929,9 +940,9 @@ export function registerMonitors(program: Command): void {
     .option("--resend-interval <n>", "resend interval")
     .option("--timeout <seconds>", "request timeout")
     .option("--proxy-id <id>", "proxy id")
-    .option("--notification-id <id>", "notification id (repeatable)", collect, [])
-    .option("--notifications-from <monitorId>", "copy notifications from a monitor")
-    .option("--parent <groupId>", "parent group monitor id")
+    .option("--notification-id <id|name>", "notification id or name (repeatable)", collect, [])
+    .option("--notifications-from <monitorId|name>", "copy notifications from a monitor")
+    .option("--parent <groupId|name>", "parent group monitor id or name")
     .option("--paused", "create the monitor paused")
     .option("--push-token <token>", "push token (push type)")
     .option("--tag <tagId[:value]>", "attach a tag (repeatable)", collect, [])
@@ -1036,7 +1047,12 @@ export function registerMonitors(program: Command): void {
       } else {
         parentInput = parentOpt;
       }
-      const normalizedParent = parentInput === undefined ? undefined : normalizeParent(parentInput);
+      // A --parent name resolves only after connect; other values keep the
+      // pre-connect shape check.
+      const normalizedParent =
+        parentInput === undefined || typeof parentInput === "string"
+          ? parentInput
+          : normalizeParent(parentInput);
 
       // The merged pushToken must be a non-empty string; the token printed and
       // built into pushUrl is always the one sent to Kuma.
@@ -1106,13 +1122,10 @@ export function registerMonitors(program: Command): void {
       if (type === "docker" && typeof mergedDockerHost !== "number") {
         fail(2, `${dockerHostSource} docker_host must be a docker host id`);
       }
-      const notificationIds = ((opts.notificationId ?? []) as string[]).map((v) =>
-        parseId(v, "--notification-id"),
-      );
-      const notificationsFrom =
-        opts.notificationsFrom === undefined
-          ? undefined
-          : parseId(opts.notificationsFrom, "--notifications-from");
+      // Notification ids and the --notifications-from monitor may be names;
+      // both resolve against the pushed lists after connect.
+      const notificationIdArgs = (opts.notificationId ?? []) as string[];
+      const notificationsFromArg = opts.notificationsFrom as string | undefined;
       const tagSpecs = ((opts.tag ?? []) as string[]).map(parseMonitorTag);
       const seenTags = new Set<string>();
       for (const spec of tagSpecs) {
@@ -1145,6 +1158,10 @@ export function registerMonitors(program: Command): void {
         printJson({ id: existing.id, name: existing.name, skipped: true });
         fail(3, "");
       }
+      // Name resolution waits for the skip check like the other post-connect
+      // resolutions below: a same-name add exits 3 whatever --parent says.
+      const parentId =
+        normalizedParent === undefined ? undefined : resolveParent(s, normalizedParent);
       const tagNames = new Map<number, string>();
       if (tagSpecs.length > 0) {
         const available = await s.tags();
@@ -1159,12 +1176,15 @@ export function registerMonitors(program: Command): void {
         .notifications()
         .filter((n) => n.isDefault === true)
         .map((n) => n.id);
-      if (notificationsFrom !== undefined) {
-        const src = s.monitorById(notificationsFrom);
-        if (!src) fail(1, `monitor ${notificationsFrom} not found`);
+      if (notificationsFromArg !== undefined) {
+        const srcId = s.resolveMonitorId(notificationsFromArg);
+        const src = s.monitorById(srcId);
+        if (!src) fail(1, `monitor ${srcId} not found`);
         ids.push(...notificationIdArray(src.notificationIDList));
       }
-      ids.push(...notificationIds);
+      for (const raw of notificationIdArgs) {
+        ids.push(s.resolveNotificationId(raw));
+      }
 
       let proxyId: number | null;
       if (proxyIdOption !== undefined) {
@@ -1195,7 +1215,7 @@ export function registerMonitors(program: Command): void {
       // derive from the final interval after the merge below.
       if (retryInterval !== undefined) typed.retryInterval = retryInterval;
       if (timeout !== undefined) typed.timeout = timeout;
-      if (normalizedParent !== undefined) typed.parent = normalizedParent;
+      if (parentId !== undefined) typed.parent = parentId;
       if (urlTypes) typed.url = opts.url;
       if (type === "keyword" || type === "grpc-keyword") {
         typed.keyword = opts.keyword;
@@ -1281,7 +1301,7 @@ export function registerMonitors(program: Command): void {
         ...fileConfig,
         ...sets,
       };
-      if (normalizedParent !== undefined) monitor.parent = normalizedParent;
+      if (parentId !== undefined) monitor.parent = parentId;
       monitor.notificationIDList = notificationIdObject(monitor.notificationIDList);
       deriveMonitorTiming(monitor, defaultTimeoutSeconds(s, type), capsTimeout(s, type));
       validateFinalMonitor(s, monitor);
@@ -1327,7 +1347,7 @@ export function registerMonitors(program: Command): void {
     });
 
   monitors
-    .command("edit <id>")
+    .command("edit <id|name>")
     .description("Edit a monitor")
     .option("--set <key=value>", "set a field (repeatable)", collect, [])
     .addOption(
@@ -1335,10 +1355,9 @@ export function registerMonitors(program: Command): void {
         ...JSON_PATH_OPERATORS,
       ]),
     )
-    .option("--parent <groupId>", "parent group monitor id ('none' clears it)")
+    .option("--parent <groupId|name>", "parent group monitor id or name ('none' clears it)")
     .option("--config-file <path>", "JSON file of monitor fields")
     .action(async (rawId, opts) => {
-      const id = parseId(rawId, "monitor id");
       const sets = parseSets(opts.set as string[] | undefined);
       const fileConfig =
         opts.configFile === undefined ? {} : readJsonFile(opts.configFile, "--config-file");
@@ -1376,17 +1395,34 @@ export function registerMonitors(program: Command): void {
       } else {
         parentInput = fileConfig.parent;
       }
-      const normalizedParent = parentInput === undefined ? undefined : normalizeParent(parentInput);
-      // Kuma 1.23 only rejects descendants as parent, not the monitor itself, and a self-parent
-      // makes its parent walk loop forever
-      if (normalizedParent === id) fail(2, "parent cannot be the monitor itself");
+      // A --parent name or a monitor named by <id> resolves only after
+      // connect; other parent values keep the pre-connect shape check.
+      const normalizedParent =
+        parentInput === undefined || typeof parentInput === "string"
+          ? parentInput
+          : normalizeParent(parentInput);
       if (sets.notificationIDList !== undefined) {
         checkNotificationIdList(sets.notificationIDList);
       }
       if (fileConfig.notificationIDList !== undefined) {
         checkNotificationIdList(fileConfig.notificationIDList);
       }
+      // Two literal ids need no pushed list, so the self-parent check still
+      // runs before connecting; a name on either side resolves after it.
+      if (
+        isIdLiteral(rawId) &&
+        typeof normalizedParent === "number" &&
+        normalizedParent === Number(rawId)
+      ) {
+        fail(2, "parent cannot be the monitor itself");
+      }
       const s = await connect();
+      const id = s.resolveMonitorId(rawId);
+      const parentId =
+        normalizedParent === undefined ? undefined : resolveParent(s, normalizedParent);
+      // Kuma 1.23 only rejects descendants as parent, not the monitor itself, and a self-parent
+      // makes its parent walk loop forever
+      if (parentId === id) fail(2, "parent cannot be the monitor itself");
       const twoXFieldCandidates = [...Object.keys(sets), ...Object.keys(fileConfig)];
       if (opts.jsonPathOperator !== undefined) twoXFieldCandidates.push("jsonPathOperator");
       checkKuma2xFields(s, twoXFieldCandidates);
@@ -1407,7 +1443,7 @@ export function registerMonitors(program: Command): void {
         }
         monitor.jsonPathOperator ??= "==";
       }
-      if (normalizedParent !== undefined) monitor.parent = normalizedParent;
+      if (parentId !== undefined) monitor.parent = parentId;
       // Kuma iterates notificationIDList with for...in, so an array would be
       // stored under its indexes; always send the object shape.
       monitor.notificationIDList = notificationIdObject(monitor.notificationIDList);
@@ -1439,24 +1475,24 @@ export function registerMonitors(program: Command): void {
     ["resume", "resumeMonitor", true],
   ] as const) {
     monitors
-      .command(`${name} <id>`)
+      .command(`${name} <id|name>`)
       .description(`${name} a monitor`)
       .action(async (rawId) => {
-        const id = parseId(rawId, "monitor id");
         const s = await connect();
+        const id = s.resolveMonitorId(rawId);
         await s.request(event, [id]);
         printJson({ id, active });
       });
   }
 
   monitors
-    .command("delete <id>")
+    .command("delete <id|name>")
     .description("Delete a monitor")
     .option("--yes", "confirm deletion")
     .action(async (rawId, opts) => {
-      const id = parseId(rawId, "monitor id");
-      if (!opts.yes) fail(2, `would delete monitor ${id}; pass --yes to delete`);
+      if (!opts.yes) fail(2, `would delete monitor ${rawId}; pass --yes to delete`);
       const s = await connect();
+      const id = s.resolveMonitorId(rawId);
       // Kuma 1.23 answers ok even for an unknown id, so the pushed list is the only check
       if (!s.monitorById(id)) fail(1, `monitor ${id} not found`);
       await s.request("deleteMonitor", [id]);
@@ -1468,13 +1504,13 @@ export function registerMonitors(program: Command): void {
     ["clear-events", "clearEvents", "events"],
   ] as const) {
     monitors
-      .command(`${name} <id>`)
+      .command(`${name} <id|name>`)
       .description(`Clear a monitor's ${what}`)
       .option("--yes", "confirm clearing")
       .action(async (rawId, opts) => {
-        const id = parseId(rawId, "monitor id");
-        if (!opts.yes) fail(2, `would clear ${what} of monitor ${id}; pass --yes to clear`);
+        if (!opts.yes) fail(2, `would clear ${what} of monitor ${rawId}; pass --yes to clear`);
         const s = await connect();
+        const id = s.resolveMonitorId(rawId);
         // Kuma 1.23 answers ok even for an unknown id, so the pushed list is the only check
         if (!s.monitorById(id)) fail(1, `monitor ${id} not found`);
         await s.request(event, [id]);
@@ -1483,15 +1519,15 @@ export function registerMonitors(program: Command): void {
   }
 
   monitors
-    .command("tag <id>")
+    .command("tag <id|name>")
     .description("Attach a tag to a monitor")
     .requiredOption("--tag <tagId>", "tag id")
     .option("--value <value>", "tag value")
     .action(async (rawId, opts) => {
-      const id = parseId(rawId, "monitor id");
       const tagId = parseId(opts.tag, "--tag");
       const value = opts.value ?? "";
       const s = await connect();
+      const id = s.resolveMonitorId(rawId);
       const monitor = s.monitorById(id);
       if (!monitor) fail(1, `monitor ${id} not found`);
       if (!(await s.tags()).some((t) => t.id === tagId)) fail(1, `tag ${tagId} not found`);
@@ -1505,15 +1541,15 @@ export function registerMonitors(program: Command): void {
     });
 
   monitors
-    .command("untag <id>")
+    .command("untag <id|name>")
     .description("Detach a tag from a monitor")
     .requiredOption("--tag <tagId>", "tag id")
     .option("--value <value>", "tag value")
     .action(async (rawId, opts) => {
-      const id = parseId(rawId, "monitor id");
       const tagId = parseId(opts.tag, "--tag");
       const value = opts.value ?? "";
       const s = await connect();
+      const id = s.resolveMonitorId(rawId);
       const monitor = s.monitorById(id);
       if (!monitor) fail(1, `monitor ${id} not found`);
       const attached = monitorTags(monitor).filter((t) => t.tag_id === tagId);
@@ -1533,15 +1569,15 @@ export function registerMonitors(program: Command): void {
     });
 
   monitors
-    .command("retag <id>")
+    .command("retag <id|name>")
     .description("Change the value of a tag on a monitor")
     .requiredOption("--tag <tagId>", "tag id")
     .requiredOption("--value <value>", "new tag value")
     .action(async (rawId, opts) => {
-      const id = parseId(rawId, "monitor id");
       const tagId = parseId(opts.tag, "--tag");
       const value = opts.value as string;
       const s = await connect();
+      const id = s.resolveMonitorId(rawId);
       const monitor = s.monitorById(id);
       if (!monitor) fail(1, `monitor ${id} not found`);
       const rows = monitorTags(monitor).filter((t) => t.tag_id === tagId);

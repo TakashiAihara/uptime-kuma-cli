@@ -689,7 +689,6 @@ describe("monitors add", () => {
     [["--type", "push", "--name", "x", "--max-retries", "1.5"], "--max-retries"],
     [["--type", "push", "--name", "x", "--resend-interval", "-1"], "--resend-interval"],
     [["--type", "push", "--name", "x", "--timeout", "-1"], "--timeout"],
-    [["--type", "push", "--name", "x", "--notification-id", "0"], "--notification-id"],
   ])("empty or out-of-range values exit 2 before connecting: %p", async (args, word) => {
     const r = await run(sb, ["monitors", "add", ...args], creds(kuma.url));
     expect(r.code).toBe(2);
@@ -4702,11 +4701,11 @@ describe("monitors delete", () => {
     expect(kuma.calls).toHaveLength(0);
   });
 
-  test("an invalid id exits 2 before connecting", async () => {
+  test("an unknown monitor name exits 2 without sending deleteMonitor", async () => {
     const r = await run(sb, ["monitors", "delete", "abc", "--yes"], creds(kuma.url));
     expect(r.code).toBe(2);
-    expect(r.stderr).toContain("positive integer");
-    expect(kuma.calls).toHaveLength(0);
+    expect(r.stderr).toContain('no monitor named "abc"');
+    expect(kuma.calls.find((c) => c.event === "deleteMonitor")).toBeUndefined();
   });
 
   test("an unknown id exits 1 without sending deleteMonitor", async () => {
@@ -4751,11 +4750,11 @@ describe("monitors clear-beats", () => {
     expect(kuma.calls).toHaveLength(0);
   });
 
-  test("an invalid id exits 2 before connecting", async () => {
+  test("an unknown monitor name exits 2 without sending clearHeartbeats", async () => {
     const r = await run(sb, ["monitors", "clear-beats", "abc", "--yes"], creds(kuma.url));
     expect(r.code).toBe(2);
-    expect(r.stderr).toContain("positive integer");
-    expect(kuma.calls).toHaveLength(0);
+    expect(r.stderr).toContain('no monitor named "abc"');
+    expect(kuma.calls.find((c) => c.event === "clearHeartbeats")).toBeUndefined();
   });
 
   test("an unknown id exits 1 without sending clearHeartbeats", async () => {
@@ -4809,11 +4808,11 @@ describe("monitors clear-events", () => {
     expect(kuma.calls).toHaveLength(0);
   });
 
-  test("an invalid id exits 2 before connecting", async () => {
+  test("an unknown monitor name exits 2 without sending clearEvents", async () => {
     const r = await run(sb, ["monitors", "clear-events", "abc", "--yes"], creds(kuma.url));
     expect(r.code).toBe(2);
-    expect(r.stderr).toContain("positive integer");
-    expect(kuma.calls).toHaveLength(0);
+    expect(r.stderr).toContain('no monitor named "abc"');
+    expect(kuma.calls.find((c) => c.event === "clearEvents")).toBeUndefined();
   });
 
   test("an unknown id exits 1 without sending clearEvents", async () => {
@@ -4890,6 +4889,13 @@ describe("monitor tags", () => {
       expect(tagsOf(2)[0]).toMatchObject({ tag_id: 5, value: "", name: "prod" });
     });
 
+    test("resolves a monitor name to its id", async () => {
+      const r = await run(sb, ["monitors", "tag", "dav", "--tag", "5"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      expect(r.json()).toEqual({ id: 2, tagId: 5, value: "" });
+      expect(kuma.calls.find((c) => c.event === "addMonitorTag")!.args).toEqual([5, 2, ""]);
+    });
+
     test("attaches a tag with --value", async () => {
       const r = await run(
         sb,
@@ -4956,10 +4962,11 @@ describe("monitor tags", () => {
       expect(kuma.calls).toHaveLength(0);
     });
 
-    test("an invalid monitor id exits 2 before connecting", async () => {
+    test("an unknown monitor name exits 2 without sending addMonitorTag", async () => {
       const r = await run(sb, ["monitors", "tag", "abc", "--tag", "5"], creds(kuma.url));
       expect(r.code).toBe(2);
-      expect(kuma.calls).toHaveLength(0);
+      expect(r.stderr).toContain('no monitor named "abc"');
+      expect(kuma.calls.find((c) => c.event === "addMonitorTag")).toBeUndefined();
     });
   });
 
@@ -4970,6 +4977,13 @@ describe("monitor tags", () => {
       expect(r.json()).toEqual({ id: 7, tagId: 5, value: "", removed: true });
       expect(kuma.calls.find((c) => c.event === "deleteMonitorTag")!.args).toEqual([5, 7, ""]);
       expect(tagsOf(7).map((t) => t.tag_id)).toEqual([6]);
+    });
+
+    test("resolves a monitor name to its id", async () => {
+      const r = await run(sb, ["monitors", "untag", "Taba", "--tag", "5"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      expect(r.json()).toEqual({ id: 7, tagId: 5, value: "", removed: true });
+      expect(kuma.calls.find((c) => c.event === "deleteMonitorTag")!.args).toEqual([5, 7, ""]);
     });
 
     test("removes only the row with the given value", async () => {
@@ -5029,10 +5043,11 @@ describe("monitor tags", () => {
       expect(kuma.calls.find((c) => c.event === "deleteMonitorTag")).toBeUndefined();
     });
 
-    test("an invalid id exits 2 before connecting", async () => {
+    test("an unknown monitor name exits 2 without sending deleteMonitorTag", async () => {
       const r = await run(sb, ["monitors", "untag", "abc", "--tag", "5"], creds(kuma.url));
       expect(r.code).toBe(2);
-      expect(kuma.calls).toHaveLength(0);
+      expect(r.stderr).toContain('no monitor named "abc"');
+      expect(kuma.calls.find((c) => c.event === "deleteMonitorTag")).toBeUndefined();
     });
   });
 
@@ -5049,6 +5064,17 @@ describe("monitor tags", () => {
       const rows = tagsOf(7);
       expect(rows.find((t) => t.tag_id === 5)!.value).toBe("z");
       expect(rows.find((t) => t.tag_id === 6)!.value).toBeNull();
+    });
+
+    test("resolves a monitor name to its id", async () => {
+      const r = await run(
+        sb,
+        ["monitors", "retag", "Taba", "--tag", "5", "--value", "z"],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(0);
+      expect(r.json()).toEqual({ id: 7, tagId: 5, value: "z" });
+      expect(kuma.calls.find((c) => c.event === "editMonitorTag")!.args).toEqual([5, 7, "z"]);
     });
 
     test("a tag attached more than once exits 1 and points at untag + tag", async () => {
@@ -5366,5 +5392,267 @@ describe("monitor tags", () => {
       expect(r.json().name).toBe("dc");
       expect(kuma.state.monitors.find((m) => m.name === "dc")).toBeDefined();
     });
+  });
+});
+
+describe("monitor names", () => {
+  test("get resolves an exact monitor name to its id", async () => {
+    const r = await run(sb, ["monitors", "get", "Taba"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json().id).toBe(7);
+    expect(r.json().name).toBe("Taba");
+  });
+
+  test("get matches names exactly, not by substring", async () => {
+    const r = await run(sb, ["monitors", "get", "Tab"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('no monitor named "Tab"');
+  });
+
+  test("an unknown monitor name exits 2 naming it", async () => {
+    const r = await run(sb, ["monitors", "get", "No Such"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('no monitor named "No Such"');
+  });
+
+  test("an ambiguous monitor name exits 2 naming the candidate ids", async () => {
+    kuma.state.monitors.push(http(30, "dup"), http(31, "dup"));
+    const r = await run(sb, ["monitors", "get", "dup"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('monitor name "dup" is ambiguous: ids 30, 31');
+  });
+
+  test("pause and resume resolve names and send the numeric ids", async () => {
+    const p = await run(sb, ["monitors", "pause", "Taba"], creds(kuma.url));
+    expect(p.code).toBe(0);
+    expect(p.json()).toEqual({ id: 7, active: false });
+    const r = await run(sb, ["monitors", "resume", "dav"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json()).toEqual({ id: 2, active: true });
+    expect(kuma.calls.find((c) => c.event === "pauseMonitor")!.args).toEqual([7]);
+    expect(kuma.calls.find((c) => c.event === "resumeMonitor")!.args).toEqual([2]);
+  });
+
+  test("delete resolves a name and sends the numeric id", async () => {
+    const r = await run(sb, ["monitors", "delete", "Taba", "--yes"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json()).toEqual({ id: 7, deleted: true });
+    expect(kuma.calls.find((c) => c.event === "deleteMonitor")!.args).toEqual([7]);
+  });
+
+  test("edit resolves a name and sends the numeric id", async () => {
+    const r = await run(sb, ["monitors", "edit", "Taba", "--set", "maxretries=3"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.id).toBe(7);
+    expect(sent.maxretries).toBe(3);
+  });
+
+  test("clear-beats and clear-events resolve names", async () => {
+    const b = await run(sb, ["monitors", "clear-beats", "Taba", "--yes"], creds(kuma.url));
+    expect(b.code).toBe(0);
+    expect(b.json()).toEqual({ id: 7, cleared: "beats" });
+    const e = await run(sb, ["monitors", "clear-events", "dav", "--yes"], creds(kuma.url));
+    expect(e.code).toBe(0);
+    expect(e.json()).toEqual({ id: 2, cleared: "events" });
+    expect(kuma.calls.find((c) => c.event === "clearHeartbeats")!.args).toEqual([7]);
+    expect(kuma.calls.find((c) => c.event === "clearEvents")!.args).toEqual([2]);
+  });
+
+  test("add --parent resolves a group monitor name", async () => {
+    kuma.state.monitors.push(group(20, "Core Services"));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "push",
+        "--name",
+        "child",
+        "--paused",
+        "--parent",
+        "Core Services",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.parent).toBe(20);
+  });
+
+  test("add --parent with an unknown group name exits 2", async () => {
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "push", "--name", "child", "--paused", "--parent", "No Group"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('no monitor named "No Group"');
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test("add with an existing name skips before resolving a bad --parent name", async () => {
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "push", "--name", "Taba", "--parent", "No Group"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(3);
+    expect(r.json()).toEqual({ id: 7, name: "Taba", skipped: true });
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test("add with an existing name skips before resolving a bad --notification-id name", async () => {
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "push", "--name", "Taba", "--notification-id", "No Such"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(3);
+    expect(r.json()).toEqual({ id: 7, name: "Taba", skipped: true });
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test("add --notifications-from resolves a monitor name", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "push",
+        "--name",
+        "copy",
+        "--paused",
+        "--notifications-from",
+        "Taba",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.notificationIDList).toEqual({ "3": true, "5": true });
+  });
+
+  test("add --notification-id resolves a notification name", async () => {
+    kuma.state.notifications.push({
+      id: 8,
+      name: "ops alerts",
+      active: true,
+      isDefault: false,
+      userId: 1,
+      config: JSON.stringify({ type: "ntfy" }),
+    });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "push",
+        "--name",
+        "ntfyd",
+        "--paused",
+        "--notification-id",
+        "ops alerts",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.notificationIDList).toEqual({ "8": true });
+  });
+
+  test("add --notification-id with an unknown name exits 2", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "push",
+        "--name",
+        "ntfyd",
+        "--paused",
+        "--notification-id",
+        "No Such",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('no notification named "No Such"');
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test("edit --parent resolves a group monitor name", async () => {
+    kuma.state.monitors.push(group(20, "Core Services"));
+    const r = await run(
+      sb,
+      ["monitors", "edit", "Taba", "--parent", "Core Services"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.id).toBe(7);
+    expect(sent.parent).toBe(20);
+  });
+
+  test("edit --parent naming the monitor itself by name exits 2 after resolving", async () => {
+    const r = await run(sb, ["monitors", "edit", "Taba", "--parent", "Taba"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("parent cannot be the monitor itself");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit --parent mixing a numeric id and a name still catches self-parenting", async () => {
+    const r = await run(sb, ["monitors", "edit", "7", "--parent", "Taba"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("parent cannot be the monitor itself");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("a positive integer always wins over a monitor named like it", async () => {
+    kuma.state.monitors.push(http(5, "five"), http(50, "5"));
+    const r = await run(sb, ["monitors", "get", "5"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json().id).toBe(5);
+    expect(r.json().name).toBe("five");
+  });
+
+  test("add --parent resolving to a non-group monitor exits 1", async () => {
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "push", "--name", "child", "--paused", "--parent", "Taba"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("group");
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  // Kuma proxies carry no name (proxyList rows have only host/port/...), so
+  // --proxy-id stays a positive integer id and a name is refused before
+  // connecting like any other non-numeric value.
+  test("--proxy-id stays id-only: a name exits 2 before connecting", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "px",
+        "--url",
+        "http://x.example.com",
+        "--proxy-id",
+        "my proxy",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("positive integer");
+    expect(kuma.calls).toHaveLength(0);
   });
 });

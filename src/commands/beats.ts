@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import { fail, parseId, parsePositiveInteger, parsePositiveNumber, printJson } from "../lib.ts";
+import { fail, parsePositiveInteger, parsePositiveNumber, printJson } from "../lib.ts";
 import { connect } from "../kuma.ts";
 
 type Beat = Record<string, unknown>;
@@ -22,16 +22,16 @@ export function registerBeats(program: Command): void {
   const beats = program.command("beats").description("Heartbeat history");
 
   beats
-    .argument("<id>", "monitor id")
+    .argument("<id|name>", "monitor id or name")
     .option("--hours <n>", "hours of history (default 24)")
     .option("--limit <n>", "keep only the newest n beats")
     .option("--important", "keep only status changes")
     .action(async (rawId, opts) => {
-      const id = parseId(rawId, "monitor id");
       const hours = opts.hours === undefined ? 24 : parsePositiveNumber(opts.hours, "--hours");
       const limit =
         opts.limit === undefined ? undefined : parsePositiveInteger(opts.limit, "--limit");
       const s = await connect();
+      const id = s.resolveMonitorId(rawId);
       const res = await s.request("getMonitorBeats", [id, hours]);
       // Kuma returns beats oldest first
       let rows = beatRows(res).reverse();
@@ -73,14 +73,14 @@ export function registerBeats(program: Command): void {
 
 export function registerEvents(program: Command): void {
   program
-    .command("events <id>")
+    .command("events <id|name>")
     .description("Status changes of a monitor")
     .option("--hours <n>", "hours of history (default 168)")
     .option("--by-day", "count downs and ups per UTC day")
     .action(async (rawId, opts) => {
-      const id = parseId(rawId, "monitor id");
       const hours = opts.hours === undefined ? 168 : parsePositiveNumber(opts.hours, "--hours");
       const s = await connect();
+      const id = s.resolveMonitorId(rawId);
       const res = await s.request("getMonitorBeats", [id, hours]);
       const rows = beatRows(res)
         .filter((b) => b.important)
