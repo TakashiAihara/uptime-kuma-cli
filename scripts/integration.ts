@@ -33,7 +33,8 @@ const PASSWORD = "it-Passw0rd-1234";
 
 const CALL_TIMEOUT_MS = 30_000;
 const COMPOSE_UP_TIMEOUT_MS = 300_000;
-const COMPOSE_DOWN_TIMEOUT_MS = 60_000;
+// Overridable so tests can reach the timeout path without waiting a minute.
+const COMPOSE_DOWN_TIMEOUT_MS = Number(process.env.UPTIME_KUMA_IT_DOWN_TIMEOUT_MS) || 60_000;
 // A signalled `down -v` exits non-zero (Ctrl-C reaches it through the shared
 // process group), so teardown retries: the next attempt usually finishes the
 // removal the signal interrupted.
@@ -236,6 +237,7 @@ const groupKillPids = new Set<number>();
 // teardown and keep creating containers next to the down -v.
 async function awaitChildren(children: Child[]): Promise<void> {
   if (children.length === 0) return;
+  const deadline = Date.now() + KILL_GRACE_MS;
   await Promise.race([
     Promise.all(children.map((c) => c.exited)),
     sleep(KILL_GRACE_MS).then(() =>
@@ -248,15 +250,25 @@ async function awaitChildren(children: Child[]): Promise<void> {
     ),
   ]);
   // exited only covers the tracked child itself: a detached group's
-  // TERM-ignoring grandchild can outlive its wrapper, so sweep the group
-  // once the children are gone.
+  // grandchildren got the same SIGTERM and deserve the rest of the grace
+  // period, then whatever group survives gets SIGKILL.
   for (const c of children) {
     if (!groupKillPids.has(c.pid)) continue;
+    while (groupAlive(c.pid) && Date.now() < deadline) await sleep(50);
     try {
       process.kill(-c.pid, "SIGKILL");
     } catch {
       // the group is already gone
     }
+  }
+}
+
+function groupAlive(pgid: number): boolean {
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -275,13 +287,22 @@ function killChild(child: Child, signal: "SIGTERM" | "SIGKILL" = "SIGTERM"): voi
   child.kill(signal);
 }
 
+// The signal path's child sweep + teardown + scratch-dir removal, shared
+// with the main finally: with KEEP=1 the teardown resolves instantly, so
+// without this the main flow's process.exit could cut the sweep off and
+// leave a TERM-ignoring grandchild behind.
+let signalCleanup: Promise<void> | undefined;
+
 // Waits for the children a signal killed, then runs the shared teardown and
-// exits. The main flow reaches the same teardown through its finally; the
+// exits. The main flow reaches the same cleanup through its finally; the
 // first process.exit wins, and both report the first signal's code.
 async function exitAfterTeardown(code: number, children: Child[]): Promise<void> {
-  await awaitChildren(children);
-  await teardown();
-  rmSync(buildDir, { recursive: true, force: true });
+  signalCleanup = (async () => {
+    await awaitChildren(children);
+    await teardown();
+    rmSync(buildDir, { recursive: true, force: true });
+  })();
+  await signalCleanup;
   process.exit(signalExit ?? code);
 }
 
@@ -395,7 +416,12 @@ try {
     await compose(["logs", "--no-color", "--timestamps"], COMPOSE_DOWN_TIMEOUT_MS);
   }
 } finally {
-  rmSync(buildDir, { recursive: true, force: true });
-  if (!(await teardown()) && exitCode === 0) exitCode = 1;
+  if (signalCleanup === undefined) {
+    rmSync(buildDir, { recursive: true, force: true });
+    if (!(await teardown()) && exitCode === 0) exitCode = 1;
+  }
+  // Covers a signal that arrived while the normal teardown above ran: its
+  // cleanup still has to finish (child sweep included) before this exit.
+  await signalCleanup;
 }
 process.exit(signalExit ?? exitCode);

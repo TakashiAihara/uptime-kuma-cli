@@ -28,6 +28,10 @@ case "$1" in
     [ -n "$FAKE_DOWN_FAIL_ALWAYS" ] && fail=1
     if [ -n "$FAKE_DOWN_FAIL_AT" ] && [ "$n" = "$FAKE_DOWN_FAIL_AT" ]; then fail=1; fi
     [ "$fail" = 1 ] && exit 1
+    if [ -n "$FAKE_DOWN_IGNORE_TERM_AT" ] && [ "$n" = "$FAKE_DOWN_IGNORE_TERM_AT" ]; then
+      trap '' TERM
+      exec sleep 60
+    fi
     if [ -n "$FAKE_DOWN_SLEEP_AT" ] && [ "$n" = "$FAKE_DOWN_SLEEP_AT" ]; then
       exec sleep "$FAKE_DOWN_SLEEP"
     fi
@@ -224,6 +228,25 @@ function countLines(text: string, needle: string): number {
   return text.split("\n").filter((l) => l.includes(needle)).length;
 }
 
+// kill(pid, 0) also succeeds for a zombie, and a SIGKILLed grandchild
+// reparented to a non-reaping init would look alive forever — treat the Z
+// state as gone and poll briefly for the reap.
+async function processGone(pid: number): Promise<boolean> {
+  for (let i = 0; i < 50; i++) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return true;
+    }
+    const stat = Bun.spawnSync(["ps", "-o", "stat=", "-p", String(pid)])
+      .stdout.toString()
+      .trim();
+    if (stat.startsWith("Z")) return true;
+    await sleep(100);
+  }
+  return false;
+}
+
 describe("scripts/integration.ts signal handling", () => {
   let sb: Sandbox;
   let kuma: { port: number; connected: Promise<void>; close: () => Promise<void> };
@@ -322,9 +345,8 @@ describe("scripts/integration.ts signal handling", () => {
     expect(countLines(log, "down -v")).toBe(1);
     // The wrapper's exited resolves while the TERM-ignoring grandchild is
     // still alive; only the post-exit group SIGKILL sweep can end it.
-    await sleep(100);
     const gcPid = Number(readFileSync(pidFile, "utf8").trim());
-    expect(() => process.kill(gcPid, 0)).toThrow();
+    expect(await processGone(gcPid)).toBe(true);
   }, 30_000);
 
   test("SIGTERM during the final down -v retries teardown and exits 143", async () => {
@@ -378,6 +400,48 @@ describe("scripts/integration.ts signal handling", () => {
     expect(countLines(log, "down -v")).toBe(1);
     expect(log).toContain("bun-test-child termed");
     expect(await runner.output()).toContain("UPTIME_KUMA_IT_KEEP=1");
+  }, 30_000);
+
+  test("UPTIME_KUMA_IT_KEEP=1 during the build still leaves no grandchild behind", async () => {
+    const pidFile = join(sb.dir, "grandchild.pid");
+    runner = startRunner(sb, kuma.port, {
+      UPTIME_KUMA_IT_KEEP: "1",
+      FAKE_BUILD_SLEEP: "60",
+      FAKE_GC_IGNORE_TERM: "1",
+      FAKE_GC_PIDFILE: pidFile,
+    });
+    await waitForLog(runner.log, "grandchild started");
+    runner.proc.kill("SIGINT");
+    expect(await runner.exited).toBe(130);
+    const log = readFileSync(runner.log, "utf8");
+    expect(log).not.toContain("up -d --wait");
+    // The signal landed during the build: the pre-up down never ran and
+    // KEEP skips the teardown, so no down -v appears at all.
+    expect(countLines(log, "down -v")).toBe(0);
+    // KEEP resolves teardown instantly, so the main finally could exit
+    // before the signal path's group sweep unless both await it.
+    const gcPid = Number(readFileSync(pidFile, "utf8").trim());
+    expect(await processGone(gcPid)).toBe(true);
+  }, 30_000);
+
+  test("a timed-out down -v is reaped before the next compose call", async () => {
+    runner = startRunner(sb, kuma.port, {
+      UPTIME_KUMA_IT_DOWN_TIMEOUT_MS: "200",
+      FAKE_DOWN_IGNORE_TERM_AT: "1",
+    });
+    // The first down ignores SIGTERM, so the timeout's kill only ends it
+    // after the 5 s grace escalates to SIGKILL; the run continues to `up`
+    // and the final teardown issues the second down.
+    await waitForCount(runner.log, "down -v", 1);
+    const killedAt = Date.now();
+    await waitForCount(runner.log, "down -v", 2);
+    const gap = Date.now() - killedAt;
+    expect(await runner.exited).toBe(0);
+    const log = readFileSync(runner.log, "utf8");
+    expect(countLines(log, "down -v")).toBe(2);
+    // Without awaiting the killed child's exited, the next compose call
+    // would start ~200 ms after the timeout, not after the SIGKILL reap.
+    expect(gap).toBeGreaterThanOrEqual(4_000);
   }, 30_000);
 
   test("a down -v that keeps failing exits 1 after the retries", async () => {
