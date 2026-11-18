@@ -223,6 +223,14 @@ function teardown(): Promise<boolean> {
 
 let signalExit: number | null = null;
 
+// Pids of children spawned detached: killing them must target the process
+// group (-pid) so grandchildren — the compile under scripts/build.ts — die
+// too. Tracked by pid rather than the buildProc variable because the 5s
+// SIGKILL escalation can fire after main cleared buildProc, and a detached
+// child's exited resolves when the wrapper dies while a TERM-ignoring
+// grandchild would linger.
+const groupKillPids = new Set<number>();
+
 // Waits for children a signal or a timeout killed, escalating to SIGKILL
 // after the grace period so one that ignores SIGTERM cannot outlive the
 // teardown and keep creating containers next to the down -v.
@@ -239,13 +247,24 @@ async function awaitChildren(children: Child[]): Promise<void> {
       ),
     ),
   ]);
+  // exited only covers the tracked child itself: a detached group's
+  // TERM-ignoring grandchild can outlive its wrapper, so sweep the group
+  // once the children are gone.
+  for (const c of children) {
+    if (!groupKillPids.has(c.pid)) continue;
+    try {
+      process.kill(-c.pid, "SIGKILL");
+    } catch {
+      // the group is already gone
+    }
+  }
 }
 
 // The build child runs detached in its own process group so signalling it
 // also reaches the compile grandchildren scripts/build.ts spawns; the other
 // children share this process group, where a plain kill() is enough.
 function killChild(child: Child, signal: "SIGTERM" | "SIGKILL" = "SIGTERM"): void {
-  if (child === buildProc) {
+  if (groupKillPids.has(child.pid)) {
     try {
       process.kill(-child.pid, signal);
       return;
@@ -310,6 +329,7 @@ const build = Bun.spawn(["bun", join(REPO_ROOT, "scripts", "build.ts"), HOST_TAR
   detached: true,
 });
 buildProc = build;
+groupKillPids.add(build.pid);
 await build.exited;
 buildProc = undefined;
 // A null exitCode means the build child died to a signal — in practice

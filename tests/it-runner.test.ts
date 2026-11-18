@@ -97,7 +97,12 @@ process.exit(Number(process.env.FAKE_TEST_EXIT ?? "0"));
 // scripts/build.ts: it traps TERM itself (logging "grandchild termed") but
 // nothing forwards a signal to it, so only a process-group kill ends it.
 const FAKE_BUILD_GRANDCHILD = `#!/bin/sh
-trap 'echo "grandchild termed" >> "$FAKE_LOG"; kill "$pid" 2>/dev/null; exit 0' TERM
+echo $$ > "\${FAKE_GC_PIDFILE:-/dev/null}"
+if [ -n "$FAKE_GC_IGNORE_TERM" ]; then
+  trap '' TERM
+else
+  trap 'echo "grandchild termed" >> "$FAKE_LOG"; kill "$pid" 2>/dev/null; exit 0' TERM
+fi
 echo "grandchild started" >> "$FAKE_LOG"
 sleep 60 &
 pid=$!
@@ -300,6 +305,26 @@ describe("scripts/integration.ts signal handling", () => {
     expect(log).not.toContain("up -d --wait");
     expect(log).not.toContain("bun-test-child");
     expect(countLines(log, "down -v")).toBe(1);
+  }, 30_000);
+
+  test("SIGINT during the build leaves no grandchild behind when it ignores SIGTERM", async () => {
+    const pidFile = join(sb.dir, "grandchild.pid");
+    runner = startRunner(sb, kuma.port, {
+      FAKE_BUILD_SLEEP: "60",
+      FAKE_GC_IGNORE_TERM: "1",
+      FAKE_GC_PIDFILE: pidFile,
+    });
+    await waitForLog(runner.log, "grandchild started");
+    runner.proc.kill("SIGINT");
+    expect(await runner.exited).toBe(130);
+    const log = readFileSync(runner.log, "utf8");
+    expect(log).not.toContain("up -d --wait");
+    expect(countLines(log, "down -v")).toBe(1);
+    // The wrapper's exited resolves while the TERM-ignoring grandchild is
+    // still alive; only the post-exit group SIGKILL sweep can end it.
+    await sleep(100);
+    const gcPid = Number(readFileSync(pidFile, "utf8").trim());
+    expect(() => process.kill(gcPid, 0)).toThrow();
   }, 30_000);
 
   test("SIGTERM during the final down -v retries teardown and exits 143", async () => {
