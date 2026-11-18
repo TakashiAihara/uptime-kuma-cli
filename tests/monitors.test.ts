@@ -439,6 +439,25 @@ describe("monitors add", () => {
     expect((addCalls()[0]!.args[0] as any).notificationIDList).toEqual({ "4": true });
   });
 
+  test("--notifications-from keeps the default notifications on top of the copied list", async () => {
+    // unlike the UI's Clone, which sends the source list alone: `add` follows
+    // the UI's Add flow, where defaults attach to every new monitor
+    kuma.state.notifications = [
+      { id: 6, name: "def", active: true, isDefault: true, userId: 1, config: "{}" },
+    ];
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "push", "--name", "n3", "--notifications-from", "7"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).notificationIDList).toEqual({
+      "3": true,
+      "5": true,
+      "6": true,
+    });
+  });
+
   test("--proxy-id, --max-retries, --retry-interval, --resend-interval and --timeout are sent as numbers", async () => {
     kuma.state.proxies = [{ ...defaultProxy(), id: 4, default: 0 }];
     const r = await run(
@@ -649,7 +668,7 @@ describe("monitors add", () => {
   });
 
   test("an empty Primary Base URL falls back to the CLI url", async () => {
-    kuma.state.settings = { primaryBaseURL: "" };
+    kuma.state.info!.primaryBaseURL = "";
     const r = await run(
       sb,
       ["monitors", "add", "--type", "push", "--name", "pb0"],
@@ -670,14 +689,16 @@ describe("monitors add", () => {
     expect((addCalls()[0]!.args[0] as any).pushToken).toBe("a#b/c");
   });
 
-  test("pushUrl uses the Primary Base URL setting when it is set", async () => {
-    kuma.state.settings = { primaryBaseURL: "https://status.example.org/" };
+  test("pushUrl uses the Primary Base URL from info when it is set", async () => {
+    kuma.state.info!.primaryBaseURL = "https://status.example.org/";
     const r = await run(sb, ["monitors", "add", "--type", "push", "--name", "pb"], creds(kuma.url));
     expect(r.code).toBe(0);
     const out = r.json();
     expect(out.pushUrl).toBe(
       `https://status.example.org/api/push/${out.pushToken}?status=up&msg=OK&ping=`,
     );
+    // info already carries primaryBaseURL, so no getSettings round trip
+    expect(kuma.calls.filter((c) => c.event === "getSettings")).toHaveLength(0);
   });
 
   test.each([
@@ -689,6 +710,18 @@ describe("monitors add", () => {
     [["--type", "push", "--name", "x", "--max-retries", "1.5"], "--max-retries"],
     [["--type", "push", "--name", "x", "--resend-interval", "-1"], "--resend-interval"],
     [["--type", "push", "--name", "x", "--timeout", "-1"], "--timeout"],
+    // Number() would take these; CLI numbers are decimal literals only
+    [["--type", "push", "--name", "x", "--interval", "0x10"], "--interval"],
+    [["--type", "push", "--name", "x", "--interval", "1e2"], "--interval"],
+    [["--type", "push", "--name", "x", "--retry-interval", "0x10"], "--retry-interval"],
+    [["--type", "push", "--name", "x", "--max-retries", "1e2"], "--max-retries"],
+    [["--type", "push", "--name", "x", "--resend-interval", "0x10"], "--resend-interval"],
+    [["--type", "push", "--name", "x", "--timeout", "1e2"], "--timeout"],
+    [
+      ["--type", "ping", "--name", "x", "--hostname", "h", "--packet-size", "0x10"],
+      "--packet-size",
+    ],
+    [["--type", "port", "--name", "x", "--hostname", "h", "--port", "1e2"], "--port"],
   ])("empty or out-of-range values exit 2 before connecting: %p", async (args, word) => {
     const r = await run(sb, ["monitors", "add", ...args], creds(kuma.url));
     expect(r.code).toBe(2);
@@ -3518,6 +3551,65 @@ describe("monitors edit", () => {
     expect(r.json().active).toBe(true);
   });
 
+  test("a failure on the post-edit re-read prints the sent monitor and exits 0", async () => {
+    kuma.state.fail.getMonitor = [null, "second read failed"];
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "name=Taba web"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.stderr).toContain("reading it back failed");
+    expect(r.stderr).toContain("second read failed");
+    // the write already happened, so the sent object is printed instead
+    const out = r.json();
+    expect(out.name).toBe("Taba web");
+    expect(out.notificationIDList).toEqual([3, 5]);
+    expect(kuma.state.monitors.find((m) => m.id === 7)!.name).toBe("Taba web");
+  });
+
+  test("the post-edit fallback output redacts a secret of any JSON type", async () => {
+    kuma.state.fail.getMonitor = [null, "second read failed"];
+    const f = join(sb.dir, "edit-secret.json");
+    writeFileSync(f, JSON.stringify({ basic_auth_pass: 123456 }));
+    const r = await run(sb, ["monitors", "edit", "7", "--config-file", f], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json().basic_auth_pass).toBe("***");
+    expect(r.stdout).not.toContain("123456");
+  });
+
+  test("the post-edit fallback output redacts a non-string SASL secret", async () => {
+    kuma.state.fail.getMonitor = [null, "second read failed"];
+    const f = join(sb.dir, "edit-sasl.json");
+    writeFileSync(
+      f,
+      JSON.stringify({
+        kafkaProducerSaslOptions: { mechanism: "aws", awsSecretAccessKey: 987654 },
+      }),
+    );
+    const r = await run(sb, ["monitors", "edit", "7", "--config-file", f], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json().kafkaProducerSaslOptions.awsSecretAccessKey).toBe("***");
+    expect(r.stdout).not.toContain("987654");
+  });
+
+  test.each([
+    [{ ok: true }],
+    [{ ok: true, monitor: 42 }],
+    [{ ok: true, monitor: null }],
+    [{ ok: true, monitor: [] }],
+  ])("a malformed post-edit getMonitor response still exits 70: %p", async (shape) => {
+    kuma.state.getMonitorResult = [null, shape];
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "name=Taba web"], creds(kuma.url));
+    expect(r.code).toBe(70);
+    expect(r.stderr).toContain("unexpected getMonitor response");
+    expect(kuma.calls.filter((c) => c.event === "editMonitor")).toHaveLength(1);
+  });
+
+  test("a malformed pre-edit getMonitor response exits 70 before editMonitor", async () => {
+    kuma.state.getMonitorResult = { ok: true, monitor: "nope" };
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "name=Taba web"], creds(kuma.url));
+    expect(r.code).toBe(70);
+    expect(r.stderr).toContain("unexpected getMonitor response");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
   test.each([["parent=7"], ['parent="7"']])(
     "making a monitor its own parent is refused before connecting: %s",
     async (set) => {
@@ -4631,6 +4723,24 @@ describe("monitors edit", () => {
     const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
     expect(sent.timeout).toBe(48);
     expect(sent.retryInterval).toBe(60);
+  });
+
+  test("edit --config-file accepts a number JSON writes in exponent form", async () => {
+    const f = join(sb.dir, "edit-exp.json");
+    writeFileSync(f, JSON.stringify({ timeout: 1e-7 }));
+    const r = await run(sb, ["monitors", "edit", "7", "--config-file", f], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.timeout).toBe(1e-7);
+  });
+
+  test("edit --config-file refuses a number too small to write out, not sending 0", async () => {
+    const f = join(sb.dir, "edit-tiny.json");
+    writeFileSync(f, JSON.stringify({ timeout: 1e-101 }));
+    const r = await run(sb, ["monitors", "edit", "7", "--config-file", f], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("timeout has more than 100 decimal places");
+    expect(kuma.calls.filter((c) => c.event === "editMonitor")).toHaveLength(0);
   });
 
   test("edit --config-file interval re-derives the timing", async () => {

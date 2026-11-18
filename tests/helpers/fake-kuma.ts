@@ -236,6 +236,8 @@ export type FakeState = {
   // serverTimezone fill. An array arms one answer per call in order; a null
   // entry lets that call answer normally, like fail's per-call list
   getSettingsResult: Record<string, unknown> | (Record<string, unknown> | null)[] | null;
+  // getMonitor answer override with the same per-call array rule
+  getMonitorResult: Record<string, unknown> | (Record<string, unknown> | null)[] | null;
   // the password setSettings' disableAuth check verifies against; null means
   // state.password — set it to simulate the account password having been
   // rotated after this socket logged in
@@ -553,6 +555,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     testNotificationResult: { ok: true, msg: "Sent Successfully." },
     settings: {},
     getSettingsResult: null,
+    getMonitorResult: null,
     settingsPassword: null,
     twoFA: false,
     twoFASecret: FAKE_TOTP_SECRET,
@@ -1014,6 +1017,16 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     });
 
     handle("getMonitor", (id: number) => {
+      const armed = state.getMonitorResult;
+      if (Array.isArray(armed)) {
+        if (armed.length > 0) {
+          const next = armed.shift();
+          if (armed.length === 0) state.getMonitorResult = null;
+          if (next != null) return next;
+        }
+      } else if (armed !== null) {
+        return armed;
+      }
       const m = state.monitors.find((x) => x.id === Number(id));
       if (!m) throw new Error("Cannot read properties of null (reading 'toJSON')");
       return { ok: true, monitor: structuredClone({ ...m, tags: monitorTags(m) }) };

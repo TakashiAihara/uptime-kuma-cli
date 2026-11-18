@@ -1,6 +1,7 @@
 import { Option, type Command } from "commander";
 import {
   CliError,
+  decimalNumber,
   fail,
   isIdLiteral,
   notificationIdArray,
@@ -195,13 +196,14 @@ function redactSecrets(monitor: Record<string, unknown>): Record<string, unknown
   const out: Record<string, unknown> = { ...monitor, url: redactUrl(monitor.url) };
   for (const key of SECRET_KEYS) {
     const value = out[key];
-    if (typeof value === "string" && value !== "") out[key] = "***";
+    // a --config-file value may be any JSON type, so redact by presence, not type
+    if (value !== undefined && value !== null && value !== "") out[key] = "***";
   }
   const sasl = out.kafkaProducerSaslOptions;
   if (sasl !== null && typeof sasl === "object" && !Array.isArray(sasl)) {
     const copy: Record<string, unknown> = { ...(sasl as Record<string, unknown>) };
     for (const [k, v] of Object.entries(copy)) {
-      if (!SASL_VISIBLE_KEYS.has(k) && typeof v === "string" && v !== "") copy[k] = "***";
+      if (!SASL_VISIBLE_KEYS.has(k) && v !== undefined && v !== null && v !== "") copy[k] = "***";
     }
     out.kafkaProducerSaslOptions = copy;
   }
@@ -211,7 +213,11 @@ function redactSecrets(monitor: Record<string, unknown>): Record<string, unknown
 async function fetchMonitor(s: KumaSession, id: number): Promise<Record<string, unknown>> {
   const res = await s.request("getMonitor", [id]);
   const monitor = res?.monitor;
-  if (monitor === null || typeof monitor !== "object") fail(1, `monitor ${id} not found`);
+  // a missing monitor answers ok:false before this; a non-object monitor is
+  // an unexpected shape, not "not found"
+  if (monitor === null || typeof monitor !== "object" || Array.isArray(monitor)) {
+    fail(70, "unexpected getMonitor response");
+  }
   return monitor;
 }
 
@@ -407,7 +413,8 @@ function checkDockerHost(s: KumaSession, dockerHost: unknown): void {
 
 // A hatch value for a key that has a typed flag goes through the flag's
 // parser; flags take strings, so a string here parses the same way while a
-// number is stringified first. The key names the error.
+// number is written out in plain decimal first (String() would give "1e-7",
+// which the decimal-literal check refuses). The key names the error.
 function hatchNumber(
   value: unknown,
   key: string,
@@ -416,7 +423,16 @@ function hatchNumber(
   if (typeof value !== "number" && typeof value !== "string") {
     fail(2, `${key} must be a number`);
   }
-  return parse(String(value), key);
+  const text =
+    typeof value === "number"
+      ? value.toLocaleString("en-US", { useGrouping: false, maximumFractionDigits: 100 })
+      : value;
+  // Intl stops at 100 fraction digits, so 1e-101 would become "0"; refuse a
+  // number that does not survive the round trip rather than send another value
+  if (typeof value === "number" && Number(text) !== value) {
+    fail(2, `${key} has more than 100 decimal places, got ${value}`);
+  }
+  return parse(text, key);
 }
 
 // timeout may be 0 on 2.x (it becomes interval * 0.8 seconds there); 1.23
@@ -424,8 +440,8 @@ function hatchNumber(
 // connect() on a 1.x server. Negative, empty and non-numeric values are
 // refused before connecting on both versions.
 function parseTimeoutSeconds(value: string, flag: string): number {
-  const n = Number(value);
-  if (value.trim() === "" || !Number.isFinite(n) || n < 0) {
+  const n = decimalNumber(value);
+  if (!Number.isFinite(n) || n < 0) {
     fail(2, `${flag} must be a non-negative number of seconds, got "${value}"`);
   }
   return n;
@@ -440,7 +456,7 @@ const MIN_INTERVAL_SECOND = 20;
 const MAX_INTERVAL_SECOND = 2073600;
 
 function parseMonitorInterval(value: string, flag: string): number {
-  const n = Number(value);
+  const n = decimalNumber(value);
   if (!Number.isFinite(n) || n < 1) {
     fail(2, `${flag} must be at least 1 second, got "${value}"`);
   }
@@ -1286,10 +1302,8 @@ export function registerMonitors(program: Command): void {
 
       let pushBase = s.url;
       if (pushToken !== undefined) {
-        const settings = await s.request("getSettings");
-        const data = settings?.data as Record<string, unknown> | undefined;
-        const primary = data?.primaryBaseURL;
-        if (typeof primary === "string" && primary !== "") {
+        const primary = s.primaryBaseURL;
+        if (primary !== undefined && primary !== "") {
           pushBase = primary.replace(/\/+$/, "");
         }
       }
@@ -1462,12 +1476,26 @@ export function registerMonitors(program: Command): void {
       checkKuma2Ping(s, monitor);
       await s.request("editMonitor", [monitor]);
       // editMonitor ignores fields like `active`, so print what Kuma saved.
-      const saved = await fetchMonitor(s, id);
-      printJson({
-        ...redactSecrets(saved),
-        notificationIDList: notificationIdArray(saved.notificationIDList),
-        tags: monitorTags(saved).map(tagJson),
-      });
+      // The save already happened, so a failed re-read degrades to the sent
+      // object plus a warning on stderr rather than a nonzero exit; exit 70
+      // is an unexpected response shape, not a failed read, and stays loud —
+      // same contract as `settings set`.
+      try {
+        const saved = await fetchMonitor(s, id);
+        printJson({
+          ...redactSecrets(saved),
+          notificationIDList: notificationIdArray(saved.notificationIDList),
+          tags: monitorTags(saved).map(tagJson),
+        });
+      } catch (e) {
+        if (!(e instanceof CliError) || e.exitCode === 70) throw e;
+        printJson({
+          ...redactSecrets(monitor),
+          notificationIDList: notificationIdArray(monitor.notificationIDList),
+          tags: monitorTags(monitor).map(tagJson),
+        });
+        console.error(`warning: monitor ${id} was saved, but reading it back failed: ${e.message}`);
+      }
     });
 
   for (const [name, event, active] of [

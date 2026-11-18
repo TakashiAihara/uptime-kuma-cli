@@ -89,8 +89,10 @@ describe("beats / events option checks", () => {
   test.each([
     [["beats", "1", "--hours", "-1"], "--hours"],
     [["beats", "1", "--hours", "0"], "--hours"],
+    [["beats", "1", "--hours", "1e2"], "--hours"],
     [["beats", "1", "--limit", "0"], "--limit"],
     [["beats", "1", "--limit", "1.5"], "--limit"],
+    [["beats", "1", "--limit", "0x10"], "--limit"],
     [["events", "1", "--hours", "-5"], "--hours"],
   ])("%p exits 2 before connecting", async (args, word) => {
     const r = await run(sb, args, creds(kuma.url));
