@@ -142,6 +142,7 @@
 - `beats latest`
     - waits for `heartbeatList` of every monitor in `monitorList` (until the timeout; missing ones exit 2 naming them)
     - array sorted by id of `{ id, name, active, time, status, msg }`; a monitor with no beat has `time: null, status: null, msg: null`
+    - this is the one place a name cannot reach its monitor: commander dispatches the `latest` subcommand before the `<id|name>` argument resolves, so a monitor literally named `latest` must be given to `beats` by its id
 
 ### events
 

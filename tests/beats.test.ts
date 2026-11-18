@@ -125,6 +125,14 @@ describe("beats latest", () => {
     expect(r.stderr).toContain("3 (web)");
     expect(r.stderr).not.toContain("1 (db)");
   });
+
+  test("a monitor named latest stays unreachable by name — the subcommand wins", async () => {
+    kuma.state.monitors.push(mon(7, "latest"));
+    const r = await run(sb, ["beats", "latest"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json().map((x: any) => x.id)).toContain(7);
+    expect(kuma.calls.find((c) => c.event === "getMonitorBeats")).toBeUndefined();
+  });
 });
 
 describe("events", () => {
