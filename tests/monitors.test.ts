@@ -4717,6 +4717,15 @@ describe("monitors edit", () => {
     expect(sent.timeout).toBe(1e-7);
   });
 
+  test("edit --config-file refuses a number too small to write out, not sending 0", async () => {
+    const f = join(sb.dir, "edit-tiny.json");
+    writeFileSync(f, JSON.stringify({ timeout: 1e-101 }));
+    const r = await run(sb, ["monitors", "edit", "7", "--config-file", f], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("timeout has more than 100 decimal places");
+    expect(kuma.calls.filter((c) => c.event === "editMonitor")).toHaveLength(0);
+  });
+
   test("edit --config-file interval re-derives the timing", async () => {
     const f = join(sb.dir, "edit-int.json");
     writeFileSync(f, JSON.stringify({ interval: 30 }));

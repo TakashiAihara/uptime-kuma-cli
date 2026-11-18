@@ -427,6 +427,11 @@ function hatchNumber(
     typeof value === "number"
       ? value.toLocaleString("en-US", { useGrouping: false, maximumFractionDigits: 100 })
       : value;
+  // Intl stops at 100 fraction digits, so 1e-101 would become "0"; refuse a
+  // number that does not survive the round trip rather than send another value
+  if (typeof value === "number" && Number(text) !== value) {
+    fail(2, `${key} has more than 100 decimal places, got ${value}`);
+  }
   return parse(text, key);
 }
 
