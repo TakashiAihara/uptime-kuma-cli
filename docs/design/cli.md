@@ -265,7 +265,7 @@
 - `bun test` runs the unit tests in `tests/` against `tests/helpers/fake-kuma.ts`, an in-process Socket.IO server that mimics Kuma 1.23.17; `tests/helpers/run.ts` invokes the CLI in-process (`runCli`) so `bun test --coverage` instruments `src/commands` too — a spawned child process would leave them unmeasured
 - `tests/cli-process.test.ts` is the exception: it spawns `bun src/cli.ts` for real to prove the entry point boots, propagates its exit code, and that `disconnect()` lets the process exit instead of hanging on the socket
 - `tests/src-files.test.ts` imports every module under `src/` so a file no test loads still appears in the coverage report at 0% instead of being absent
-- `bun run test:integration` (`scripts/integration.ts`) runs `tests/integration/` — the same CLI — against a real `louislam/uptime-kuma:1.23.17` container from `tests/integration/compose.yaml` (or the image in `UPTIME_KUMA_IT_IMAGE`; CI also runs 2.5.11, where tests marked `skipIf(on2x)` with their issue number are skipped); it needs Docker
+- `bun run test:integration` (`scripts/integration.ts`) runs `tests/integration/` — the same CLI — against a real `louislam/uptime-kuma:1.23.17` container from `tests/integration/compose.yaml` (or the image in `UPTIME_KUMA_IT_IMAGE`; CI also runs 2.5.11, where tests marked `skipIf(on2x)` with their issue number are skipped); it needs Docker. It builds the host binary with `scripts/build.ts` first and exports it as `UPTIME_KUMA_IT_BIN`, which — while `UPTIME_KUMA_IT_URL` marks the integration environment — makes `tests/helpers/run.ts` spawn that binary instead of calling `runCli`, so the suite exercises the compiled artifact, not only the in-process entry point
 
 ## Coverage gates (CI)
 

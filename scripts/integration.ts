@@ -7,13 +7,18 @@
  * louislam/uptime-kuma:1.23.17) from tests/integration/compose.yaml on
  * 127.0.0.1:${UPTIME_KUMA_IT_PORT:-3901} — the compose file sets
  * UPTIME_KUMA_DB_TYPE=sqlite, which 2.x needs to pick its database — creates
- * the first-run admin over Socket.IO, then runs `bun test tests/integration`
- * with UPTIME_KUMA_IT_* pointing at it. `down -v` (which also removes the
+ * the first-run admin over Socket.IO, builds the host binary with
+ * scripts/build.ts, then runs `bun test tests/integration` with
+ * UPTIME_KUMA_IT_* pointing at it and UPTIME_KUMA_IT_BIN at that binary, so
+ * the suite exercises the compiled artifact rather than only runCli.
+ * `down -v` (which also removes the
  * anonymous data volume) always runs before `up`, clearing a project left by
  * UPTIME_KUMA_IT_KEEP=1 or a killed run when the port matches — the project
  * name includes the port. UPTIME_KUMA_IT_KEEP=1 skips only the teardown
  * after the run.
  */
+import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { io, type Socket } from "socket.io-client";
 
@@ -148,6 +153,9 @@ async function runTests(kumaVersion: string): Promise<number> {
       UPTIME_KUMA_IT_USERNAME: USERNAME,
       UPTIME_KUMA_IT_PASSWORD: PASSWORD,
       UPTIME_KUMA_IT_KUMA_VERSION: kumaVersion,
+      // after the ...process.env spread so an inherited value cannot point
+      // the suite at a stale binary instead of the build above
+      UPTIME_KUMA_IT_BIN: BIN,
     },
     stdin: "inherit",
     stdout: "inherit",
@@ -192,40 +200,79 @@ function teardown(): Promise<boolean> {
 }
 
 let signalExit: number | null = null;
+
+// The suite runs the compiled binary, so the host target is built before
+// anything else — a compile error should not wait behind a multi-minute image
+// pull. It builds in a scratch dir rather than dist/: UPTIME_KUMA_IT_PORT
+// exists so parallel runs can share a checkout, and a fixed outfile would let
+// one run rewrite the binary another is executing (or clobber a local
+// RELEASE_TAG build). Target names mirror TARGETS in scripts/build.ts; a host
+// outside them (windows, 32-bit linux) has no runnable binary.
+const HOST_TARGET = `${process.platform}-${process.arch}`;
+if (!["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"].includes(HOST_TARGET)) {
+  console.error(`no release target for ${HOST_TARGET}`);
+  process.exit(1);
+}
+const buildDir = mkdtempSync(join(tmpdir(), "uptime-kuma-cli-it-build-"));
+// Handlers go up as soon as there is something to clean: a signal during the
+// build would otherwise kill the parent outright and leak the scratch dir.
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
     const code = signal === "SIGINT" ? 130 : 143;
     signalExit ??= code;
     console.error(`\nreceived ${signal}, tearing down`);
     testProc?.kill();
-    void teardown().finally(() => process.exit(code));
+    void teardown().finally(() => {
+      rmSync(buildDir, { recursive: true, force: true });
+      process.exit(code);
+    });
   });
 }
+for (const name of ["src", "package.json", "node_modules"]) {
+  symlinkSync(join(REPO_ROOT, name), join(buildDir, name));
+}
+console.log(`building uptime-kuma-cli-${HOST_TARGET}`);
+const build = Bun.spawnSync(["bun", join(REPO_ROOT, "scripts", "build.ts"), HOST_TARGET], {
+  cwd: buildDir,
+  stdout: "inherit",
+  stderr: "inherit",
+});
+if (build.exitCode !== 0) {
+  rmSync(buildDir, { recursive: true, force: true });
+  // A null exitCode means the build child died to a signal — in practice
+  // Ctrl+C hitting the whole foreground group — so report 130, not 1.
+  process.exit(build.exitCode ?? 130);
+}
+const BIN = join(buildDir, "dist", `uptime-kuma-cli-${HOST_TARGET}`);
 
 let exitCode = 1;
 try {
   // Remove what a KEEP=1 or killed run left behind; the result does not matter
   await compose(["down", "-v"], COMPOSE_DOWN_TIMEOUT_MS);
-  if (
-    (await compose(["up", "-d", "--wait", "--wait-timeout", "120"], COMPOSE_UP_TIMEOUT_MS)) !== 0
-  ) {
-    console.error("docker compose up failed");
-    console.error("--- Kuma server log (compose up failed) ---");
-    await compose(["logs", "--no-color", "--timestamps"], COMPOSE_DOWN_TIMEOUT_MS);
-  } else {
-    const version = await setupKuma();
-    console.log(`Kuma ${version} ready at ${BASE_URL}`);
-    // A CI job that names 2.5.11 must not go green on 1.23 if the image
-    // variable stops reaching compose.
-    if (IMAGE_MAJOR !== undefined && version.split(".")[0] !== IMAGE_MAJOR) {
-      throw new Error(`UPTIME_KUMA_IT_IMAGE names ${IMAGE_MAJOR}.x but Kuma reports ${version}`);
-    }
-    exitCode = await runTests(version);
-    // The server's side of a failure (what it was doing while a call timed
-    // out) is gone after down -v, so print its log while the container lives.
-    if (exitCode !== 0) {
-      console.error("--- Kuma server log (tests failed) ---");
+  // A signal during the build fires its handler at this first await; bail
+  // before compose up so the handler's exit cannot orphan the up child.
+  if (signalExit === null) {
+    if (
+      (await compose(["up", "-d", "--wait", "--wait-timeout", "120"], COMPOSE_UP_TIMEOUT_MS)) !== 0
+    ) {
+      console.error("docker compose up failed");
+      console.error("--- Kuma server log (compose up failed) ---");
       await compose(["logs", "--no-color", "--timestamps"], COMPOSE_DOWN_TIMEOUT_MS);
+    } else {
+      const version = await setupKuma();
+      console.log(`Kuma ${version} ready at ${BASE_URL}`);
+      // A CI job that names 2.5.11 must not go green on 1.23 if the image
+      // variable stops reaching compose.
+      if (IMAGE_MAJOR !== undefined && version.split(".")[0] !== IMAGE_MAJOR) {
+        throw new Error(`UPTIME_KUMA_IT_IMAGE names ${IMAGE_MAJOR}.x but Kuma reports ${version}`);
+      }
+      exitCode = await runTests(version);
+      // The server's side of a failure (what it was doing while a call timed
+      // out) is gone after down -v, so print its log while the container lives.
+      if (exitCode !== 0) {
+        console.error("--- Kuma server log (tests failed) ---");
+        await compose(["logs", "--no-color", "--timestamps"], COMPOSE_DOWN_TIMEOUT_MS);
+      }
     }
   }
 } catch (e) {
@@ -235,6 +282,7 @@ try {
   console.error("--- Kuma server log (setup failed) ---");
   await compose(["logs", "--no-color", "--timestamps"], COMPOSE_DOWN_TIMEOUT_MS);
 } finally {
+  rmSync(buildDir, { recursive: true, force: true });
   if (!(await teardown()) && exitCode === 0) exitCode = 1;
 }
 process.exit(signalExit ?? exitCode);
