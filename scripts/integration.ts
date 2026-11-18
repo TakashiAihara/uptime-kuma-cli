@@ -297,7 +297,11 @@ let signalCleanup: Promise<void> | undefined;
 // exits. The main flow reaches the same cleanup through its finally; the
 // first process.exit wins, and both report the first signal's code.
 async function exitAfterTeardown(code: number, children: Child[]): Promise<void> {
-  signalCleanup = (async () => {
+  // The first signal owns the cleanup; a second one only awaits it — its
+  // children were already killed individually by the handler, and
+  // overwriting the promise would let this path exit before the first
+  // cleanup's child sweep finishes.
+  signalCleanup ??= (async () => {
     await awaitChildren(children);
     await teardown();
     rmSync(buildDir, { recursive: true, force: true });

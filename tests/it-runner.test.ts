@@ -424,6 +424,25 @@ describe("scripts/integration.ts signal handling", () => {
     expect(await processGone(gcPid)).toBe(true);
   }, 30_000);
 
+  test("a second signal during build cleanup cannot cut the grandchild sweep short", async () => {
+    const pidFile = join(sb.dir, "grandchild.pid");
+    runner = startRunner(sb, kuma.port, {
+      UPTIME_KUMA_IT_KEEP: "1",
+      FAKE_BUILD_SLEEP: "60",
+      FAKE_GC_IGNORE_TERM: "1",
+      FAKE_GC_PIDFILE: pidFile,
+    });
+    await waitForLog(runner.log, "grandchild started");
+    runner.proc.kill("SIGINT");
+    // Land the second signal while the first cleanup is still inside the
+    // grace-period poll for the TERM-ignoring grandchild.
+    await sleep(200);
+    runner.proc.kill("SIGTERM");
+    expect(await runner.exited).toBe(130);
+    const gcPid = Number(readFileSync(pidFile, "utf8").trim());
+    expect(await processGone(gcPid)).toBe(true);
+  }, 30_000);
+
   test("a timed-out down -v is reaped before the next compose call", async () => {
     runner = startRunner(sb, kuma.port, {
       UPTIME_KUMA_IT_DOWN_TIMEOUT_MS: "200",
