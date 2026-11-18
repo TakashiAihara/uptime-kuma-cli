@@ -75,10 +75,10 @@ function parseTitle(value: string): string {
   return value;
 }
 
-function parseIdList(value: string, flag: string): number[] {
+function idListParts(value: string): string[] {
   const trimmed = value.trim();
   if (trimmed === "") return [];
-  return trimmed.split(",").map((part) => parseId(part.trim(), flag));
+  return trimmed.split(",").map((part) => part.trim());
 }
 
 async function fetchMaintenance(s: KumaSession, id: number): Promise<Record<string, unknown>> {
@@ -428,26 +428,39 @@ const ATTACH_KINDS = {
 type AttachKind = (typeof ATTACH_KINDS)[keyof typeof ATTACH_KINDS];
 
 function registerAttach(maintenance: Command, kind: AttachKind): void {
+  // Monitor targets also take exact names; status pages stay id-only.
+  const named = kind === ATTACH_KINDS.monitor;
+  const targetArg = named ? "<id|name>" : "<id>";
+  const targetRef = named ? "id or name" : "id";
   maintenance
     .command(`${kind.command} <id>`)
     .description(`Show or change the ${kind.noun}s a maintenance window affects`)
-    .option("--set-ids <ids>", "replace the set with these ids (comma-separated)")
-    .option("--add <id>", `attach a ${kind.noun} id (repeatable)`, collect, [])
-    .option("--remove <id>", `detach a ${kind.noun} id (repeatable)`, collect, [])
+    .option(
+      "--set-ids <ids>",
+      `replace the set with these ${named ? "monitor ids or names" : "ids"} (comma-separated)`,
+    )
+    .option(`--add ${targetArg}`, `attach a ${kind.noun} ${targetRef} (repeatable)`, collect, [])
+    .option(`--remove ${targetArg}`, `detach a ${kind.noun} ${targetRef} (repeatable)`, collect, [])
     .action(async (rawId, opts) => {
       const id = parseId(rawId, "maintenance id");
       const setIdsRaw = opts.setIds as string | undefined;
-      const addIds = ((opts.add as string[] | undefined) ?? []).map((v) => parseId(v, "--add"));
-      const removeIds = ((opts.remove as string[] | undefined) ?? []).map((v) =>
-        parseId(v, "--remove"),
-      );
-      const setIds =
-        setIdsRaw === undefined ? undefined : [...new Set(parseIdList(setIdsRaw, "--set-ids"))];
-      if (setIds !== undefined && (addIds.length > 0 || removeIds.length > 0)) {
+      const addRaw = (opts.add as string[] | undefined) ?? [];
+      const removeRaw = (opts.remove as string[] | undefined) ?? [];
+      if (setIdsRaw !== undefined && (addRaw.length > 0 || removeRaw.length > 0)) {
         fail(2, "--set-ids cannot be combined with --add or --remove");
       }
       const s = await connect(kind.extraLists);
       if (!s.maintenanceById(id)) fail(1, `maintenance ${id} not found`);
+      // Monitor targets may be exact names from monitorList; status pages
+      // stay id-only — the CLI addresses them by slug everywhere else.
+      const targetId = (raw: string, flag: string): number =>
+        named ? s.resolveMonitorId(raw) : parseId(raw, flag);
+      const addIds = addRaw.map((v) => targetId(v, "--add"));
+      const removeIds = removeRaw.map((v) => targetId(v, "--remove"));
+      const setIds =
+        setIdsRaw === undefined
+          ? undefined
+          : [...new Set(idListParts(setIdsRaw).map((v) => targetId(v, "--set-ids")))];
       // every user-supplied id must name a row in the pushed list
       for (const target of setIds ?? [...addIds, ...removeIds]) {
         if (kind.find(s, target) === undefined) fail(1, `${kind.noun} ${target} not found`);

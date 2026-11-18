@@ -140,6 +140,7 @@ uptime-kuma-cli api-keys disable 3
 uptime-kuma-cli api-keys delete 3 --yes
 ```
 
+- Anywhere a monitor or notification id is taken — a `<id>` argument, `--parent`, `--notifications-from`, `--notification-id`, or the monitor targets of `maintenance monitors` — the exact name works too (`uptime-kuma-cli monitors get "docs"`, `monitors pause web`); a numeric string always stays an id, a missing name exits 2, and an ambiguous one exits 2 naming the candidate ids. Proxies have no name in Kuma, so proxy ids stay numeric
 - `monitors add` and `tags add` exit 3 and send nothing when the same name exists; `maintenance add` does the same for a title, `status-pages add` for a slug, `status-pages save` when the file's slug belongs to another page; `monitors tag` exits 3 when the same tag+value is already attached. `monitors add --tag <id[:value]>` attaches tags at creation
 - `maintenance add` / `edit` take `--config-file` for the schedule fields of the `cron` and `recurring-*` strategies; `maintenance monitors` / `status-pages` replace the whole attached set — Kuma's attach events delete every existing row first, they do not add
 - `docker-hosts test` also takes `--type` / `--daemon` to check a host that is not saved yet; deleting a host clears `docker_host` on the monitors that used it

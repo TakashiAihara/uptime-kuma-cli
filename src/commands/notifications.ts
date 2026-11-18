@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import { fail, parseId, parseSets, printJson, readJsonFile } from "../lib.ts";
+import { fail, parseSets, printJson, readJsonFile } from "../lib.ts";
 import { connect, type NotificationRow } from "../kuma.ts";
 
 function storedConfig(row: NotificationRow): Record<string, unknown> {
@@ -79,12 +79,11 @@ export function registerNotifications(program: Command): void {
     });
 
   notifications
-    .command("edit <id>")
+    .command("edit <id|name>")
     .description("Edit a notification")
     .option("--set <key=value>", "config key=value (repeatable)", collect, [])
     .option("--config-file <path>", "JSON file merged into the config")
     .action(async (rawId, opts) => {
-      const id = parseId(rawId, "notification id");
       const sets = parseSets(opts.set as string[] | undefined);
       if (Object.keys(sets).length === 0 && opts.configFile === undefined) {
         fail(2, "notifications edit requires --set key=value or --config-file");
@@ -98,6 +97,7 @@ export function registerNotifications(program: Command): void {
         fail(2, "applyExisting cannot be set on edit; use notifications add --apply-existing");
       }
       const s = await connect();
+      const id = s.resolveNotificationId(rawId);
       const row = s.notificationById(id);
       if (!row) fail(1, `notification ${id} not found`);
       // applyExisting would re-attach the notification to every monitor.
@@ -116,11 +116,11 @@ export function registerNotifications(program: Command): void {
     });
 
   notifications
-    .command("test <id>")
+    .command("test <id|name>")
     .description("Send a test notification")
     .action(async (rawId) => {
-      const id = parseId(rawId, "notification id");
       const s = await connect();
+      const id = s.resolveNotificationId(rawId);
       const row = s.notificationById(id);
       if (!row) fail(1, `notification ${id} not found`);
       const res = await s.request("testNotification", [storedConfig(row)]);
@@ -128,13 +128,13 @@ export function registerNotifications(program: Command): void {
     });
 
   notifications
-    .command("delete <id>")
+    .command("delete <id|name>")
     .description("Delete a notification")
     .option("--yes", "confirm deletion")
     .action(async (rawId, opts) => {
-      const id = parseId(rawId, "notification id");
-      if (!opts.yes) fail(2, `would delete notification ${id}; pass --yes to delete`);
+      if (!opts.yes) fail(2, `would delete notification ${rawId}; pass --yes to delete`);
       const s = await connect();
+      const id = s.resolveNotificationId(rawId);
       // Kuma 1.23 rejects an unknown id with ok:false, so no pre-check (unlike deleteMonitor)
       await s.request("deleteNotification", [id]);
       printJson({ id, deleted: true });

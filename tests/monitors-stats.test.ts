@@ -105,6 +105,26 @@ describe("monitors stats", () => {
     });
   });
 
+  test("resolves a monitor name to its id", async () => {
+    const r = await run(sb, ["monitors", "stats", "beta"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json()).toEqual({
+      id: 2,
+      name: "beta",
+      uptime24h: 0,
+      uptime30d: 0,
+      avgPing: null,
+      certExpiresAt: "2027-02-03T04:05:06.000Z",
+      certDaysRemaining: 33,
+    });
+  });
+
+  test("an unknown monitor name exits 2", async () => {
+    const r = await run(sb, ["monitors", "stats", "No Such"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('no monitor named "No Such"');
+  });
+
   test("a monitor without certInfo reports null cert fields", async () => {
     const r = await run(sb, ["monitors", "stats", "3"], creds(kuma.url));
     expect(r.code).toBe(0);

@@ -70,6 +70,19 @@ describe("beats <id>", () => {
     expect(r.code).toBe(1);
     expect(r.stderr).toContain("Invalid period.");
   });
+
+  test("resolves a monitor name to its id", async () => {
+    const r = await run(sb, ["beats", "web"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(kuma.calls.find((c) => c.event === "getMonitorBeats")!.args).toEqual([3, 24]);
+  });
+
+  test("an unknown monitor name exits 2", async () => {
+    const r = await run(sb, ["beats", "No Such"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('no monitor named "No Such"');
+    expect(kuma.calls.find((c) => c.event === "getMonitorBeats")).toBeUndefined();
+  });
 });
 
 describe("beats / events option checks", () => {
@@ -140,5 +153,11 @@ describe("events", () => {
       { date: "2026-10-15", down: 1, up: 1 },
       { date: "2026-10-16", down: 0, up: 1 },
     ]);
+  });
+
+  test("resolves a monitor name to its id", async () => {
+    const r = await run(sb, ["events", "db"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(kuma.calls.find((c) => c.event === "getMonitorBeats")!.args).toEqual([1, 168]);
   });
 });

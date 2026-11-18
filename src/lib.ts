@@ -66,9 +66,13 @@ export function notificationIdObject(value: unknown): Record<string, true> {
   return out;
 }
 
+// Kuma ids start at 1; anything else names a resource instead of selecting an id
+export function isIdLiteral(value: string): boolean {
+  return /^[1-9]\d*$/.test(value);
+}
+
 export function parseId(value: string, flag: string): number {
-  // Kuma ids start at 1
-  if (!/^[1-9]\d*$/.test(value)) fail(2, `${flag} must be a positive integer id, got "${value}"`);
+  if (!isIdLiteral(value)) fail(2, `${flag} must be a positive integer id, got "${value}"`);
   return Number(value);
 }
 

@@ -1,5 +1,13 @@
 import { io, type Socket } from "socket.io-client";
-import { CliError, fail, resolveCredentials, resolveTotp, sleep, socketTimeoutMs } from "./lib.ts";
+import {
+  CliError,
+  fail,
+  isIdLiteral,
+  resolveCredentials,
+  resolveTotp,
+  sleep,
+  socketTimeoutMs,
+} from "./lib.ts";
 
 export interface Monitor extends Record<string, unknown> {
   id: number;
@@ -274,6 +282,15 @@ export class KumaSession {
     return this.monitors().find((m) => m.id === id);
   }
 
+  // A command-line reference is an id when it is a positive integer — a
+  // resource may be named "123" but the number always wins — and an exact
+  // name match against the pushed list otherwise. A missing or ambiguous
+  // name is a usage error (exit 2); an unknown numeric id stays exit 1.
+  resolveMonitorId(raw: string): number {
+    if (isIdLiteral(raw)) return Number(raw);
+    return namedRowId(this.monitors(), raw, "monitor");
+  }
+
   maintenances(): MaintenanceRow[] {
     const list = this.maintenanceList;
     if (list === undefined) fail(70, "maintenanceList was not awaited");
@@ -290,6 +307,11 @@ export class KumaSession {
 
   notificationById(id: number): NotificationRow | undefined {
     return this.notifications().find((n) => n.id === id);
+  }
+
+  resolveNotificationId(raw: string): number {
+    if (isIdLiteral(raw)) return Number(raw);
+    return namedRowId(this.notifications(), raw, "notification");
   }
 
   proxies(): ProxyRow[] {
@@ -418,6 +440,17 @@ export class KumaSession {
     }
     return out;
   }
+}
+
+// Exact name match against a pushed list; the candidates of an ambiguous
+// name are its ids since the names are identical.
+function namedRowId(rows: { id: number; name: string }[], raw: string, noun: string): number {
+  const matches = rows.filter((row) => row.name === raw);
+  if (matches.length === 0) fail(2, `no ${noun} named "${raw}"`);
+  if (matches.length > 1) {
+    fail(2, `${noun} name "${raw}" is ambiguous: ids ${matches.map((m) => m.id).join(", ")}`);
+  }
+  return matches[0]!.id;
 }
 
 // info.version is package.json's semver on both Kuma versions; a missing or
