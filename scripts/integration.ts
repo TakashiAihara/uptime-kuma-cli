@@ -239,7 +239,9 @@ const build = Bun.spawnSync(["bun", join(REPO_ROOT, "scripts", "build.ts"), HOST
 });
 if (build.exitCode !== 0) {
   rmSync(buildDir, { recursive: true, force: true });
-  process.exit(build.exitCode ?? 1);
+  // A null exitCode means the build child died to a signal — in practice
+  // Ctrl+C hitting the whole foreground group — so report 130, not 1.
+  process.exit(build.exitCode ?? 130);
 }
 const BIN = join(buildDir, "dist", `uptime-kuma-cli-${HOST_TARGET}`);
 
@@ -247,26 +249,30 @@ let exitCode = 1;
 try {
   // Remove what a KEEP=1 or killed run left behind; the result does not matter
   await compose(["down", "-v"], COMPOSE_DOWN_TIMEOUT_MS);
-  if (
-    (await compose(["up", "-d", "--wait", "--wait-timeout", "120"], COMPOSE_UP_TIMEOUT_MS)) !== 0
-  ) {
-    console.error("docker compose up failed");
-    console.error("--- Kuma server log (compose up failed) ---");
-    await compose(["logs", "--no-color", "--timestamps"], COMPOSE_DOWN_TIMEOUT_MS);
-  } else {
-    const version = await setupKuma();
-    console.log(`Kuma ${version} ready at ${BASE_URL}`);
-    // A CI job that names 2.5.11 must not go green on 1.23 if the image
-    // variable stops reaching compose.
-    if (IMAGE_MAJOR !== undefined && version.split(".")[0] !== IMAGE_MAJOR) {
-      throw new Error(`UPTIME_KUMA_IT_IMAGE names ${IMAGE_MAJOR}.x but Kuma reports ${version}`);
-    }
-    exitCode = await runTests(version);
-    // The server's side of a failure (what it was doing while a call timed
-    // out) is gone after down -v, so print its log while the container lives.
-    if (exitCode !== 0) {
-      console.error("--- Kuma server log (tests failed) ---");
+  // A signal during the build fires its handler at this first await; bail
+  // before compose up so the handler's exit cannot orphan the up child.
+  if (signalExit === null) {
+    if (
+      (await compose(["up", "-d", "--wait", "--wait-timeout", "120"], COMPOSE_UP_TIMEOUT_MS)) !== 0
+    ) {
+      console.error("docker compose up failed");
+      console.error("--- Kuma server log (compose up failed) ---");
       await compose(["logs", "--no-color", "--timestamps"], COMPOSE_DOWN_TIMEOUT_MS);
+    } else {
+      const version = await setupKuma();
+      console.log(`Kuma ${version} ready at ${BASE_URL}`);
+      // A CI job that names 2.5.11 must not go green on 1.23 if the image
+      // variable stops reaching compose.
+      if (IMAGE_MAJOR !== undefined && version.split(".")[0] !== IMAGE_MAJOR) {
+        throw new Error(`UPTIME_KUMA_IT_IMAGE names ${IMAGE_MAJOR}.x but Kuma reports ${version}`);
+      }
+      exitCode = await runTests(version);
+      // The server's side of a failure (what it was doing while a call timed
+      // out) is gone after down -v, so print its log while the container lives.
+      if (exitCode !== 0) {
+        console.error("--- Kuma server log (tests failed) ---");
+        await compose(["logs", "--no-color", "--timestamps"], COMPOSE_DOWN_TIMEOUT_MS);
+      }
     }
   }
 } catch (e) {
