@@ -72,9 +72,11 @@ async function runBinary(
   }
   const timeoutEnv = process.env.UPTIME_KUMA_IT_BIN_TIMEOUT_MS;
   const timeoutMs = timeoutEnv === undefined ? BIN_TIMEOUT_MS : Number(timeoutEnv);
-  if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) {
+  // setTimeout overflows above 2^31-1 and fires after ~1ms, so the bound is
+  // the timer's own range, not just "positive".
+  if (!Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2_147_483_647) {
     throw new Error(
-      `UPTIME_KUMA_IT_BIN_TIMEOUT_MS must be a positive integer, got "${timeoutEnv}"`,
+      `UPTIME_KUMA_IT_BIN_TIMEOUT_MS must be an integer between 1 and 2147483647, got "${timeoutEnv}"`,
     );
   }
   const proc = Bun.spawn([bin, ...args], {

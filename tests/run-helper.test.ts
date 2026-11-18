@@ -147,18 +147,20 @@ describe("run() with UPTIME_KUMA_IT_BIN", () => {
     expect(r.stdout.length).toBeGreaterThan(65536);
   });
 
-  test("rejects a non-numeric UPTIME_KUMA_IT_BIN_TIMEOUT_MS", async () => {
+  test("rejects an invalid UPTIME_KUMA_IT_BIN_TIMEOUT_MS", async () => {
     const bin = fakeCli(`echo hi`);
-    await expect(
-      withEnv(
-        {
-          UPTIME_KUMA_IT_BIN: bin,
-          UPTIME_KUMA_IT_URL: IT_URL,
-          UPTIME_KUMA_IT_BIN_TIMEOUT_MS: "abc",
-        },
-        () => run(sb, ["tags", "list"]),
-      ),
-    ).rejects.toThrow('UPTIME_KUMA_IT_BIN_TIMEOUT_MS must be a positive integer, got "abc"');
+    for (const bad of ["abc", "9999999999"]) {
+      await expect(
+        withEnv(
+          {
+            UPTIME_KUMA_IT_BIN: bin,
+            UPTIME_KUMA_IT_URL: IT_URL,
+            UPTIME_KUMA_IT_BIN_TIMEOUT_MS: bad,
+          },
+          () => run(sb, ["tags", "list"]),
+        ),
+      ).rejects.toThrow("must be an integer between 1 and 2147483647");
+    }
   });
 
   test("stays in-process when UPTIME_KUMA_IT_URL is not set", async () => {

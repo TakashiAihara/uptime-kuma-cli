@@ -214,6 +214,20 @@ if (!["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"].includes(HOST_TA
   process.exit(1);
 }
 const buildDir = mkdtempSync(join(tmpdir(), "uptime-kuma-cli-it-build-"));
+// Handlers go up as soon as there is something to clean: a signal during the
+// build would otherwise kill the parent outright and leak the scratch dir.
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.on(signal, () => {
+    const code = signal === "SIGINT" ? 130 : 143;
+    signalExit ??= code;
+    console.error(`\nreceived ${signal}, tearing down`);
+    testProc?.kill();
+    void teardown().finally(() => {
+      rmSync(buildDir, { recursive: true, force: true });
+      process.exit(code);
+    });
+  });
+}
 for (const name of ["src", "package.json", "node_modules"]) {
   symlinkSync(join(REPO_ROOT, name), join(buildDir, name));
 }
@@ -228,21 +242,6 @@ if (build.exitCode !== 0) {
   process.exit(build.exitCode ?? 1);
 }
 const BIN = join(buildDir, "dist", `uptime-kuma-cli-${HOST_TARGET}`);
-
-// Registered only after buildDir exists: the handler removes it, and a signal
-// during the synchronous build above cannot reach a handler anyway.
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.on(signal, () => {
-    const code = signal === "SIGINT" ? 130 : 143;
-    signalExit ??= code;
-    console.error(`\nreceived ${signal}, tearing down`);
-    testProc?.kill();
-    void teardown().finally(() => {
-      rmSync(buildDir, { recursive: true, force: true });
-      process.exit(code);
-    });
-  });
-}
 
 let exitCode = 1;
 try {
