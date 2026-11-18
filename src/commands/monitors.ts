@@ -196,7 +196,8 @@ function redactSecrets(monitor: Record<string, unknown>): Record<string, unknown
   const out: Record<string, unknown> = { ...monitor, url: redactUrl(monitor.url) };
   for (const key of SECRET_KEYS) {
     const value = out[key];
-    if (typeof value === "string" && value !== "") out[key] = "***";
+    // a --config-file value may be any JSON type, so redact by presence, not type
+    if (value !== undefined && value !== null && value !== "") out[key] = "***";
   }
   const sasl = out.kafkaProducerSaslOptions;
   if (sasl !== null && typeof sasl === "object" && !Array.isArray(sasl)) {
@@ -412,7 +413,8 @@ function checkDockerHost(s: KumaSession, dockerHost: unknown): void {
 
 // A hatch value for a key that has a typed flag goes through the flag's
 // parser; flags take strings, so a string here parses the same way while a
-// number is stringified first. The key names the error.
+// number is written out in plain decimal first (String() would give "1e-7",
+// which the decimal-literal check refuses). The key names the error.
 function hatchNumber(
   value: unknown,
   key: string,
@@ -421,7 +423,11 @@ function hatchNumber(
   if (typeof value !== "number" && typeof value !== "string") {
     fail(2, `${key} must be a number`);
   }
-  return parse(String(value), key);
+  const text =
+    typeof value === "number"
+      ? value.toLocaleString("en-US", { useGrouping: false, maximumFractionDigits: 100 })
+      : value;
+  return parse(text, key);
 }
 
 // timeout may be 0 on 2.x (it becomes interval * 0.8 seconds there); 1.23

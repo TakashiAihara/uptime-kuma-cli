@@ -3564,6 +3564,16 @@ describe("monitors edit", () => {
     expect(kuma.state.monitors.find((m) => m.id === 7)!.name).toBe("Taba web");
   });
 
+  test("the post-edit fallback output redacts a secret of any JSON type", async () => {
+    kuma.state.fail.getMonitor = [null, "second read failed"];
+    const f = join(sb.dir, "edit-secret.json");
+    writeFileSync(f, JSON.stringify({ basic_auth_pass: 123456 }));
+    const r = await run(sb, ["monitors", "edit", "7", "--config-file", f], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json().basic_auth_pass).toBe("***");
+    expect(r.stdout).not.toContain("123456");
+  });
+
   test.each([[{ ok: true }], [{ ok: true, monitor: 42 }]])(
     "a malformed post-edit getMonitor response still exits 70: %p",
     async (shape) => {
@@ -4696,6 +4706,15 @@ describe("monitors edit", () => {
     const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
     expect(sent.timeout).toBe(48);
     expect(sent.retryInterval).toBe(60);
+  });
+
+  test("edit --config-file accepts a number JSON writes in exponent form", async () => {
+    const f = join(sb.dir, "edit-exp.json");
+    writeFileSync(f, JSON.stringify({ timeout: 1e-7 }));
+    const r = await run(sb, ["monitors", "edit", "7", "--config-file", f], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.timeout).toBe(1e-7);
   });
 
   test("edit --config-file interval re-derives the timing", async () => {
