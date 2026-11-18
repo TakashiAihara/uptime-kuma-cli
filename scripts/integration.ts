@@ -72,8 +72,9 @@ async function compose(args: string[], timeoutMs: number): Promise<number> {
   try {
     return await Promise.race([
       proc.exited,
-      sleep(timeoutMs).then(() => {
+      sleep(timeoutMs).then(async () => {
         proc.kill();
+        await awaitChildren([proc]);
         return -1;
       }),
     ]);
@@ -182,8 +183,9 @@ async function runTests(kumaVersion: string): Promise<number> {
   testProc = proc;
   const code = await Promise.race([
     proc.exited,
-    sleep(TEST_LIMIT_MS).then(() => {
+    sleep(TEST_LIMIT_MS).then(async () => {
       proc.kill();
+      await awaitChildren([proc]);
       return -1;
     }),
   ]);
@@ -211,6 +213,9 @@ function teardown(): Promise<boolean> {
         console.error(`docker compose down -v failed: ${e instanceof Error ? e.message : e}`);
       }
     }
+    console.error(
+      `could not remove the compose project; delete it with: docker compose -f ${COMPOSE_FILE} -p ${PROJECT} down -v`,
+    );
     return false;
   })();
   return teardownPromise;
@@ -218,26 +223,32 @@ function teardown(): Promise<boolean> {
 
 let signalExit: number | null = null;
 
+// Waits for children a signal or a timeout killed, escalating to SIGKILL
+// after the grace period so one that ignores SIGTERM cannot outlive the
+// teardown and keep creating containers next to the down -v.
+async function awaitChildren(children: Child[]): Promise<void> {
+  if (children.length === 0) return;
+  await Promise.race([
+    Promise.all(children.map((c) => c.exited)),
+    sleep(KILL_GRACE_MS).then(() =>
+      Promise.all(
+        children.map((c) => {
+          c.kill("SIGKILL");
+          return c.exited;
+        }),
+      ),
+    ),
+  ]);
+}
+
 // Waits for the children a signal killed, then runs the shared teardown and
 // exits. The main flow reaches the same teardown through its finally; the
-// first process.exit wins, and both report the signal's code.
+// first process.exit wins, and both report the first signal's code.
 async function exitAfterTeardown(code: number, children: Child[]): Promise<void> {
-  if (children.length > 0) {
-    await Promise.race([
-      Promise.all(children.map((c) => c.exited)),
-      sleep(KILL_GRACE_MS).then(() =>
-        Promise.all(
-          children.map((c) => {
-            c.kill("SIGKILL");
-            return c.exited;
-          }),
-        ),
-      ),
-    ]);
-  }
+  await awaitChildren(children);
   await teardown();
   rmSync(buildDir, { recursive: true, force: true });
-  process.exit(code);
+  process.exit(signalExit ?? code);
 }
 
 // The suite runs the compiled binary, so the host target is built before
@@ -294,13 +305,8 @@ try {
   // flag is re-checked after every await: a signal kills the in-flight
   // compose child, and nothing may start the next phase behind the teardown.
   if (signalExit === null) {
-    // The image healthcheck's 180 s start period means a Kuma that runs but
-    // never serves can only sit at `starting`: --wait-timeout is the only
-    // bound on that failure. 90 s leaves ~6x the ~10-15 s a healthy Kuma
-    // takes on Docker >= 25 (probes every ~5 s during the start period) and
-    // stays above Docker < 25's first ~60 s probe.
     const upCode = await compose(
-      ["up", "-d", "--wait", "--wait-timeout", "90"],
+      ["up", "-d", "--wait", "--wait-timeout", "120"],
       COMPOSE_UP_TIMEOUT_MS,
     );
     if (signalExit === null) {

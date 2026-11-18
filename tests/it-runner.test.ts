@@ -24,16 +24,21 @@ case "$1" in
     [ -f "$FAKE_DOWN_COUNT" ] && n=$(cat "$FAKE_DOWN_COUNT")
     n=$((n + 1))
     echo "$n" > "$FAKE_DOWN_COUNT"
-    if [ -n "$FAKE_DOWN_FAIL_AT" ] && [ "$n" = "$FAKE_DOWN_FAIL_AT" ]; then
-      exit 1
-    fi
+    fail=0
+    [ -n "$FAKE_DOWN_FAIL_ALWAYS" ] && fail=1
+    if [ -n "$FAKE_DOWN_FAIL_AT" ] && [ "$n" = "$FAKE_DOWN_FAIL_AT" ]; then fail=1; fi
+    [ "$fail" = 1 ] && exit 1
     if [ -n "$FAKE_DOWN_SLEEP_AT" ] && [ "$n" = "$FAKE_DOWN_SLEEP_AT" ]; then
       exec sleep "$FAKE_DOWN_SLEEP"
     fi
     exit 0
     ;;
   up)
-    exec sleep "\${FAKE_UP_SLEEP:-0}"
+    sleep "\${FAKE_UP_SLEEP:-0}" &
+    pid=$!
+    trap 'echo "up termed" >> "$FAKE_LOG"; kill "$pid" 2>/dev/null; exit 0' TERM
+    wait "$pid"
+    exit 0
     ;;
   *)
     exit 0
@@ -67,14 +72,18 @@ const FAKE_TEST_CHILD = `import { appendFileSync } from "node:fs";
 const log = process.env.FAKE_LOG;
 if (log === undefined) throw new Error("FAKE_LOG unset");
 if (process.env.FAKE_TEST_HANG === "1") {
-  const term = () => {
-    appendFileSync(log, "bun-test-child termed\\n");
-    process.exit(0);
-  };
-  process.on("SIGTERM", term);
-  process.on("SIGINT", term);
+  if (process.env.FAKE_TEST_IGNORE_TERM === "1") {
+    process.on("SIGTERM", () => {});
+  } else {
+    const term = () => {
+      appendFileSync(log, "bun-test-child termed\\n");
+      process.exit(0);
+    };
+    process.on("SIGTERM", term);
+    process.on("SIGINT", term);
+  }
   appendFileSync(log, "bun-test-child started\\n");
-  await new Promise(() => {});
+  await new Promise((r) => setTimeout(r, 120_000));
 }
 appendFileSync(log, "bun-test-child ran\\n");
 process.exit(Number(process.env.FAKE_TEST_EXIT ?? "0"));
@@ -82,17 +91,27 @@ process.exit(Number(process.env.FAKE_TEST_EXIT ?? "0"));
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function startSetupKuma(): Promise<{ port: number; close: () => Promise<void> }> {
+async function startSetupKuma(): Promise<{
+  port: number;
+  connected: Promise<void>;
+  close: () => Promise<void>;
+}> {
   const http = createServer();
   const sockets = new Set<Socket>();
   http.on("connection", (s) => {
     sockets.add(s);
     s.on("close", () => sockets.delete(s));
   });
+  let markConnected!: () => void;
+  const connected = new Promise<void>((r) => {
+    markConnected = r;
+  });
+  const setupDelay = Number(process.env.FAKE_SETUP_DELAY_MS ?? "0");
   const io = new Server(http);
   io.on("connection", (socket) => {
+    markConnected();
     socket.emit("info", {});
-    socket.on("needSetup", (ack: (v: boolean) => void) => ack(true));
+    socket.on("needSetup", (ack: (v: boolean) => void) => setTimeout(() => ack(true), setupDelay));
     socket.on("setup", (_u: unknown, _p: unknown, ack: (v: unknown) => void) => ack({ ok: true }));
     socket.on("login", (_c: unknown, ack: (v: unknown) => void) => {
       ack({ ok: true });
@@ -103,6 +122,7 @@ async function startSetupKuma(): Promise<{ port: number; close: () => Promise<vo
   const { port } = http.address() as AddressInfo;
   return {
     port,
+    connected,
     close: () =>
       new Promise<void>((r) => {
         io.close();
@@ -136,6 +156,7 @@ function startRunner(sb: Sandbox, port: number, env: Record<string, string>): Ru
       FAKE_DOWN_COUNT: join(sb.dir, "down.count"),
       REAL_BUN: process.execPath,
       FAKE_TEST_CHILD: join(sb.dir, "fake-test-child.ts"),
+      TMPDIR: sb.dir,
       ...env,
     },
     stdout: "pipe",
@@ -183,7 +204,7 @@ function countLines(text: string, needle: string): number {
 
 describe("scripts/integration.ts signal handling", () => {
   let sb: Sandbox;
-  let kuma: { port: number; close: () => Promise<void> };
+  let kuma: { port: number; connected: Promise<void>; close: () => Promise<void> };
   let runner: Runner | undefined;
 
   beforeEach(async () => {
@@ -202,23 +223,24 @@ describe("scripts/integration.ts signal handling", () => {
   });
 
   test("SIGTERM during compose up kills the up child before the down -v", async () => {
-    runner = startRunner(sb, kuma.port, { FAKE_UP_SLEEP: "300" });
+    runner = startRunner(sb, kuma.port, { FAKE_UP_SLEEP: "60" });
     await waitForLog(runner.log, "up -d --wait");
     runner.proc.kill("SIGTERM");
     expect(await runner.exited).toBe(143);
     const log = readFileSync(runner.log, "utf8");
     expect(countLines(log, "up -d --wait")).toBe(1);
     expect(countLines(log, "down -v")).toBe(2);
-    expect(log.indexOf("down -v", log.indexOf("up -d --wait"))).toBeGreaterThan(
-      log.indexOf("up -d --wait"),
-    );
+    const termed = log.indexOf("up termed");
+    const lastDown = log.lastIndexOf("down -v");
+    expect(termed).toBeGreaterThan(-1);
+    expect(lastDown).toBeGreaterThan(termed);
     expect(log).not.toContain("bun-test-child");
   }, 30_000);
 
   test("SIGINT during the pre-up down -v skips up and still tears down", async () => {
     runner = startRunner(sb, kuma.port, {
       FAKE_DOWN_SLEEP_AT: "1",
-      FAKE_DOWN_SLEEP: "300",
+      FAKE_DOWN_SLEEP: "60",
     });
     await waitForLog(runner.log, "down -v");
     runner.proc.kill("SIGINT");
@@ -264,7 +286,7 @@ describe("scripts/integration.ts signal handling", () => {
   test("SIGTERM during the final down -v retries teardown and exits 143", async () => {
     runner = startRunner(sb, kuma.port, {
       FAKE_DOWN_SLEEP_AT: "2",
-      FAKE_DOWN_SLEEP: "300",
+      FAKE_DOWN_SLEEP: "60",
     });
     await waitForCount(runner.log, "down -v", 2);
     runner.proc.kill("SIGTERM");
@@ -272,5 +294,55 @@ describe("scripts/integration.ts signal handling", () => {
     const log = readFileSync(runner.log, "utf8");
     expect(countLines(log, "down -v")).toBe(3);
     expect(log.indexOf("bun-test-child ran")).toBeLessThan(log.lastIndexOf("down -v"));
+  }, 30_000);
+
+  test("SIGINT escalates to SIGKILL when the test child ignores SIGTERM", async () => {
+    const start = Date.now();
+    runner = startRunner(sb, kuma.port, {
+      FAKE_TEST_HANG: "1",
+      FAKE_TEST_IGNORE_TERM: "1",
+    });
+    await waitForLog(runner.log, "bun-test-child started");
+    runner.proc.kill("SIGINT");
+    expect(await runner.exited).toBe(130);
+    // The 5 s grace period must elapse before SIGKILL ends the child.
+    expect(Date.now() - start).toBeGreaterThanOrEqual(4_000);
+    const log = readFileSync(runner.log, "utf8");
+    expect(log).not.toContain("bun-test-child termed");
+    expect(countLines(log, "down -v")).toBe(2);
+  }, 30_000);
+
+  test("SIGTERM during setupKuma skips the test run and still tears down", async () => {
+    runner = startRunner(sb, kuma.port, { FAKE_SETUP_DELAY_MS: "2000" });
+    await kuma.connected;
+    runner.proc.kill("SIGTERM");
+    expect(await runner.exited).toBe(143);
+    const log = readFileSync(runner.log, "utf8");
+    expect(log).toContain("up -d --wait");
+    expect(log).not.toContain("bun-test-child");
+    expect(countLines(log, "down -v")).toBe(2);
+    expect(await runner.output()).not.toContain("Kuma 1.23.17 ready");
+  }, 30_000);
+
+  test("UPTIME_KUMA_IT_KEEP=1 leaves the project up even on SIGINT", async () => {
+    runner = startRunner(sb, kuma.port, { UPTIME_KUMA_IT_KEEP: "1", FAKE_TEST_HANG: "1" });
+    await waitForLog(runner.log, "bun-test-child started");
+    runner.proc.kill("SIGINT");
+    expect(await runner.exited).toBe(130);
+    const log = readFileSync(runner.log, "utf8");
+    // Only the pre-up cleanup ran; the final teardown is skipped by KEEP.
+    expect(countLines(log, "down -v")).toBe(1);
+    expect(log).toContain("bun-test-child termed");
+    expect(await runner.output()).toContain("UPTIME_KUMA_IT_KEEP=1");
+  }, 30_000);
+
+  test("a down -v that keeps failing exits 1 after the retries", async () => {
+    runner = startRunner(sb, kuma.port, { FAKE_DOWN_FAIL_ALWAYS: "1" });
+    expect(await runner.exited).toBe(1);
+    const log = readFileSync(runner.log, "utf8");
+    // 1 pre-up attempt + 3 teardown attempts, all refused by the fake.
+    expect(countLines(log, "down -v")).toBe(4);
+    expect(log).toContain("bun-test-child ran");
+    expect(await runner.output()).toContain("could not remove the compose project");
   }, 30_000);
 });
