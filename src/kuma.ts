@@ -533,7 +533,10 @@ export async function connect(
   let infoSeen = false;
   socket.on("info", (data: unknown) => {
     infoSeen = true;
-    const info = data as { version?: unknown; dbType?: unknown; primaryBaseURL?: unknown } | null | undefined;
+    const info = data as
+      | { version?: unknown; dbType?: unknown; primaryBaseURL?: unknown }
+      | null
+      | undefined;
     if (typeof info?.version === "string") serverVersion = info.version;
     if (typeof info?.dbType === "string") serverDbType = info.dbType;
     if (typeof info?.primaryBaseURL === "string") primaryBaseURL = info.primaryBaseURL;
