@@ -5492,6 +5492,28 @@ describe("monitor names", () => {
     expect(addCalls()).toHaveLength(0);
   });
 
+  test("add with an existing name skips before resolving a bad --parent name", async () => {
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "push", "--name", "Taba", "--parent", "No Group"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(3);
+    expect(r.json()).toEqual({ id: 7, name: "Taba", skipped: true });
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test("add with an existing name skips before resolving a bad --notification-id name", async () => {
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "push", "--name", "Taba", "--notification-id", "No Such"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(3);
+    expect(r.json()).toEqual({ id: 7, name: "Taba", skipped: true });
+    expect(addCalls()).toHaveLength(0);
+  });
+
   test("add --notifications-from resolves a monitor name", async () => {
     const r = await run(
       sb,
@@ -5581,6 +5603,32 @@ describe("monitor names", () => {
     expect(r.code).toBe(2);
     expect(r.stderr).toContain("parent cannot be the monitor itself");
     expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit --parent mixing a numeric id and a name still catches self-parenting", async () => {
+    const r = await run(sb, ["monitors", "edit", "7", "--parent", "Taba"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("parent cannot be the monitor itself");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("a positive integer always wins over a monitor named like it", async () => {
+    kuma.state.monitors.push(http(5, "five"), http(50, "5"));
+    const r = await run(sb, ["monitors", "get", "5"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json().id).toBe(5);
+    expect(r.json().name).toBe("five");
+  });
+
+  test("add --parent resolving to a non-group monitor exits 1", async () => {
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "push", "--name", "child", "--paused", "--parent", "Taba"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("group");
+    expect(addCalls()).toHaveLength(0);
   });
 
   // Kuma proxies carry no name (proxyList rows have only host/port/...), so

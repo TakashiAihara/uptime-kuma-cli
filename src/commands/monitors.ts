@@ -1135,8 +1135,6 @@ export function registerMonitors(program: Command): void {
       }
 
       const s = await connect();
-      const parentId =
-        normalizedParent === undefined ? undefined : resolveParent(s, normalizedParent);
       const twoXFieldCandidates = [...Object.keys(sets), ...Object.keys(fileConfig)];
       // add ignores the flag on other types, so only json-query counts here
       if (opts.jsonPathOperator !== undefined && type === "json-query") {
@@ -1160,6 +1158,10 @@ export function registerMonitors(program: Command): void {
         printJson({ id: existing.id, name: existing.name, skipped: true });
         fail(3, "");
       }
+      // Name resolution waits for the skip check like the other post-connect
+      // resolutions below: a same-name add exits 3 whatever --parent says.
+      const parentId =
+        normalizedParent === undefined ? undefined : resolveParent(s, normalizedParent);
       const tagNames = new Map<number, string>();
       if (tagSpecs.length > 0) {
         const available = await s.tags();

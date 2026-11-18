@@ -2302,6 +2302,19 @@ describe("maintenance", () => {
       expect(kuma.calls).toHaveLength(0);
     });
 
+    test("an invalid target id exits 2 before connecting", async () => {
+      for (const args of [
+        ["--add", "abc"],
+        ["--remove", "abc"],
+        ["--set-ids", "4,x"],
+      ]) {
+        const r = await run(sb, ["maintenance", "status-pages", "1", ...args], creds(kuma.url));
+        expect(r.code).toBe(2);
+        expect(r.stderr).toContain("positive integer");
+      }
+      expect(kuma.calls).toHaveLength(0);
+    });
+
     test("addMaintenanceStatusPage ok:false exits 1 with Kuma's message", async () => {
       kuma.state.fail.addMaintenanceStatusPage = "attach failed";
       const r = await run(

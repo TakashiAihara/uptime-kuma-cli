@@ -446,6 +446,16 @@ function registerAttach(maintenance: Command, kind: AttachKind): void {
       const setIdsRaw = opts.setIds as string | undefined;
       const addRaw = (opts.add as string[] | undefined) ?? [];
       const removeRaw = (opts.remove as string[] | undefined) ?? [];
+      // Status-page targets are ids only, so they keep the pre-connect
+      // validation they always had; monitor targets may be names, which
+      // resolve against monitorList after connect.
+      if (!named) {
+        for (const v of addRaw) parseId(v, "--add");
+        for (const v of removeRaw) parseId(v, "--remove");
+        if (setIdsRaw !== undefined) {
+          for (const v of idListParts(setIdsRaw)) parseId(v, "--set-ids");
+        }
+      }
       if (setIdsRaw !== undefined && (addRaw.length > 0 || removeRaw.length > 0)) {
         fail(2, "--set-ids cannot be combined with --add or --remove");
       }
