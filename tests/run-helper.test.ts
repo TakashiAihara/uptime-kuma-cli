@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { chmodSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { startFakeKuma } from "./helpers/fake-kuma";
@@ -6,19 +6,12 @@ import { creds, run, sandbox, type Sandbox } from "./helpers/run";
 
 // UPTIME_KUMA_IT_BIN only takes effect while UPTIME_KUMA_IT_URL marks the
 // integration environment, so the helper sets both and restores both.
-async function withItEnv<T>(
-  bin: string | undefined,
-  itUrl: string | undefined,
+async function withEnv<T>(
+  vars: Record<string, string | undefined>,
   fn: () => Promise<T>,
 ): Promise<T> {
-  const saved = {
-    UPTIME_KUMA_IT_BIN: process.env.UPTIME_KUMA_IT_BIN,
-    UPTIME_KUMA_IT_URL: process.env.UPTIME_KUMA_IT_URL,
-  };
-  for (const [key, value] of [
-    ["UPTIME_KUMA_IT_BIN", bin],
-    ["UPTIME_KUMA_IT_URL", itUrl],
-  ] as const) {
+  const saved = Object.fromEntries(Object.keys(vars).map((key) => [key, process.env[key]]));
+  for (const [key, value] of Object.entries(vars)) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
   }
@@ -30,6 +23,14 @@ async function withItEnv<T>(
       else process.env[key] = value;
     }
   }
+}
+
+async function withItEnv<T>(
+  bin: string | undefined,
+  itUrl: string | undefined,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return withEnv({ UPTIME_KUMA_IT_BIN: bin, UPTIME_KUMA_IT_URL: itUrl }, fn);
 }
 
 // A non-empty URL is all the gate checks; the fake binary never dials it.
@@ -97,6 +98,40 @@ describe("run() with UPTIME_KUMA_IT_BIN", () => {
     });
   });
 
+  test("kills a binary that outlives the watchdog", async () => {
+    const bin = fakeCli(`exec sleep 30`);
+    const started = Date.now();
+    await expect(
+      withEnv(
+        {
+          UPTIME_KUMA_IT_BIN: bin,
+          UPTIME_KUMA_IT_URL: IT_URL,
+          UPTIME_KUMA_IT_BIN_TIMEOUT_MS: "500",
+        },
+        () => run(sb, ["tags", "list"]),
+      ),
+    ).rejects.toThrow("did not finish within 500ms");
+    expect(Date.now() - started).toBeLessThan(10_000);
+  });
+
+  test("kills a binary whose descendant keeps the pipes open", async () => {
+    // The backgrounded sleep inherits the pipes and outlives the killed
+    // shell; without cancelling the reads the run would wait for it.
+    const bin = fakeCli(`sleep 30 & wait`);
+    const started = Date.now();
+    await expect(
+      withEnv(
+        {
+          UPTIME_KUMA_IT_BIN: bin,
+          UPTIME_KUMA_IT_URL: IT_URL,
+          UPTIME_KUMA_IT_BIN_TIMEOUT_MS: "500",
+        },
+        () => run(sb, ["tags", "list"]),
+      ),
+    ).rejects.toThrow("did not finish within 500ms");
+    expect(Date.now() - started).toBeLessThan(10_000);
+  });
+
   test("stays in-process when UPTIME_KUMA_IT_URL is not set", async () => {
     const kuma = await startFakeKuma({
       tags: [{ id: 1, name: "staging", color: "#00ff00" }],
@@ -107,6 +142,25 @@ describe("run() with UPTIME_KUMA_IT_BIN", () => {
       expect(r.code).toBe(0);
       expect(r.json()).toEqual([{ id: 1, name: "staging", color: "#00ff00" }]);
     } finally {
+      await kuma.close();
+    }
+  });
+
+  test("warns once when UPTIME_KUMA_IT_URL is set without UPTIME_KUMA_IT_BIN", async () => {
+    sb = sandbox();
+    const kuma = await startFakeKuma({ tags: [] });
+    const spy = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await withItEnv(undefined, IT_URL, async () => {
+        for (let i = 0; i < 2; i++) {
+          const r = await run(sb, ["tags", "list"], creds(kuma.url));
+          expect(r.code).toBe(0);
+        }
+      });
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(String(spy.mock.calls[0]?.[0])).toContain("UPTIME_KUMA_IT_BIN");
+    } finally {
+      spy.mockRestore();
       await kuma.close();
     }
   });

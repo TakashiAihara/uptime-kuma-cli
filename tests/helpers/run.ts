@@ -43,11 +43,12 @@ export function writeConfig(sb: Sandbox, toml: string) {
 // flip unit tests onto the spawn path. The spawn path patches nothing but
 // shares the same guard so callers see one behavior.
 let runActive = false;
+let noBinWarned = false;
 
 // Past the largest per-test budget (5 minutes), so the watchdog only fires on
 // a call whose test already failed — and it keeps a hung binary from holding
 // `bun test` open past the test timeouts that would otherwise be the only
-// bound.
+// bound. Tests shorten it through UPTIME_KUMA_IT_BIN_TIMEOUT_MS.
 const BIN_TIMEOUT_MS = 360_000;
 
 async function runBinary(
@@ -89,9 +90,11 @@ async function runBinary(
     const [stdout, stderr] = await Promise.all([readAll(stdoutReader), readAll(stderrReader)]);
     return { code, stdout, stderr };
   })();
+  const timeoutEnv = process.env.UPTIME_KUMA_IT_BIN_TIMEOUT_MS;
+  const timeoutMs = timeoutEnv === undefined ? BIN_TIMEOUT_MS : Number(timeoutEnv);
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeoutP = new Promise<"timeout">((r) => {
-    timer = setTimeout(() => r("timeout"), BIN_TIMEOUT_MS);
+    timer = setTimeout(() => r("timeout"), timeoutMs);
   });
   const result = await Promise.race([done, timeoutP]);
   clearTimeout(timer);
@@ -104,7 +107,7 @@ async function runBinary(
     // cancelling the reads keeps them from holding `bun test` open, and
     // proc.exited is the only wait left that SIGKILL cannot stall.
     await Promise.allSettled([stdoutReader.cancel(), stderrReader.cancel(), proc.exited]);
-    throw new Error(`${bin} ${args.join(" ")} did not finish within ${BIN_TIMEOUT_MS}ms`);
+    throw new Error(`${bin} ${args.join(" ")} did not finish within ${timeoutMs}ms`);
   }
   return { ...result, json: () => JSON.parse(result.stdout) };
 }
@@ -132,7 +135,16 @@ export async function run(
   // UPTIME_KUMA_IT_URL marks the integration environment; UPTIME_KUMA_IT_BIN
   // only takes effect inside it, so an exported variable cannot reroute unit
   // tests onto the spawn path.
-  const bin = process.env.UPTIME_KUMA_IT_URL ? process.env.UPTIME_KUMA_IT_BIN : undefined;
+  const itUrl = process.env.UPTIME_KUMA_IT_URL;
+  const bin = itUrl ? process.env.UPTIME_KUMA_IT_BIN : undefined;
+  // A manual IT run that sets the URL but forgets the binary would silently
+  // keep testing runCli instead of the compiled artifact; say so once.
+  if (itUrl && process.env.UPTIME_KUMA_IT_BIN === undefined && !noBinWarned) {
+    noBinWarned = true;
+    console.warn(
+      "UPTIME_KUMA_IT_URL is set but UPTIME_KUMA_IT_BIN is not; the suite runs in-process",
+    );
+  }
   if (bin !== undefined) {
     try {
       return await runBinary(bin, args, base);
