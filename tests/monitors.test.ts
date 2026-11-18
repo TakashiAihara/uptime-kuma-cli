@@ -712,6 +712,19 @@ describe("monitors add", () => {
     expect(r.stdout).not.toContain("s3cret");
   });
 
+  test("pushUrl keeps a dot-segment token when the base URL is masked", async () => {
+    kuma.state.info!.primaryBaseURL = "https://user:s3cret@status.example.org/kuma/";
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "push", "--name", "pb", "--push-token", ".."],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect(r.json().pushUrl).toBe(
+      "https://user:***@status.example.org/kuma/api/push/..?status=up&msg=OK&ping=",
+    );
+  });
+
   test("pushUrl masks a password in the CLI url when no Primary Base URL is set", async () => {
     const withAuth = kuma.url.replace("://", "://user:s3cret@");
     const r = await run(sb, ["monitors", "add", "--type", "push", "--name", "pb"], creds(withAuth));
