@@ -203,7 +203,7 @@ function redactSecrets(monitor: Record<string, unknown>): Record<string, unknown
   if (sasl !== null && typeof sasl === "object" && !Array.isArray(sasl)) {
     const copy: Record<string, unknown> = { ...(sasl as Record<string, unknown>) };
     for (const [k, v] of Object.entries(copy)) {
-      if (!SASL_VISIBLE_KEYS.has(k) && typeof v === "string" && v !== "") copy[k] = "***";
+      if (!SASL_VISIBLE_KEYS.has(k) && v !== undefined && v !== null && v !== "") copy[k] = "***";
     }
     out.kafkaProducerSaslOptions = copy;
   }

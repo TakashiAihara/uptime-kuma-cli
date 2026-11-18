@@ -3574,16 +3574,33 @@ describe("monitors edit", () => {
     expect(r.stdout).not.toContain("123456");
   });
 
-  test.each([[{ ok: true }], [{ ok: true, monitor: 42 }]])(
-    "a malformed post-edit getMonitor response still exits 70: %p",
-    async (shape) => {
-      kuma.state.getMonitorResult = [null, shape];
-      const r = await run(sb, ["monitors", "edit", "7", "--set", "name=Taba web"], creds(kuma.url));
-      expect(r.code).toBe(70);
-      expect(r.stderr).toContain("unexpected getMonitor response");
-      expect(kuma.calls.filter((c) => c.event === "editMonitor")).toHaveLength(1);
-    },
-  );
+  test("the post-edit fallback output redacts a non-string SASL secret", async () => {
+    kuma.state.fail.getMonitor = [null, "second read failed"];
+    const f = join(sb.dir, "edit-sasl.json");
+    writeFileSync(
+      f,
+      JSON.stringify({
+        kafkaProducerSaslOptions: { mechanism: "aws", awsSecretAccessKey: 987654 },
+      }),
+    );
+    const r = await run(sb, ["monitors", "edit", "7", "--config-file", f], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json().kafkaProducerSaslOptions.awsSecretAccessKey).toBe("***");
+    expect(r.stdout).not.toContain("987654");
+  });
+
+  test.each([
+    [{ ok: true }],
+    [{ ok: true, monitor: 42 }],
+    [{ ok: true, monitor: null }],
+    [{ ok: true, monitor: [] }],
+  ])("a malformed post-edit getMonitor response still exits 70: %p", async (shape) => {
+    kuma.state.getMonitorResult = [null, shape];
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "name=Taba web"], creds(kuma.url));
+    expect(r.code).toBe(70);
+    expect(r.stderr).toContain("unexpected getMonitor response");
+    expect(kuma.calls.filter((c) => c.event === "editMonitor")).toHaveLength(1);
+  });
 
   test("a malformed pre-edit getMonitor response exits 70 before editMonitor", async () => {
     kuma.state.getMonitorResult = { ok: true, monitor: "nope" };
