@@ -4,17 +4,36 @@ import { join } from "node:path";
 import { startFakeKuma } from "./helpers/fake-kuma";
 import { creds, run, sandbox, type Sandbox } from "./helpers/run";
 
-async function withBin<T>(bin: string | undefined, fn: () => Promise<T>): Promise<T> {
-  const prev = process.env.UPTIME_KUMA_IT_BIN;
-  if (bin === undefined) delete process.env.UPTIME_KUMA_IT_BIN;
-  else process.env.UPTIME_KUMA_IT_BIN = bin;
+// UPTIME_KUMA_IT_BIN only takes effect while UPTIME_KUMA_IT_URL marks the
+// integration environment, so the helper sets both and restores both.
+async function withItEnv<T>(
+  bin: string | undefined,
+  itUrl: string | undefined,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const saved = {
+    UPTIME_KUMA_IT_BIN: process.env.UPTIME_KUMA_IT_BIN,
+    UPTIME_KUMA_IT_URL: process.env.UPTIME_KUMA_IT_URL,
+  };
+  for (const [key, value] of [
+    ["UPTIME_KUMA_IT_BIN", bin],
+    ["UPTIME_KUMA_IT_URL", itUrl],
+  ] as const) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
   try {
     return await fn();
   } finally {
-    if (prev === undefined) delete process.env.UPTIME_KUMA_IT_BIN;
-    else process.env.UPTIME_KUMA_IT_BIN = prev;
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
 }
+
+// A non-empty URL is all the gate checks; the fake binary never dials it.
+const IT_URL = "http://127.0.0.1:1";
 
 describe("run()", () => {
   test("rejects a concurrent invocation instead of corrupting shared state", async () => {
@@ -49,7 +68,7 @@ describe("run() with UPTIME_KUMA_IT_BIN", () => {
     const bin = fakeCli(
       `printf '{"args":"%s","home":"%s","timeout":"%s","marker":"%s"}\\n' "$*" "$HOME" "$UPTIME_KUMA_TIMEOUT" "$IT_MARKER"`,
     );
-    const r = await withBin(bin, () =>
+    const r = await withItEnv(bin, IT_URL, () =>
       run(sb, ["tags", "list", "--name", "x"], { IT_MARKER: "m1" }),
     );
     expect(r.code).toBe(0);
@@ -63,7 +82,7 @@ describe("run() with UPTIME_KUMA_IT_BIN", () => {
 
   test("captures stdout, stderr and a nonzero exit code", async () => {
     const bin = fakeCli(`echo out-line; echo err-line >&2; exit 3`);
-    const r = await withBin(bin, () => run(sb, ["tags", "list"]));
+    const r = await withItEnv(bin, IT_URL, () => run(sb, ["tags", "list"]));
     expect(r.code).toBe(3);
     expect(r.stdout).toBe("out-line\n");
     expect(r.stderr).toBe("err-line\n");
@@ -71,21 +90,35 @@ describe("run() with UPTIME_KUMA_IT_BIN", () => {
 
   test("rejects a concurrent invocation like the in-process path", async () => {
     const bin = fakeCli(`sleep 0.2`);
-    await withBin(bin, async () => {
+    await withItEnv(bin, IT_URL, async () => {
       const first = run(sb, ["tags", "list"]);
       await expect(run(sb, ["tags", "list"])).rejects.toThrow("cannot run concurrently");
       expect((await first).code).toBe(0);
     });
   });
 
+  test("stays in-process when UPTIME_KUMA_IT_URL is not set", async () => {
+    const kuma = await startFakeKuma({
+      tags: [{ id: 1, name: "staging", color: "#00ff00" }],
+    });
+    const bin = fakeCli(`echo '{"from":"binary"}'`);
+    try {
+      const r = await withItEnv(bin, undefined, () => run(sb, ["tags", "list"], creds(kuma.url)));
+      expect(r.code).toBe(0);
+      expect(r.json()).toEqual([{ id: 1, name: "staging", color: "#00ff00" }]);
+    } finally {
+      await kuma.close();
+    }
+  });
+
   test("rejects an empty UPTIME_KUMA_IT_BIN", async () => {
     sb = sandbox();
-    await expect(withBin("", () => run(sb, ["tags"]))).rejects.toThrow("set but empty");
+    await expect(withItEnv("", IT_URL, () => run(sb, ["tags"]))).rejects.toThrow("set but empty");
   });
 
   test("rejects a UPTIME_KUMA_IT_BIN that does not exist", async () => {
     sb = sandbox();
-    await expect(withBin(join(sb.dir, "nope"), () => run(sb, ["tags"]))).rejects.toThrow(
+    await expect(withItEnv(join(sb.dir, "nope"), IT_URL, () => run(sb, ["tags"]))).rejects.toThrow(
       "does not exist",
     );
   });
@@ -95,6 +128,8 @@ describe("run() with UPTIME_KUMA_IT_BIN", () => {
     const file = join(sb.dir, "not-exec");
     writeFileSync(file, "#!/bin/sh\nexit 0\n");
     chmodSync(file, 0o644);
-    await expect(withBin(file, () => run(sb, ["tags"]))).rejects.toThrow("not executable");
+    await expect(withItEnv(file, IT_URL, () => run(sb, ["tags"]))).rejects.toThrow(
+      "not executable",
+    );
   });
 });

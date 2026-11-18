@@ -17,6 +17,8 @@
  * name includes the port. UPTIME_KUMA_IT_KEEP=1 skips only the teardown
  * after the run.
  */
+import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { io, type Socket } from "socket.io-client";
 
@@ -204,27 +206,40 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
     signalExit ??= code;
     console.error(`\nreceived ${signal}, tearing down`);
     testProc?.kill();
-    void teardown().finally(() => process.exit(code));
+    void teardown().finally(() => {
+      rmSync(buildDir, { recursive: true, force: true });
+      process.exit(code);
+    });
   });
 }
 
 // The suite runs the compiled binary, so the host target is built before
 // anything else — a compile error should not wait behind a multi-minute image
-// pull. Target names mirror TARGETS in scripts/build.ts; a host outside them
-// (windows, 32-bit linux) has no runnable binary.
+// pull. It builds in a scratch dir rather than dist/: UPTIME_KUMA_IT_PORT
+// exists so parallel runs can share a checkout, and a fixed outfile would let
+// one run rewrite the binary another is executing (or clobber a local
+// RELEASE_TAG build). Target names mirror TARGETS in scripts/build.ts; a host
+// outside them (windows, 32-bit linux) has no runnable binary.
 const HOST_TARGET = `${process.platform}-${process.arch}`;
 if (!["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"].includes(HOST_TARGET)) {
   console.error(`no release target for ${HOST_TARGET}`);
   process.exit(1);
 }
-console.log(`building dist/uptime-kuma-cli-${HOST_TARGET}`);
-const build = Bun.spawnSync(["bun", "scripts/build.ts", HOST_TARGET], {
-  cwd: REPO_ROOT,
+const buildDir = mkdtempSync(join(tmpdir(), "uptime-kuma-cli-it-build-"));
+for (const name of ["src", "package.json", "node_modules"]) {
+  symlinkSync(join(REPO_ROOT, name), join(buildDir, name));
+}
+console.log(`building uptime-kuma-cli-${HOST_TARGET}`);
+const build = Bun.spawnSync(["bun", join(REPO_ROOT, "scripts", "build.ts"), HOST_TARGET], {
+  cwd: buildDir,
   stdout: "inherit",
   stderr: "inherit",
 });
-if (build.exitCode !== 0) process.exit(build.exitCode ?? 1);
-const BIN = join(REPO_ROOT, "dist", `uptime-kuma-cli-${HOST_TARGET}`);
+if (build.exitCode !== 0) {
+  rmSync(buildDir, { recursive: true, force: true });
+  process.exit(build.exitCode ?? 1);
+}
+const BIN = join(buildDir, "dist", `uptime-kuma-cli-${HOST_TARGET}`);
 
 let exitCode = 1;
 try {
@@ -259,6 +274,7 @@ try {
   console.error("--- Kuma server log (setup failed) ---");
   await compose(["logs", "--no-color", "--timestamps"], COMPOSE_DOWN_TIMEOUT_MS);
 } finally {
+  rmSync(buildDir, { recursive: true, force: true });
   if (!(await teardown()) && exitCode === 0) exitCode = 1;
 }
 process.exit(signalExit ?? exitCode);

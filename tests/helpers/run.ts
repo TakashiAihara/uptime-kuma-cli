@@ -38,15 +38,17 @@ export function writeConfig(sb: Sandbox, toml: string) {
 // process-wide, so concurrent run() calls are rejected outright instead of
 // corrupting each other's env and captured output. UPTIME_KUMA_IT_BIN points
 // run() at a compiled binary instead, so the integration suite exercises the
-// artifact users install rather than runCli; the spawn path patches nothing
-// but shares the same guard so callers see one behavior.
+// artifact users install rather than runCli — but only while UPTIME_KUMA_IT_URL
+// marks the integration environment, so a variable left in a dev shell cannot
+// flip unit tests onto the spawn path. The spawn path patches nothing but
+// shares the same guard so callers see one behavior.
 let runActive = false;
 
-// Well past the longest call the suite makes legitimately — per-test budgets
-// top out at 5 minutes, so a call still running then belongs to a failed
-// test — and it keeps a hung binary from holding `bun test` open past the
-// test timeouts that would otherwise be the only bound.
-const BIN_TIMEOUT_MS = 300_000;
+// Past the largest per-test budget (5 minutes), so the watchdog only fires on
+// a call whose test already failed — and it keeps a hung binary from holding
+// `bun test` open past the test timeouts that would otherwise be the only
+// bound.
+const BIN_TIMEOUT_MS = 360_000;
 
 async function runBinary(
   bin: string,
@@ -68,21 +70,43 @@ async function runBinary(
     stdout: "pipe",
     stderr: "pipe",
   });
-  const stdoutP = new Response(proc.stdout).text();
-  const stderrP = new Response(proc.stderr).text();
+  // Read both pipes while the child runs — a full pipe would block it — and
+  // keep the readers so the watchdog can cancel a read that a surviving
+  // descendant holding the pipe would otherwise keep pending forever.
+  const stdoutReader = proc.stdout.getReader();
+  const stderrReader = proc.stderr.getReader();
+  const readAll = async (reader: ReadableStreamDefaultReader<Uint8Array>) => {
+    const decoder = new TextDecoder();
+    let text = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return text + decoder.decode();
+      text += decoder.decode(value, { stream: true });
+    }
+  };
+  const done = (async () => {
+    const code = await proc.exited;
+    const [stdout, stderr] = await Promise.all([readAll(stdoutReader), readAll(stderrReader)]);
+    return { code, stdout, stderr };
+  })();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeoutP = new Promise<"timeout">((r) => {
     timer = setTimeout(() => r("timeout"), BIN_TIMEOUT_MS);
   });
-  const code = await Promise.race([proc.exited, timeoutP]);
+  const result = await Promise.race([done, timeoutP]);
   clearTimeout(timer);
-  if (code === "timeout") {
-    proc.kill();
-    await Promise.allSettled([stdoutP, stderrP, proc.exited]);
-    throw new Error(`${bin} ${args.join(" ")} did not exit within ${BIN_TIMEOUT_MS}ms`);
+  if (result === "timeout") {
+    // SIGKILL, not the default SIGTERM: a binary hung hard enough to need the
+    // watchdog may also ignore SIGTERM, and waiting on proc.exited after a
+    // signal it survives would hang runBinary itself.
+    proc.kill("SIGKILL");
+    // The child is dead but a descendant may still hold the pipes open;
+    // cancelling the reads keeps them from holding `bun test` open, and
+    // proc.exited is the only wait left that SIGKILL cannot stall.
+    await Promise.allSettled([stdoutReader.cancel(), stderrReader.cancel(), proc.exited]);
+    throw new Error(`${bin} ${args.join(" ")} did not finish within ${BIN_TIMEOUT_MS}ms`);
   }
-  const [stdout, stderr] = await Promise.all([stdoutP, stderrP]);
-  return { code, stdout, stderr, json: () => JSON.parse(stdout) };
+  return { ...result, json: () => JSON.parse(result.stdout) };
 }
 
 export async function run(
@@ -105,7 +129,10 @@ export async function run(
     else base[k] = v;
   }
 
-  const bin = process.env.UPTIME_KUMA_IT_BIN;
+  // UPTIME_KUMA_IT_URL marks the integration environment; UPTIME_KUMA_IT_BIN
+  // only takes effect inside it, so an exported variable cannot reroute unit
+  // tests onto the spawn path.
+  const bin = process.env.UPTIME_KUMA_IT_URL ? process.env.UPTIME_KUMA_IT_BIN : undefined;
   if (bin !== undefined) {
     try {
       return await runBinary(bin, args, base);
