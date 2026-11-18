@@ -2,7 +2,7 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { chmodSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { startFakeKuma } from "./helpers/fake-kuma";
-import { creds, run, sandbox, type Sandbox } from "./helpers/run";
+import { creds, resetRunWarnings, run, sandbox, type Sandbox } from "./helpers/run";
 
 // UPTIME_KUMA_IT_BIN only takes effect while UPTIME_KUMA_IT_URL marks the
 // integration environment, so the helper sets both and restores both.
@@ -99,7 +99,8 @@ describe("run() with UPTIME_KUMA_IT_BIN", () => {
   });
 
   test("kills a binary that outlives the watchdog", async () => {
-    const bin = fakeCli(`exec sleep 30`);
+    // trap makes the shell ignore SIGTERM, so only SIGKILL ends the run.
+    const bin = fakeCli(`trap '' TERM; sleep 30`);
     const started = Date.now();
     await expect(
       withEnv(
@@ -132,6 +133,34 @@ describe("run() with UPTIME_KUMA_IT_BIN", () => {
     expect(Date.now() - started).toBeLessThan(10_000);
   });
 
+  test("drains output larger than the pipe buffer while the binary runs", async () => {
+    const bin = fakeCli(`seq 1 200000`);
+    const r = await withEnv(
+      {
+        UPTIME_KUMA_IT_BIN: bin,
+        UPTIME_KUMA_IT_URL: IT_URL,
+        UPTIME_KUMA_IT_BIN_TIMEOUT_MS: "3000",
+      },
+      () => run(sb, ["tags", "list"]),
+    );
+    expect(r.code).toBe(0);
+    expect(r.stdout.length).toBeGreaterThan(65536);
+  });
+
+  test("rejects a non-numeric UPTIME_KUMA_IT_BIN_TIMEOUT_MS", async () => {
+    const bin = fakeCli(`echo hi`);
+    await expect(
+      withEnv(
+        {
+          UPTIME_KUMA_IT_BIN: bin,
+          UPTIME_KUMA_IT_URL: IT_URL,
+          UPTIME_KUMA_IT_BIN_TIMEOUT_MS: "abc",
+        },
+        () => run(sb, ["tags", "list"]),
+      ),
+    ).rejects.toThrow('UPTIME_KUMA_IT_BIN_TIMEOUT_MS must be a positive integer, got "abc"');
+  });
+
   test("stays in-process when UPTIME_KUMA_IT_URL is not set", async () => {
     const kuma = await startFakeKuma({
       tags: [{ id: 1, name: "staging", color: "#00ff00" }],
@@ -148,6 +177,7 @@ describe("run() with UPTIME_KUMA_IT_BIN", () => {
 
   test("warns once when UPTIME_KUMA_IT_URL is set without UPTIME_KUMA_IT_BIN", async () => {
     sb = sandbox();
+    resetRunWarnings();
     const kuma = await startFakeKuma({ tags: [] });
     const spy = spyOn(console, "warn").mockImplementation(() => {});
     try {

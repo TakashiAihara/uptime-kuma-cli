@@ -45,6 +45,11 @@ export function writeConfig(sb: Sandbox, toml: string) {
 let runActive = false;
 let noBinWarned = false;
 
+// The once-only warning is module state; tests reset it between cases.
+export function resetRunWarnings(): void {
+  noBinWarned = false;
+}
+
 // Past the largest per-test budget (5 minutes), so the watchdog only fires on
 // a call whose test already failed — and it keeps a hung binary from holding
 // `bun test` open past the test timeouts that would otherwise be the only
@@ -64,6 +69,13 @@ async function runBinary(
     accessSync(bin, constants.X_OK);
   } catch {
     throw new Error(`UPTIME_KUMA_IT_BIN=${bin} is not executable`);
+  }
+  const timeoutEnv = process.env.UPTIME_KUMA_IT_BIN_TIMEOUT_MS;
+  const timeoutMs = timeoutEnv === undefined ? BIN_TIMEOUT_MS : Number(timeoutEnv);
+  if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) {
+    throw new Error(
+      `UPTIME_KUMA_IT_BIN_TIMEOUT_MS must be a positive integer, got "${timeoutEnv}"`,
+    );
   }
   const proc = Bun.spawn([bin, ...args], {
     env,
@@ -85,13 +97,15 @@ async function runBinary(
       text += decoder.decode(value, { stream: true });
     }
   };
+  // The drains start now, not after the exit: a child that fills the pipe
+  // buffer blocks on write and would never reach proc.exited.
+  const stdoutP = readAll(stdoutReader);
+  const stderrP = readAll(stderrReader);
   const done = (async () => {
     const code = await proc.exited;
-    const [stdout, stderr] = await Promise.all([readAll(stdoutReader), readAll(stderrReader)]);
+    const [stdout, stderr] = await Promise.all([stdoutP, stderrP]);
     return { code, stdout, stderr };
   })();
-  const timeoutEnv = process.env.UPTIME_KUMA_IT_BIN_TIMEOUT_MS;
-  const timeoutMs = timeoutEnv === undefined ? BIN_TIMEOUT_MS : Number(timeoutEnv);
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeoutP = new Promise<"timeout">((r) => {
     timer = setTimeout(() => r("timeout"), timeoutMs);
@@ -104,9 +118,10 @@ async function runBinary(
     // signal it survives would hang runBinary itself.
     proc.kill("SIGKILL");
     // The child is dead but a descendant may still hold the pipes open;
-    // cancelling the reads keeps them from holding `bun test` open, and
-    // proc.exited is the only wait left that SIGKILL cannot stall.
-    await Promise.allSettled([stdoutReader.cancel(), stderrReader.cancel(), proc.exited]);
+    // cancelling the reads settles them, after which done only waits on the
+    // SIGKILLed exit — bounded, so the throw cannot be held up either.
+    await Promise.allSettled([stdoutReader.cancel(), stderrReader.cancel()]);
+    await Promise.allSettled([done]);
     throw new Error(`${bin} ${args.join(" ")} did not finish within ${timeoutMs}ms`);
   }
   return { ...result, json: () => JSON.parse(result.stdout) };

@@ -200,18 +200,6 @@ function teardown(): Promise<boolean> {
 }
 
 let signalExit: number | null = null;
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.on(signal, () => {
-    const code = signal === "SIGINT" ? 130 : 143;
-    signalExit ??= code;
-    console.error(`\nreceived ${signal}, tearing down`);
-    testProc?.kill();
-    void teardown().finally(() => {
-      rmSync(buildDir, { recursive: true, force: true });
-      process.exit(code);
-    });
-  });
-}
 
 // The suite runs the compiled binary, so the host target is built before
 // anything else — a compile error should not wait behind a multi-minute image
@@ -240,6 +228,21 @@ if (build.exitCode !== 0) {
   process.exit(build.exitCode ?? 1);
 }
 const BIN = join(buildDir, "dist", `uptime-kuma-cli-${HOST_TARGET}`);
+
+// Registered only after buildDir exists: the handler removes it, and a signal
+// during the synchronous build above cannot reach a handler anyway.
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.on(signal, () => {
+    const code = signal === "SIGINT" ? 130 : 143;
+    signalExit ??= code;
+    console.error(`\nreceived ${signal}, tearing down`);
+    testProc?.kill();
+    void teardown().finally(() => {
+      rmSync(buildDir, { recursive: true, force: true });
+      process.exit(code);
+    });
+  });
+}
 
 let exitCode = 1;
 try {
