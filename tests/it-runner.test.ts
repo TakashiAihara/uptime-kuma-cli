@@ -37,6 +37,7 @@ case "$1" in
     sleep "\${FAKE_UP_SLEEP:-0}" &
     pid=$!
     trap 'echo "up termed" >> "$FAKE_LOG"; kill "$pid" 2>/dev/null; exit 0' TERM
+    echo "up armed" >> "$FAKE_LOG"
     wait "$pid"
     exit 0
     ;;
@@ -51,10 +52,8 @@ echo "bun $*" >> "$FAKE_LOG"
 case "$1" in
   *build.ts)
     if [ -n "$FAKE_BUILD_SLEEP" ]; then
-      sleep "$FAKE_BUILD_SLEEP" &
-      pid=$!
-      trap 'echo "build termed" >> "$FAKE_LOG"; kill "$pid" 2>/dev/null; exit 0' TERM
-      wait "$pid"
+      "$FAKE_BUILD_GRANDCHILD" &
+      wait $!
     fi
     mkdir -p dist
     printf '#!/bin/sh\\nexit 0\\n' > "dist/uptime-kuma-cli-$2"
@@ -92,6 +91,17 @@ if (process.env.FAKE_TEST_HANG === "1") {
 }
 appendFileSync(log, "bun-test-child ran\\n");
 process.exit(Number(process.env.FAKE_TEST_EXIT ?? "0"));
+`;
+
+// The fake build's grandchild stands in for `bun build --compile` under
+// scripts/build.ts: it traps TERM itself (logging "grandchild termed") but
+// nothing forwards a signal to it, so only a process-group kill ends it.
+const FAKE_BUILD_GRANDCHILD = `#!/bin/sh
+trap 'echo "grandchild termed" >> "$FAKE_LOG"; kill "$pid" 2>/dev/null; exit 0' TERM
+echo "grandchild started" >> "$FAKE_LOG"
+sleep 60 &
+pid=$!
+wait "$pid"
 `;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -151,6 +161,7 @@ function startRunner(sb: Sandbox, port: number, env: Record<string, string>): Ru
   writeFileSync(join(bin, "docker"), FAKE_DOCKER, { mode: 0o755 });
   writeFileSync(join(bin, "bun"), FAKE_BUN, { mode: 0o755 });
   writeFileSync(join(sb.dir, "fake-test-child.ts"), FAKE_TEST_CHILD);
+  writeFileSync(join(bin, "build-grandchild"), FAKE_BUILD_GRANDCHILD, { mode: 0o755 });
   const proc = Bun.spawn([process.execPath, RUNNER], {
     cwd: REPO,
     env: {
@@ -161,6 +172,7 @@ function startRunner(sb: Sandbox, port: number, env: Record<string, string>): Ru
       FAKE_DOWN_COUNT: join(sb.dir, "down.count"),
       REAL_BUN: process.execPath,
       FAKE_TEST_CHILD: join(sb.dir, "fake-test-child.ts"),
+      FAKE_BUILD_GRANDCHILD: join(bin, "build-grandchild"),
       TMPDIR: sb.dir,
       ...env,
     },
@@ -229,7 +241,7 @@ describe("scripts/integration.ts signal handling", () => {
 
   test("SIGTERM during compose up kills the up child before the down -v", async () => {
     runner = startRunner(sb, kuma.port, { FAKE_UP_SLEEP: "60" });
-    await waitForLog(runner.log, "up -d --wait");
+    await waitForLog(runner.log, "up armed");
     runner.proc.kill("SIGTERM");
     expect(await runner.exited).toBe(143);
     const log = readFileSync(runner.log, "utf8");
@@ -276,13 +288,15 @@ describe("scripts/integration.ts signal handling", () => {
     expect(lastDown).toBeGreaterThan(termed);
   }, 30_000);
 
-  test("SIGINT during the build kills it and still tears down", async () => {
+  test("SIGINT during the build kills its process group and still tears down", async () => {
     runner = startRunner(sb, kuma.port, { FAKE_BUILD_SLEEP: "60" });
-    await waitForLog(runner.log, "build.ts");
+    await waitForLog(runner.log, "grandchild started");
     runner.proc.kill("SIGINT");
     expect(await runner.exited).toBe(130);
     const log = readFileSync(runner.log, "utf8");
-    expect(log).toContain("build termed");
+    // Only a process-group kill reaches the compile grandchild; a plain
+    // kill() on the build wrapper would leave it running.
+    expect(log).toContain("grandchild termed");
     expect(log).not.toContain("up -d --wait");
     expect(log).not.toContain("bun-test-child");
     expect(countLines(log, "down -v")).toBe(1);

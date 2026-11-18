@@ -233,12 +233,27 @@ async function awaitChildren(children: Child[]): Promise<void> {
     sleep(KILL_GRACE_MS).then(() =>
       Promise.all(
         children.map((c) => {
-          c.kill("SIGKILL");
+          killChild(c, "SIGKILL");
           return c.exited;
         }),
       ),
     ),
   ]);
+}
+
+// The build child runs detached in its own process group so signalling it
+// also reaches the compile grandchildren scripts/build.ts spawns; the other
+// children share this process group, where a plain kill() is enough.
+function killChild(child: Child, signal: "SIGTERM" | "SIGKILL" = "SIGTERM"): void {
+  if (child === buildProc) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      // the group is already gone
+    }
+  }
+  child.kill(signal);
 }
 
 // Waits for the children a signal killed, then runs the shared teardown and
@@ -275,7 +290,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
     // exit path then waits for them before teardown, so nothing (like `up`)
     // keeps working while the down -v runs.
     const children = [testProc, composeProc, buildProc].filter((p): p is Child => p !== undefined);
-    for (const child of children) child.kill();
+    for (const child of children) killChild(child);
     void exitAfterTeardown(code, children);
   });
 }
@@ -285,11 +300,14 @@ for (const name of ["src", "package.json", "node_modules"]) {
 console.log(`building uptime-kuma-cli-${HOST_TARGET}`);
 // spawn, not spawnSync: the event loop must stay free so the signal
 // handlers can kill a hung build through buildProc like the other children.
+// detached gives the build its own process group so killChild can reach the
+// compile grandchildren scripts/build.ts spawns.
 let buildProc: Child | undefined;
 const build = Bun.spawn(["bun", join(REPO_ROOT, "scripts", "build.ts"), HOST_TARGET], {
   cwd: buildDir,
   stdout: "inherit",
   stderr: "inherit",
+  detached: true,
 });
 buildProc = build;
 await build.exited;
