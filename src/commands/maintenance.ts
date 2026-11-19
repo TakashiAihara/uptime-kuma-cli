@@ -938,19 +938,19 @@ export function registerMaintenance(program: Command): void {
       // a cron given outright is refused on the union before connecting,
       // like add, unless this edit also names a non-cron strategy where it
       // is inert; non-string values are left for the post-fetch check,
-      // which knows the merged strategy
-      const preStrategy = sets.strategy ?? fileConfig.strategy;
-      for (const candidate of [fileConfig.cron, sets.cron]) {
-        if (
-          typeof candidate === "string" &&
-          (preStrategy === undefined || String(preStrategy) === "cron") &&
-          !isCronExpression(candidate, "either")
-        ) {
-          fail(
-            2,
-            '"cron" must be 5 or 6 whitespace-separated cron fields with in-range values and steps',
-          );
-        }
+      // which knows the merged strategy. --set wins over --config-file, so
+      // a bad file value a --set replaces is not judged
+      const preStrategy = "strategy" in sets ? sets.strategy : fileConfig.strategy;
+      const preCron = "cron" in sets ? sets.cron : fileConfig.cron;
+      if (
+        typeof preCron === "string" &&
+        (preStrategy === undefined || String(preStrategy) === "cron") &&
+        !isCronExpression(preCron, "either")
+      ) {
+        fail(
+          2,
+          '"cron" must be 5 or 6 whitespace-separated cron fields with in-range values and steps',
+        );
       }
       const hasChange =
         opts.title !== undefined ||

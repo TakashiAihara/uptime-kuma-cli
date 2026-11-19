@@ -1425,6 +1425,30 @@ describe("maintenance", () => {
       expect(kuma.calls).toHaveLength(0);
     });
 
+    test("--set cron repairs a bad --config-file cron before connecting", async () => {
+      const f = writeJson("editcronrepair.json", { cron: "0 9 * 13 *" });
+      const r = await run(
+        sb,
+        ["maintenance", "edit", "1", "--config-file", f, "--set", "cron=0 9 * * *"],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(0);
+      const sent = callsOf("editMaintenance")[0]!.args[0] as Record<string, unknown>;
+      expect(sent.cron).toBe("0 9 * * *");
+    });
+
+    test("--set cron replaces a good --config-file cron before connecting", async () => {
+      const f = writeJson("editcrongood.json", { cron: "0 9 * * *" });
+      const r = await run(
+        sb,
+        ["maintenance", "edit", "1", "--config-file", f, "--set", "cron=0 9 * 13 *"],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("in-range values and steps");
+      expect(kuma.calls).toHaveLength(0);
+    });
+
     test("edit --config-file with an inert cron on a manual window connects and merges", async () => {
       const f = writeJson("manualcron.json", { strategy: "manual", cron: null });
       const r = await run(sb, ["maintenance", "edit", "1", "--config-file", f], creds(kuma.url));
