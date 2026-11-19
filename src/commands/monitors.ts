@@ -1141,9 +1141,6 @@ export function registerMonitors(program: Command): void {
         }
       }
       const urlTypes = (URL_TYPES as readonly string[]).includes(type);
-      if (urlTypes && !opts.url) {
-        fail(2, `--type ${type} requires --url`);
-      }
       if (typeof opts.url === "string" && urlCarriesCredentials(opts.url)) {
         fail(
           2,
@@ -1219,6 +1216,19 @@ export function registerMonitors(program: Command): void {
       refuseSecretSets(sets);
       validateHatchValues(sets);
       validateHatchValues(fileConfig);
+      // A credential-bearing url only fits --config-file, so the flag cannot
+      // be required on its own: anything supplied on a later-precedence
+      // source counts, and a null or empty merged value fails downstream on
+      // "url must be a non-empty string" like the flag-only path did.
+      const mergedUrl =
+        sets.url !== undefined
+          ? sets.url
+          : fileConfig.url !== undefined
+            ? fileConfig.url
+            : opts.url;
+      if (urlTypes && mergedUrl === undefined) {
+        fail(2, `--type ${type} requires --url or a url key in --set/--config-file`);
+      }
       if (sets.notificationIDList !== undefined) {
         checkNotificationIdList(sets.notificationIDList);
       }

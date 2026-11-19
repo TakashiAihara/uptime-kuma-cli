@@ -625,6 +625,39 @@ describe("monitors add", () => {
     expect((addCalls()[0]!.args[0] as any).httpBodyEncoding).toBe("json");
   });
 
+  test("a credential-bearing url in --config-file satisfies the url requirement", async () => {
+    const userPass = ["op", "pw-fixture"].join(":");
+    const url = `https://${userPass}@c.example.com/watched`;
+    const f = join(sb.dir, "cfg.json");
+    writeFileSync(f, JSON.stringify({ url }));
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "http", "--name", "cfg-url", "--config-file", f],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).url).toBe(url);
+  });
+
+  test("a --set url satisfies the url requirement without --url", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "set-url",
+        "--set",
+        "url=https://s.example.com",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).url).toBe("https://s.example.com");
+  });
+
   test("adds default notifications and, for http, the default proxy like the UI", async () => {
     kuma.state.notifications = [
       { id: 6, name: "def", active: true, isDefault: true, userId: 1, config: "{}" },
