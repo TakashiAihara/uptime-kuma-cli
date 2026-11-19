@@ -232,13 +232,13 @@ function questionOk(entry: string, partIndex: number, version: CronMajor): boole
 // and day-of-week parts of 3+ chars get the JAN-DEC / SUN-SAT names
 // replaced, the first "?" of each part becomes a number, and what remains
 // may only contain [0-9*/,-] — plus "#" and "L" in day-of-week on croner 8.
-// Returns null where parse throws; an empty part or a bare day-of-week "L"
-// is refused too since the field stays all-zero and the window never runs
-// (croner 8 throws anyway). At most one "?" per part, as in croner.
+// Returns null where parse throws; an empty part is refused too since the
+// field stays all-zero and the window never runs (croner 8 throws anyway).
+// At most one "?" per part, as in croner.
 function cronParts(
   value: string,
   version: CronMajor,
-): { parts: string[]; lastDay: boolean; qBare: ReadonlySet<number> } | null {
+): { parts: string[]; lastDay: boolean; q: ReadonlyMap<number, string> } | null {
   let pattern = value;
   if (pattern.includes("@")) {
     pattern = (CRON_NICKNAMES.get(pattern.trim().toLowerCase()) ?? pattern).trim();
@@ -251,10 +251,10 @@ function cronParts(
   ) as [string, string, string, string, string, string];
   const lastDay = day.includes("L");
   const dom = day.replace("L", "");
-  // croner 6 strips a day-of-week "L"; croner 8 keeps it, where "5L" parses
-  // as 5 and a bare "L" throws on parseInt — both end up refused either way
+  // croner 6 strips a day-of-week "L" and a bare one leaves a dead field —
+  // the joint dom/dow check below decides whether that is fatal; croner 8
+  // keeps it, where "5L" parses as 5 and a bare "L" throws on parseInt
   const dow = version === "6" ? dayOfWeek.replace("L", "") : dayOfWeek;
-  if (dow === "") return null;
   const raw = [
     second,
     minute,
@@ -264,20 +264,19 @@ function cronParts(
     dow.length >= 3 ? alphaDays(dow) : dow,
   ];
   const parts: string[] = [];
-  const qBare = new Set<number>();
+  const q = new Map<number, string>();
   for (const [i, part] of raw.entries()) {
-    const q = part.indexOf("?");
-    if (q !== -1) {
-      if (part.indexOf("?", q + 1) !== -1) return null;
+    if (part.includes("?")) {
+      if (part.indexOf("?", part.indexOf("?") + 1) !== -1) return null;
       if (!part.split(",").every((entry) => questionOk(entry, i, version))) return null;
-      if (part === "?") qBare.add(i);
+      q.set(i, part);
     }
-    parts.push(q === -1 ? part : part.replace("?", String(CRON_PART_LIMITS[i]!.min)));
+    parts.push(part.replace("?", String(CRON_PART_LIMITS[i]!.min)));
   }
   const ok = parts.every((part, i) =>
     (i === 5 && version === "8" ? CRON_LEGAL_DOW_2X : CRON_LEGAL).test(part),
   );
-  return ok ? { parts, lastDay, qBare } : null;
+  return ok ? { parts, lastDay, q } : null;
 }
 
 // partToArray's reject rules for one comma-separated entry, applied per
@@ -388,10 +387,16 @@ function entryValues(entry: string, partIndex: number, version: CronMajor): Set<
     hits.add(first);
     return hits;
   }
-  // x/N lands on x + k·N — below the bitmap length on croner 6 and below
-  // the offset end on croner 8, so a dead start contributes nothing
-  const bound = version === "8" ? min + size : size;
-  for (let v = first; v < bound; v += Number(m[3])) {
+  // x/N lands on x + k·N — croner 6 walks raw bitmap indexes so index i is
+  // value i + min ("*" starts at index 0), while croner 8 offsets the start
+  // by the minimum. A dead start contributes nothing on either
+  if (version === "6") {
+    for (let i = m[1] === "*" ? 0 : Number(m[1]); i < size; i += Number(m[3])) {
+      hits.add(i + min);
+    }
+    return hits;
+  }
+  for (let v = first; v < min + size; v += Number(m[3])) {
     if (v >= min) hits.add(v);
   }
   return hits;
@@ -434,32 +439,41 @@ function isCronExpression(value: string, version: CronMajor | "either"): boolean
   // the other side is dead or unrestricted
   if ((domDead && (dowDead || dowStar)) || (dowDead && (domDead || domStar))) return false;
   if (!shape.lastDay && !domStar && (dowStar || dowDead)) {
-    const qDom = shape.qBare.has(3);
-    const qMonth = shape.qBare.has(4);
-    const values = (i: number, bare: boolean): number[] => {
-      if (bare) {
-        const { min, max } = CRON_PART_LIMITS[i]!;
-        return Array.from({ length: max - min + 1 }, (_, k) => min + k);
+    // a "?" in a date field re-substitutes the field's current value on every
+    // parse, so every possible today must still leave a real date — and both
+    // fields take the same today, so impossible today-pairs do not apply
+    const hits = (i: number, c: number | null): number[] => {
+      const raw = c === null ? shape.parts[i]! : shape.q.get(i)!;
+      const values = new Set<number>();
+      for (const entry of raw.split(",")) {
+        const sub = c === null ? entry : entry.replace("?", String(c));
+        for (const v of entryValues(sub, i, version)) values.add(v);
       }
-      const hits = new Set<number>();
-      for (const entry of shape.parts[i]!.split(",")) {
-        for (const v of entryValues(entry, i, version)) hits.add(v);
-      }
-      return [...hits];
+      return [...values];
     };
-    const doms = values(3, qDom);
-    const months = values(4, qMonth);
-    // a bare "?" is one unknown current value — every possibility must
-    // still leave a real date; a concrete pair needs only one
-    const fits = (d: number, m: number) => d <= DAYS_IN_MONTH[m]!;
-    if (qDom && qMonth) return false;
-    if (qDom) {
-      if (!doms.every((d) => months.some((m) => fits(d, m)))) return false;
-    } else if (
-      qMonth
-        ? !months.every((m) => doms.some((d) => fits(d, m)))
-        : !months.some((m) => doms.some((d) => fits(d, m)))
-    ) {
+    const domHits = hits(3, null);
+    const monthHits = hits(4, null);
+    const fits = (d: number | null, m: number | null): boolean =>
+      (m === null ? monthHits : hits(4, m)).some((mo) =>
+        (d === null ? domHits : hits(3, d)).some((dd) => dd <= DAYS_IN_MONTH[mo]!),
+      );
+    const qDom = shape.q.has(3);
+    const qMonth = shape.q.has(4);
+    if (qDom && qMonth) {
+      for (let m0 = 1; m0 <= 12; m0++) {
+        for (let d0 = 1; d0 <= DAYS_IN_MONTH[m0]!; d0++) {
+          if (!fits(d0, m0)) return false;
+        }
+      }
+    } else if (qDom) {
+      for (let d0 = 1; d0 <= 31; d0++) {
+        if (!fits(d0, null)) return false;
+      }
+    } else if (qMonth) {
+      for (let m0 = 1; m0 <= 12; m0++) {
+        if (!fits(null, m0)) return false;
+      }
+    } else if (!fits(null, null)) {
       return false;
     }
   }
