@@ -211,6 +211,9 @@ describe("maintenance on Kuma 2.x", () => {
       "0 9 1-? * *",
       "0 9 * * ?-7",
       "0 9 * * ?-6",
+      "0 9 * * /5,6",
+      "0 9 * * 60/5,6",
+      "0 9 32/5,1 * *",
     ])("cron accepts %p on a 2.x server", async (cron) => {
       const k = await useFake();
       const f = writeJson("cron8.json", { cron });
@@ -223,22 +226,26 @@ describe("maintenance on Kuma 2.x", () => {
       expect(sentAdd(k).cron).toBe(cron);
     });
 
-    test.each(["0 9 * * */8", "0 9 0/5 * *", "0 9 * 0/3 *", "0 9 * * 7/2", "0 9 ,5 * *"])(
-      "a croner 6-only form %p exits 2 once the 2.x version is known",
-      async (cron) => {
-        const k = await useFake();
-        const f = writeJson("cron6.json", { cron });
-        const r = await run(
-          sb,
-          ["maintenance", "add", "--title", "w", "--strategy", "cron", "--config-file", f],
-          creds(k.url),
-        );
-        expect(r.code).toBe(2);
-        expect(r.stderr).toContain("in-range values and steps");
-        expect(k.calls.map((c) => c.event)).toContain("login");
-        expect(callsOf(k, "addMaintenance")).toHaveLength(0);
-      },
-    );
+    test.each([
+      "0 9 * * */8",
+      "0 9 0/5 * *",
+      "0 9 * 0/3 *",
+      "0 9 * * 7/2",
+      "0 9 ,5 * *",
+      "0 9 0/5,1 * *",
+    ])("a croner 6-only form %p exits 2 once the 2.x version is known", async (cron) => {
+      const k = await useFake();
+      const f = writeJson("cron6.json", { cron });
+      const r = await run(
+        sb,
+        ["maintenance", "add", "--title", "w", "--strategy", "cron", "--config-file", f],
+        creds(k.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("in-range values and steps");
+      expect(k.calls.map((c) => c.event)).toContain("login");
+      expect(callsOf(k, "addMaintenance")).toHaveLength(0);
+    });
 
     test.each([
       "0 9 * * * * *",

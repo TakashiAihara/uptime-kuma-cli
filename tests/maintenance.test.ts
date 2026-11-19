@@ -922,7 +922,24 @@ describe("maintenance", () => {
       expect(sent.dateRange).toEqual(["2032-06-01T10:00:00"]);
     });
 
-    test("--set cron with an out-of-range value exits 2 without sending editMaintenance", async () => {
+    test.each(["cron=0 9 * 13 *", "cron=0 9 * * 8/2"])(
+      "--set %p exits 2 before connecting on a 1.x server",
+      async (set) => {
+        kuma.state.maintenances[0] = {
+          ...kuma.state.maintenances[0]!,
+          strategy: "cron",
+          cron: "0 4 * * *",
+          duration: 3600,
+          dateRange: ["2030-01-01T02:00:00"],
+        };
+        const r = await run(sb, ["maintenance", "edit", "2", "--set", set], creds(kuma.url));
+        expect(r.code).toBe(2);
+        expect(r.stderr).toContain("in-range values and steps");
+        expect(kuma.calls).toHaveLength(0);
+      },
+    );
+
+    test("--set cron to a croner 8-only value exits 2 without sending editMaintenance", async () => {
       kuma.state.maintenances[0] = {
         ...kuma.state.maintenances[0]!,
         strategy: "cron",
@@ -932,7 +949,7 @@ describe("maintenance", () => {
       };
       const r = await run(
         sb,
-        ["maintenance", "edit", "2", "--set", "cron=0 9 * 13 *"],
+        ["maintenance", "edit", "2", "--set", "cron=0 9 31/5 * *"],
         creds(kuma.url),
       );
       expect(r.code).toBe(2);
@@ -1379,6 +1396,14 @@ describe("maintenance", () => {
       expect(callsOf("editMaintenance")).toHaveLength(0);
     });
 
+    test("edit --config-file cron with an out-of-range value exits 2 before connecting", async () => {
+      const f = writeJson("editcron.json", { cron: "0 9 * 13 *" });
+      const r = await run(sb, ["maintenance", "edit", "1", "--config-file", f], creds(kuma.url));
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("in-range values and steps");
+      expect(kuma.calls).toHaveLength(0);
+    });
+
     test("--set dateRange repairs a bad --config-file dateRange", async () => {
       const f = writeJson("badrange.json", { dateRange: ["soon", "2030-01-01T00:00:00"] });
       const r = await run(
@@ -1525,7 +1550,6 @@ describe("maintenance", () => {
     });
 
     test.each([
-      "0 9 L * *",
       "0 9 * * 5L",
       "0 9 * * * ?",
       "0 9 * jan mon",
@@ -1533,7 +1557,6 @@ describe("maintenance", () => {
       "0 9 * feb,mar,apr,may,jun,jul,aug,sep,oct,nov tue,wed,thu,fri,sun",
       "0\t9 * * *",
       "0  0 9 * * *",
-      "0 9 L, * *",
     ])("a cron expression %p is accepted", async (cron) => {
       const f = writeJson("goodshape.json", { cron });
       const r = await run(
@@ -1650,6 +1673,10 @@ describe("maintenance", () => {
       "0 9 * * ?-7",
       "0 9 * * ?-6",
       "0 9 * * 7/2",
+      "0 9 * * 60/5,6",
+      "0 9 * * /5,6",
+      "0 9 * * 8/2,6",
+      "0 9 31/5,1 * *",
     ])("a boundary cron %p is accepted", async (cron) => {
       const f = writeJson("bounds.json", { cron });
       const r = await run(
@@ -1682,21 +1709,25 @@ describe("maintenance", () => {
       expect(callsOf("addMaintenance")).toHaveLength(0);
     });
 
-    test.each(["0 9 20-33/7 * *", "0 9 * * 2-8/7", "0 9 31/5 * *", "0 9 * 12/3 *"])(
-      "a croner 8-only value %p exits 2 once the 1.x version is known",
-      async (cron) => {
-        const f = writeJson("cron8value-on-1x.json", { cron });
-        const r = await run(
-          sb,
-          ["maintenance", "add", "--title", "w", "--strategy", "cron", "--config-file", f],
-          creds(kuma.url),
-        );
-        expect(r.code).toBe(2);
-        expect(r.stderr).toContain("in-range values and steps");
-        expect(kuma.calls.map((c) => c.event)).toContain("login");
-        expect(callsOf("addMaintenance")).toHaveLength(0);
-      },
-    );
+    test.each([
+      "0 9 20-33/7 * *",
+      "0 9 * * 2-8/7",
+      "0 9 31/5 * *",
+      "0 9 * 12/3 *",
+      "0 9 L * *",
+      "0 9 L, * *",
+    ])("a croner 8-only value %p exits 2 once the 1.x version is known", async (cron) => {
+      const f = writeJson("cron8value-on-1x.json", { cron });
+      const r = await run(
+        sb,
+        ["maintenance", "add", "--title", "w", "--strategy", "cron", "--config-file", f],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("in-range values and steps");
+      expect(kuma.calls.map((c) => c.event)).toContain("login");
+      expect(callsOf("addMaintenance")).toHaveLength(0);
+    });
 
     test("lastDay1 is accepted in daysOfMonth", async () => {
       const f = writeJson("lastday.json", { daysOfMonth: ["lastDay1"] });

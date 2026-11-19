@@ -279,26 +279,27 @@ function cronParts(
 }
 
 // partToArray's reject rules for one comma-separated entry, applied per
-// croner major: an empty entry is silently skipped on 6 but throws on 8
-// (unless the day-of-month part carried "L"); a step or range step over the
-// bitmap length and a step of 0 throw on both; a range bound outside the
-// value range or a lower bound above the upper throws on both. croner 8's
-// extractNth allows "#" in day-of-week only, with an nth of 1-5 or "L", and
-// offsets the step start so a day/month start of 0 throws in setPart.
-// Neither croner checks that a step start reaches the bitmap, so a start
-// past the end — or an empty one — stays accepted while scheduling
-// nothing; that is refused here since a dead schedule is exactly what
-// this check exists to keep off the server.
+// croner major: "bad" is what croner throws on — an empty entry on 8
+// (unless the day-of-month part carried "L"), a step or range step over
+// the bitmap length, a step of 0, a range bound outside the value range
+// or a lower bound above the upper, and on 8 a step start under the
+// field minimum (setPart throws on the first hit); "dead" is legal but
+// contributes nothing — an empty entry on 6, or a step start that never
+// reaches the bitmap; "live" is everything else. croner 8's extractNth
+// allows "#" in day-of-week only, with an nth of 1-5 or "L".
 function cronEntryOk(
   entry: string,
   partIndex: number,
   version: CronMajor,
   lastDay: boolean,
-): boolean {
+): "live" | "dead" | "bad" {
   const { min, max, size } = CRON_PART_LIMITS[partIndex]!;
   const fieldSize = partIndex === 5 && version === "8" ? 7 : size;
-  if (entry === "") return version === "6" || (partIndex === 3 && lastDay);
-  if (entry === "*") return true;
+  if (entry === "") {
+    if (version === "6") return "dead";
+    return partIndex === 3 && lastDay ? "live" : "bad";
+  }
+  if (entry === "*") return "live";
 
   let rest = entry;
   if (version === "8" && partIndex === 5 && rest.includes("#")) {
@@ -308,7 +309,7 @@ function cronEntryOk(
     // empty nth falls back to the default "any occurrence" bitmask
     const nth = seg[1]!;
     if (nth !== "" && nth !== "L" && (!/^\d+$/.test(nth) || Number(nth) < 1 || Number(nth) > 5)) {
-      return false;
+      return "bad";
     }
   }
   const num = (s: string): number => Number.parseInt(s, 10);
@@ -319,47 +320,53 @@ function cronEntryOk(
   // where it breaks the rest-only parse the same way it breaks croner's
   if (entry.includes("-") && entry.includes("/")) {
     const m = /^(\d+)-(\d+)\/(\d+)$/.exec(rest);
-    if (m === null) return false;
+    if (m === null) return "bad";
     const lower = num(m[1]!);
     const upper = num(m[2]!);
     const steps = num(m[3]!);
-    if (steps === 0 || steps > fieldSize || !inRange(lower) || lower > upper) return false;
+    if (steps === 0 || steps > fieldSize || !inRange(lower) || lower > upper) return "bad";
     // croner 8 only checks the values the steps land on — an upper bound
     // past the end of the field is fine while no step reaches it; croner 6
     // throws "Value out of range" on the bound itself
-    if (version === "8") return lower + Math.floor((upper - lower) / steps) * steps <= max;
-    return inRange(upper);
+    if (version === "8") {
+      return lower + Math.floor((upper - lower) / steps) * steps <= max ? "live" : "bad";
+    }
+    return inRange(upper) ? "live" : "bad";
   }
   if (entry.includes("-")) {
     const seg = rest.split("-");
-    if (seg.length !== 2) return false;
+    if (seg.length !== 2) return "bad";
     const lower = num(seg[0]!);
     const upper = num(seg[1]!);
-    return inRange(lower) && inRange(upper) && lower <= upper;
+    return inRange(lower) && inRange(upper) && lower <= upper ? "live" : "bad";
   }
   if (entry.includes("/")) {
     const seg = rest.split("/");
-    if (seg.length !== 2) return false;
+    if (seg.length !== 2) return "bad";
     const steps = num(seg[1]!);
-    if (Number.isNaN(steps) || steps === 0 || steps > fieldSize) return false;
-    if (seg[0] === "*") return true;
-    // a start that never reaches the bitmap leaves the field all-zero — an
-    // all-zero month loops nextRun() forever, elsewhere the window simply
-    // never runs — so refuse what croner accepts into a dead schedule.
+    if (Number.isNaN(steps) || steps === 0 || steps > fieldSize) return "bad";
+    if (seg[0] === "*") return "live";
     // croner 6 iterates from the raw start, so any index below the bitmap
-    // length schedules; croner 8 offsets the start by the field's minimum
-    // (and throws when the first hit lands below it), landing back on the
-    // value range
+    // length schedules and a start past it just goes dead; croner 8 offsets
+    // the start by the field's minimum — under it the first hit throws in
+    // setPart, past the bitmap it goes dead too
     const start = num(seg[0]!);
-    if (version === "8") return start >= min && start - min < fieldSize;
-    return start >= 0 && start < fieldSize;
+    if (version === "8") {
+      if (start < min) return "bad";
+      return start - min < fieldSize ? "live" : "dead";
+    }
+    return start >= 0 && start < fieldSize ? "live" : "dead";
   }
-  return inRange(num(rest));
+  return inRange(num(rest)) ? "live" : "bad";
 }
 
 // "either" is the pre-connect union — refuse only what both croners refuse,
 // so a 1.x server never stores what its unawaited validateCron would throw
-// on, while 2.x-only forms still reach a 2.x server.
+// on, while 2.x-only forms still reach a 2.x server. Within a field a
+// croner-legal entry that contributes no values is only refused when every
+// entry is dead like that — an all-zero field never runs, and an all-zero
+// month loops nextRun() forever — while a dead sibling next to a live one
+// still schedules on the server.
 function isCronExpression(value: string, version: CronMajor | "either"): boolean {
   if (version === "either") {
     return isCronExpression(value, "6") || isCronExpression(value, "8");
@@ -367,14 +374,13 @@ function isCronExpression(value: string, version: CronMajor | "either"): boolean
   const shape = cronParts(value, version);
   if (shape === null) return false;
   return shape.parts.every((part, i) => {
-    const entries = part.split(",");
-    // a part whose comma entries are all empty leaves the field all-zero on
-    // croner 6 — the window never runs — while croner 8 throws; the
-    // day-of-month "L" flag is the one empty part that still schedules
-    if (entries.every((entry) => entry === "") && !(i === 3 && shape.lastDay)) {
-      return false;
+    let live = false;
+    for (const entry of part.split(",")) {
+      const verdict = cronEntryOk(entry, i, version, shape.lastDay);
+      if (verdict === "bad") return false;
+      live ||= verdict === "live";
     }
-    return entries.every((entry) => cronEntryOk(entry, i, version, shape.lastDay));
+    return live;
   });
 }
 
@@ -845,6 +851,20 @@ export function registerMaintenance(program: Command): void {
           !(STRATEGIES as readonly string[]).includes(String(candidate))
         ) {
           fail(2, `unknown maintenance strategy "${String(candidate)}"`);
+        }
+      }
+      // a cron given outright is refused on the union before connecting,
+      // like add; the post-fetch check still narrows it to the server's
+      // croner major once the merged strategy is known to be cron
+      for (const candidate of [fileConfig.cron, sets.cron]) {
+        if (
+          candidate !== undefined &&
+          (typeof candidate !== "string" || !isCronExpression(candidate, "either"))
+        ) {
+          fail(
+            2,
+            '"cron" must be 5 or 6 whitespace-separated cron fields with in-range values and steps',
+          );
         }
       }
       const hasChange =
