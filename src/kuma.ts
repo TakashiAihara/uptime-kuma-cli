@@ -252,6 +252,10 @@ export class KumaSession {
     // 2.x's post-login info carries dbType (the backend name, e.g. "sqlite");
     // 1.23's info has no such field, so it stays undefined there.
     readonly dbType: string | undefined,
+    // The post-login info reports whether Kuma runs in its container image;
+    // the type picker hides tailscale-ping there because the image ships no
+    // tailscale binary. Undefined when the info never carried the field.
+    readonly isContainer: boolean | undefined,
     // info carries the Primary Base URL setting on both Kuma versions, so
     // `monitors add --type push` builds pushUrl from it without a getSettings
     // round trip; undefined when the server never sent a string one.
@@ -530,16 +534,23 @@ export async function connect(
   let serverVersion: string | undefined;
   let serverDbType: string | undefined;
   let primaryBaseURL: string | undefined;
+  let isContainer: boolean | undefined;
   let infoSeen = false;
   socket.on("info", (data: unknown) => {
     infoSeen = true;
     const info = data as
-      | { version?: unknown; dbType?: unknown; primaryBaseURL?: unknown }
+      | {
+          version?: unknown;
+          dbType?: unknown;
+          primaryBaseURL?: unknown;
+          isContainer?: unknown;
+        }
       | null
       | undefined;
     if (typeof info?.version === "string") serverVersion = info.version;
     if (typeof info?.dbType === "string") serverDbType = info.dbType;
     if (typeof info?.primaryBaseURL === "string") primaryBaseURL = info.primaryBaseURL;
+    if (typeof info?.isContainer === "boolean") isContainer = info.isContainer;
   });
   // 1.23 pushes these right after the login callback and 2.x before it, so the
   // listeners must be in place before login is emitted.
@@ -726,6 +737,7 @@ export async function connect(
     statsEvents,
     serverVersion,
     serverDbType,
+    isContainer,
     primaryBaseURL,
     password,
     disconnected,

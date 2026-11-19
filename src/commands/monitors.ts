@@ -9,7 +9,6 @@ import {
   parseId,
   parseNonNegativeInteger,
   parsePort,
-  parsePositiveInteger,
   parsePositiveNumber,
   parseSets,
   printJson,
@@ -24,7 +23,10 @@ import {
   type Monitor,
 } from "../kuma.ts";
 
-// Order follows the type picker of EditMonitor.vue in Kuma 1.23.17.
+// Order follows the type picker of EditMonitor.vue in Kuma 1.23.17. The picker
+// hides tailscale-ping when info.isContainer reports the server runs in its
+// container image (it ships no tailscale binary), so that type is refused
+// after connect.
 const MONITOR_TYPES = [
   "group",
   "http",
@@ -79,6 +81,61 @@ const DNS_RESOLVE_TYPES = [
 // evaluateJsonQuery operators of 2.5.11/src/util.ts; jsonPathOperator is a
 // 2.x-only monitor field and the 2.x UI defaults it to "==".
 const JSON_PATH_OPERATORS = ["==", "!=", "<", "<=", ">", ">=", "contains"] as const;
+
+// monitorTypesWithEncodingAllowed of EditMonitor.vue's submit() (1.23.17 and
+// 2.5.11 alike): httpBodyEncoding stays on the monitor only for these types;
+// for every other type the UI sends null.
+const BODY_ENCODING_TYPES = ["http", "keyword", "json-query"] as const;
+
+// The url field is required for exactly these types (the urlTypes check of
+// the add command).
+const URL_TYPES = ["http", "keyword", "json-query", "real-browser"] as const;
+
+// Type-specific flags and the types the 1.23.17 picker shows them on; opt is
+// commander's camel-case of the flag. A flag given for another type is stored
+// ignored — refused below so a mistyped --type does not silently drop it.
+const TYPE_FLAGS: { flag: string; opt: string; types: readonly string[] }[] = [
+  { flag: "--url", opt: "url", types: URL_TYPES },
+  {
+    flag: "--hostname",
+    opt: "hostname",
+    types: ["port", "ping", "dns", "steam", "gamedig", "mqtt", "radius", "tailscale-ping"],
+  },
+  { flag: "--port", opt: "port", types: ["port", "dns", "steam", "gamedig", "mqtt", "radius"] },
+  { flag: "--keyword", opt: "keyword", types: ["keyword", "grpc-keyword"] },
+  { flag: "--invert-keyword", opt: "invertKeyword", types: ["keyword", "grpc-keyword"] },
+  { flag: "--json-path", opt: "jsonPath", types: ["json-query"] },
+  { flag: "--json-path-operator", opt: "jsonPathOperator", types: ["json-query"] },
+  { flag: "--expected-value", opt: "expectedValue", types: ["json-query"] },
+  { flag: "--packet-size", opt: "packetSize", types: ["ping"] },
+  { flag: "--dns-resolve-server", opt: "dnsResolveServer", types: ["dns"] },
+  { flag: "--dns-resolve-type", opt: "dnsResolveType", types: ["dns"] },
+  { flag: "--docker-container", opt: "dockerContainer", types: ["docker"] },
+  { flag: "--docker-host", opt: "dockerHost", types: ["docker"] },
+  { flag: "--game", opt: "game", types: ["gamedig"] },
+  { flag: "--grpc-url", opt: "grpcUrl", types: ["grpc-keyword"] },
+  { flag: "--grpc-service-name", opt: "grpcServiceName", types: ["grpc-keyword"] },
+  { flag: "--grpc-method", opt: "grpcMethod", types: ["grpc-keyword"] },
+  { flag: "--grpc-protobuf", opt: "grpcProtobuf", types: ["grpc-keyword"] },
+  { flag: "--grpc-enable-tls", opt: "grpcEnableTls", types: ["grpc-keyword"] },
+  { flag: "--mqtt-topic", opt: "mqttTopic", types: ["mqtt"] },
+  { flag: "--mqtt-username", opt: "mqttUsername", types: ["mqtt"] },
+  { flag: "--mqtt-success-message", opt: "mqttSuccessMessage", types: ["mqtt"] },
+  { flag: "--kafka-producer-broker", opt: "kafkaProducerBroker", types: ["kafka-producer"] },
+  { flag: "--kafka-producer-topic", opt: "kafkaProducerTopic", types: ["kafka-producer"] },
+  { flag: "--kafka-producer-message", opt: "kafkaProducerMessage", types: ["kafka-producer"] },
+  { flag: "--kafka-producer-ssl", opt: "kafkaProducerSsl", types: ["kafka-producer"] },
+  {
+    flag: "--kafka-producer-allow-auto-topic-creation",
+    opt: "kafkaProducerAllowAutoTopicCreation",
+    types: ["kafka-producer"],
+  },
+  { flag: "--radius-username", opt: "radiusUsername", types: ["radius"] },
+  { flag: "--radius-called-station-id", opt: "radiusCalledStationId", types: ["radius"] },
+  { flag: "--radius-calling-station-id", opt: "radiusCallingStationId", types: ["radius"] },
+  { flag: "--database-query", opt: "databaseQuery", types: DATABASE_QUERY_TYPES },
+  { flag: "--push-token", opt: "pushToken", types: ["push"] },
+];
 
 // monitorDefaults of src/pages/EditMonitor.vue in Kuma 1.23.17, minus the fields the CLI always
 // sets. Fields from Kuma 2.x must not be added: 1.23 stores the object as-is and fails on unknown
@@ -173,7 +230,7 @@ const SASL_VISIBLE_KEYS = new Set(["mechanism", "username", "awsRegion", "access
 // --config-file so the secret stays out of argv.
 const HATCH_SECRET_KEYS = new Set([...SECRET_KEYS, "kafkaProducerSaslOptions"]);
 
-// A monitor URL may carry credentials as user:pass@; keep the URL readable and hide the password
+// A monitor URL may carry credentials as user[:pass]@; keep the URL readable and hide the password
 export function redactUrl(value: unknown): unknown {
   if (typeof value !== "string" || value === "") return value;
   let parsed: URL;
@@ -183,12 +240,13 @@ export function redactUrl(value: unknown): unknown {
     // unparseable: the userinfo boundary is unknown, so hide the whole value
     return value.includes("@") ? "***" : value;
   }
-  if (parsed.password === "") {
-    // an opaque-path parse like "u:p@host:port" has no host, so the userinfo
-    // boundary is unknowable — hide the whole value like the catch branch
-    return parsed.host === "" && value.includes("@") ? "***" : value;
-  }
-  parsed.password = "***";
+  // an opaque-path parse like "u:p@host:port" has no host, so the userinfo
+  // boundary is unknowable — hide the whole value like the catch branch
+  if (parsed.host === "" && value.includes("@")) return "***";
+  if (parsed.username === "" && parsed.password === "") return value;
+  // either userinfo slot can hold a token, not just a name — hide all of it
+  parsed.username = "***";
+  parsed.password = "";
   return parsed.toString();
 }
 
@@ -265,10 +323,15 @@ function checkAddFields(fields: Record<string, unknown>, source: string): void {
 }
 
 // `monitors edit`: same field set; only id is read-only, name/type keep the
-// --set behavior they had before the escape hatch existed.
+// --set behavior they had before the escape hatch existed. `active` is a
+// monitor field but editMonitor does not copy it onto the bean — a set
+// active= would silently do nothing, so it is refused up front.
 function checkEditFields(fields: Record<string, unknown>, source: string): void {
   for (const key of Object.keys(fields)) {
     if (key === "id") fail(2, `${source} cannot set "id"; the id selects the monitor`);
+    if (key === "active") {
+      fail(2, `${source} cannot set "active"; use monitors pause / resume instead`);
+    }
     if (!isMonitorField(key)) {
       fail(2, `${source} key "${key}" is not a monitor field`);
     }
@@ -318,15 +381,27 @@ function timingFields(
 }
 
 // The timing bounds that differ between Kuma versions, checked after
-// connect() on the values the command sets: 1.23's Monitor.validate wants
-// interval within 20..2073600 and its check code turns a timeout of 0 into
-// interval × 800 seconds; 2.x wants retryInterval >= 1 (its interval >= 1
-// and timeout >= 0 already are the pre-connect union). On edit only the
-// values the edit sets are passed, so a stored timeout of 0 goes back
-// untouched like before.
+// connect() on the values the command sets. Both pickers use step=1 for
+// interval and retryInterval, so non-integers are refused on either version.
+// 1.23's Monitor.validate wants interval within 20..2073600 and its retry
+// input is min=20 with no upper bound; its check code turns a timeout of 0
+// into interval × 800 seconds. On 2.x every source was already held to the
+// pre-connect union (interval/retryInterval > 0, timeout >= 0), so only the
+// integer checks above apply. On edit only the values the edit sets are
+// passed, so a stored timeout of 0 goes back untouched like before.
 function checkMonitorTiming(s: KumaSession, timing: MonitorTiming): void {
+  const interval = timing.interval;
+  if (interval !== undefined && !Number.isInteger(interval.value)) {
+    fail(2, `${interval.name} must be an integer number of seconds, got "${interval.value}"`);
+  }
+  const retryInterval = timing.retryInterval;
+  if (retryInterval !== undefined && !Number.isInteger(retryInterval.value)) {
+    fail(
+      2,
+      `${retryInterval.name} must be an integer number of seconds, got "${retryInterval.value}"`,
+    );
+  }
   if (s.majorVersion < 2) {
-    const interval = timing.interval;
     if (
       interval !== undefined &&
       (interval.value < MIN_INTERVAL_SECOND || interval.value > MAX_INTERVAL_SECOND)
@@ -336,6 +411,12 @@ function checkMonitorTiming(s: KumaSession, timing: MonitorTiming): void {
         `${interval.name} must be between ${MIN_INTERVAL_SECOND} and ${MAX_INTERVAL_SECOND} seconds, got "${interval.value}"`,
       );
     }
+    if (retryInterval !== undefined && retryInterval.value < MIN_INTERVAL_SECOND) {
+      fail(
+        2,
+        `${retryInterval.name} must be at least ${MIN_INTERVAL_SECOND} seconds on Uptime Kuma 1.x, got "${retryInterval.value}"`,
+      );
+    }
     const timeout = timing.timeout;
     if (timeout !== undefined && timeout.value <= 0) {
       fail(
@@ -343,19 +424,35 @@ function checkMonitorTiming(s: KumaSession, timing: MonitorTiming): void {
         `${timeout.name} must be a positive number of seconds, got "${timeout.value}"; Kuma 1.23 turns 0 into interval × 800 seconds`,
       );
     }
-    return;
-  }
-  const retryInterval = timing.retryInterval;
-  if (retryInterval !== undefined && retryInterval.value < 1) {
-    fail(2, `${retryInterval.name} must be at least 1 second on Uptime Kuma 2.x`);
   }
 }
 
-// --set lands in argv; the secret fields only go through --config-file.
+// A URL carries credentials as user[:pass]@host — a token in the username
+// slot counts too. redactUrl hides one the same way: when the URL does not
+// parse, "@" marks a credential boundary the parser could not find, so the
+// value counts as holding a secret.
+export function urlCarriesCredentials(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return (
+      parsed.username !== "" ||
+      parsed.password !== "" ||
+      (parsed.host === "" && value.includes("@"))
+    );
+  } catch {
+    return value.includes("@");
+  }
+}
+
+// --set lands in argv; the secret fields only go through --config-file, and
+// so does a url carrying credentials.
 function refuseSecretSets(sets: Record<string, unknown>): void {
   for (const key of Object.keys(sets)) {
     if (HATCH_SECRET_KEYS.has(key)) {
       fail(2, `--set ${key}=... would put a secret in the command line; use --config-file instead`);
+    }
+    if (key === "url" && typeof sets[key] === "string" && urlCarriesCredentials(sets[key])) {
+      fail(2, `--set url=... would put credentials in the command line; use --config-file instead`);
     }
   }
 }
@@ -411,6 +508,54 @@ function checkDockerHost(s: KumaSession, dockerHost: unknown): void {
   }
 }
 
+// Every notification id sent must name a row Kuma pushed in notificationList:
+// 1.23's add stores the monitor first, and its updateMonitorNotification only
+// inserts into monitor_notification afterwards — a foreign-key failure there
+// leaves a half-created monitor (editMonitor likewise stores, wipes the old
+// links, then fails). Checking before the call keeps the mutation atomic.
+function checkNotificationIds(s: KumaSession, value: unknown): void {
+  for (const id of notificationIdArray(value)) {
+    if (!s.notificationById(id)) fail(1, `notification ${id} not found`);
+  }
+}
+
+// The official image ships no tailscale binary, so the picker hides
+// tailscale-ping when info.isContainer is set. Checked on the type the merged
+// monitor ends up with — on add always, on edit only when the type changes.
+function checkTailscalePing(s: KumaSession, type: unknown): void {
+  if (type === "tailscale-ping" && s.isContainer === true) {
+    fail(
+      2,
+      "tailscale-ping is not available: the server reports it runs in a container, which has no tailscale binary",
+    );
+  }
+}
+
+// The gamedig picker offers getGameList's entries; a game outside the list
+// creates a monitor that goes down at its first check. Each entry's keys are
+// the codes the lookup accepts (the UI stores keys[0], aliases resolve too).
+async function checkGameId(s: KumaSession, monitor: Record<string, unknown>): Promise<void> {
+  const game = monitor.game;
+  if (typeof game !== "string" || game === "") return; // needString reports an empty one
+  // gamedig resolves "protocol-*" without consulting its game list, so it is
+  // passed through like Kuma passes monitor.game.
+  if (game.startsWith("protocol-")) return;
+  const res = await s.request("getGameList");
+  const list = res?.gameList;
+  if (!Array.isArray(list)) fail(70, "unexpected getGameList response");
+  for (const entry of list) {
+    const keys = (entry as { keys?: unknown }).keys;
+    if (!Array.isArray(keys)) fail(70, "unexpected getGameList response");
+    // an alias resolves to the entry, but the UI stores keys[0] — write it
+    // back so the stored id is one the 2.x migrations understand.
+    if (keys.includes(game)) {
+      monitor.game = keys[0];
+      return;
+    }
+  }
+  fail(1, `game "${game}" is not in the server's game list`);
+}
+
 // A hatch value for a key that has a typed flag goes through the flag's
 // parser; flags take strings, so a string here parses the same way while a
 // number is written out in plain decimal first (String() would give "1e-7",
@@ -443,6 +588,16 @@ function parseTimeoutSeconds(value: string, flag: string): number {
   const n = decimalNumber(value);
   if (!Number.isFinite(n) || n < 0) {
     fail(2, `${flag} must be a non-negative number of seconds, got "${value}"`);
+  }
+  return n;
+}
+
+// The UI's packet-size input is min=1 max=65500 step=1 (EditMonitor.vue,
+// PING_PACKET_SIZE_MAX of src/util.ts on 2.x).
+function parsePacketSize(value: string, flag: string): number {
+  const n = decimalNumber(value);
+  if (!Number.isInteger(n) || n < 1 || n > 65500) {
+    fail(2, `${flag} must be an integer between 1 and 65500, got "${value}"`);
   }
   return n;
 }
@@ -483,9 +638,15 @@ const HATCH_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unknow
   maxretries: (v, k) => hatchNumber(v, k, parseNonNegativeInteger),
   timeout: (v, k) => hatchNumber(v, k, parseTimeoutSeconds),
   port: (v, k) => hatchNumber(v, k, parsePort),
-  packetSize: (v, k) => hatchNumber(v, k, parsePositiveInteger),
+  packetSize: (v, k) => hatchNumber(v, k, parsePacketSize),
   proxyId: (v, k) => (v === null ? null : hatchNumber(v, k, parseId)),
   parent: (v) => normalizeParent(v),
+  // a parsed JSON value like an array skips the --set credential scan and
+  // would be stored as a non-string url, so the key takes only string | null
+  url: (v, k) => {
+    if (v !== null && typeof v !== "string") fail(2, `${k} must be a string or null`);
+    return v;
+  },
   docker_host: (v, k) => (v === null ? null : hatchNumber(v, k, parseId)),
   dns_resolve_type: (v, k) => {
     if (typeof v !== "string" || !(DNS_RESOLVE_TYPES as readonly string[]).includes(v)) {
@@ -594,6 +755,8 @@ const capsTimeout = (s: KumaSession, type: unknown): boolean =>
 // exit 2 before sending, and keeps the CLI from storing a ping that every
 // later save would fail on.
 function checkKuma2Ping(s: KumaSession, monitor: Record<string, unknown>): void {
+  // 2.x's Monitor.validate runs on every save, and only on a truthy timeout:
+  // a 0 stays stored untouched, so it is skipped here the same way.
   if (s.majorVersion < 2 || monitor.type !== "ping" || !monitor.timeout) return;
   const timeout = Math.round(Number(monitor.timeout));
   // Kuma's validate compares the value as JavaScript does (a numeric string
@@ -720,7 +883,10 @@ function validateFinalMonitor(
   if (type === "push" && inScope("pushToken")) {
     const token = monitor.pushToken;
     if (typeof token !== "string" || token === "") {
-      fail(2, "pushToken must be a non-empty string");
+      fail(
+        2,
+        "pushToken must be a non-empty string; a monitor that has none needs one passed with --set pushToken=<token>",
+      );
     }
   }
   // dns_resolve_server is required only of a dns monitor; on edit it is
@@ -966,10 +1132,20 @@ export function registerMonitors(program: Command): void {
     .option("--config-file <path>", "JSON file of monitor fields")
     .action(async (opts) => {
       const type = opts.type as string;
-      const urlTypes =
-        type === "http" || type === "keyword" || type === "json-query" || type === "real-browser";
-      if (urlTypes && !opts.url) {
-        fail(2, `--type ${type} requires --url`);
+      // A type-specific flag on another type would be stored ignored.
+      for (const { flag, opt, types } of TYPE_FLAGS) {
+        const v = opts[opt] as unknown;
+        const supplied = Array.isArray(v) ? v.length > 0 : v !== undefined;
+        if (supplied && !types.includes(type)) {
+          fail(2, `${flag} only applies to --type ${types.join(", ")}`);
+        }
+      }
+      const urlTypes = (URL_TYPES as readonly string[]).includes(type);
+      if (typeof opts.url === "string" && urlCarriesCredentials(opts.url)) {
+        fail(
+          2,
+          "--url ... would put credentials in the command line; pass the url through --config-file instead",
+        );
       }
       if ((type === "keyword" || type === "grpc-keyword") && !opts.keyword) {
         fail(2, `--type ${type} requires --keyword`);
@@ -1040,6 +1216,19 @@ export function registerMonitors(program: Command): void {
       refuseSecretSets(sets);
       validateHatchValues(sets);
       validateHatchValues(fileConfig);
+      // A credential-bearing url only fits --config-file, so the flag cannot
+      // be required on its own: anything supplied on a later-precedence
+      // source counts, and a null or empty merged value fails downstream on
+      // "url must be a non-empty string" like the flag-only path did.
+      const mergedUrl =
+        sets.url !== undefined
+          ? sets.url
+          : fileConfig.url !== undefined
+            ? fileConfig.url
+            : opts.url;
+      if (urlTypes && mergedUrl === undefined) {
+        fail(2, `--type ${type} requires --url or a url key in --set/--config-file`);
+      }
       if (sets.notificationIDList !== undefined) {
         checkNotificationIdList(sets.notificationIDList);
       }
@@ -1090,9 +1279,22 @@ export function registerMonitors(program: Command): void {
         pushToken = merged;
       }
 
-      const interval = parseMonitorInterval(opts.interval ?? "60", "--interval");
+      // A hatch key beats the flag in the merge below, so an overridden flag
+      // value is never used — but it is still parsed: a flag the user typed
+      // should fail loudly, not pass silently under the hatch override.
+      if (opts.interval !== undefined) parseMonitorInterval(opts.interval, "--interval");
+      if (opts.retryInterval !== undefined) {
+        parsePositiveNumber(opts.retryInterval, "--retry-interval");
+      }
+      if (opts.timeout !== undefined) parseTimeoutSeconds(opts.timeout, "--timeout");
+      const interval =
+        sets.interval !== undefined || fileConfig.interval !== undefined
+          ? undefined
+          : parseMonitorInterval(opts.interval ?? "60", "--interval");
       const retryInterval =
-        opts.retryInterval === undefined
+        opts.retryInterval === undefined ||
+        sets.retryInterval !== undefined ||
+        fileConfig.retryInterval !== undefined
           ? undefined
           : parsePositiveNumber(opts.retryInterval, "--retry-interval");
       const maxRetries = parseNonNegativeInteger(opts.maxRetries ?? "0", "--max-retries");
@@ -1101,7 +1303,9 @@ export function registerMonitors(program: Command): void {
         "--resend-interval",
       );
       const timeout =
-        opts.timeout === undefined ? undefined : parseTimeoutSeconds(opts.timeout, "--timeout");
+        opts.timeout === undefined || sets.timeout !== undefined || fileConfig.timeout !== undefined
+          ? undefined
+          : parseTimeoutSeconds(opts.timeout, "--timeout");
       const proxyIdOption =
         opts.proxyId === undefined ? undefined : parseId(opts.proxyId, "--proxy-id");
       // dns and radius get their well-known ports from the UI's type watcher
@@ -1120,7 +1324,7 @@ export function registerMonitors(program: Command): void {
           : undefined;
       const packetSize =
         type === "ping" && opts.packetSize !== undefined
-          ? parsePositiveInteger(opts.packetSize, "--packet-size")
+          ? parsePacketSize(opts.packetSize, "--packet-size")
           : undefined;
       const dockerHost = type === "docker" ? parseId(opts.dockerHost, "--docker-host") : undefined;
       // A hatch can null out the host the flag supplied; docker still needs one.
@@ -1157,10 +1361,11 @@ export function registerMonitors(program: Command): void {
         twoXFieldCandidates.push("jsonPathOperator");
       }
       checkKuma2xFields(s, twoXFieldCandidates);
+      checkTailscalePing(s, type);
       checkMonitorTiming(
         s,
         timingFields(sets, fileConfig, {
-          interval: { name: "--interval", value: interval },
+          interval: interval === undefined ? undefined : { name: "--interval", value: interval },
           timeout: timeout === undefined ? undefined : { name: "--timeout", value: timeout },
           retryInterval:
             retryInterval === undefined
@@ -1220,13 +1425,13 @@ export function registerMonitors(program: Command): void {
         type,
         name,
         url: null,
-        interval,
         resendInterval,
         maxretries: maxRetries,
         notificationIDList: notificationIdObject(ids),
         proxyId,
         active,
       };
+      if (interval !== undefined) typed.interval = interval;
       // retryInterval and timeout are only sent when explicit; their defaults
       // derive from the final interval after the merge below.
       if (retryInterval !== undefined) typed.retryInterval = retryInterval;
@@ -1299,6 +1504,11 @@ export function registerMonitors(program: Command): void {
       }
       if (type === "gamedig") typed.game = opts.game;
       if (type === "push") typed.pushToken = pushToken;
+      // The UI's submit() sends httpBodyEncoding null outside http, keyword
+      // and json-query; the MONITOR_DEFAULTS "json" only reaches those types.
+      if (!(BODY_ENCODING_TYPES as readonly string[]).includes(type)) {
+        typed.httpBodyEncoding = null;
+      }
 
       let pushBase = s.url;
       if (pushToken !== undefined) {
@@ -1317,9 +1527,11 @@ export function registerMonitors(program: Command): void {
       };
       if (parentId !== undefined) monitor.parent = parentId;
       monitor.notificationIDList = notificationIdObject(monitor.notificationIDList);
+      checkNotificationIds(s, monitor.notificationIDList);
       deriveMonitorTiming(monitor, defaultTimeoutSeconds(s, type), capsTimeout(s, type));
       validateFinalMonitor(s, monitor);
       checkKuma2Ping(s, monitor);
+      if (type === "gamedig") await checkGameId(s, monitor);
 
       const res = await s.request("add", [monitor]);
       const out: Record<string, unknown> = {
@@ -1448,6 +1660,10 @@ export function registerMonitors(program: Command): void {
       const monitor: Record<string, unknown> = { ...fetched };
       for (const [k, v] of Object.entries(fileConfig)) monitor[k] = v;
       for (const [k, v] of Object.entries(sets)) monitor[k] = v;
+      const typeChanged = monitor.type !== fetched.type;
+      if (opts.jsonPathOperator !== undefined && monitor.type !== "json-query") {
+        fail(2, "--json-path-operator only applies to --type json-query");
+      }
       if (monitor.type === "json-query" && s.majorVersion >= 2) {
         // Like add's typed flags, the flag sits below --config-file and --set;
         // a monitor turned into json-query needs an operator like a new one.
@@ -1466,17 +1682,60 @@ export function registerMonitors(program: Command): void {
       monitor.notificationIDList = notificationIdObject(monitor.notificationIDList);
       const touched = new Set([...Object.keys(fileConfig), ...Object.keys(sets)]);
       if (parentOpt !== undefined) touched.add("parent");
+      // Like every other field, a stored value the edit does not touch is
+      // not re-judged — the check only covers a list this edit supplies.
+      if (touched.has("notificationIDList")) {
+        checkNotificationIds(s, monitor.notificationIDList);
+      }
       const timingTouched =
         sets.interval !== undefined ||
         fileConfig.interval !== undefined ||
         sets.timeout !== undefined ||
         fileConfig.timeout !== undefined;
-      if (timingTouched) {
-        const type = typeof monitor.type === "string" ? monitor.type : "";
+      const type = typeof monitor.type === "string" ? monitor.type : "";
+      // A type change that keeps a stored timeout the new type cannot run is
+      // normalized like an unset one — on 1.23 a nonpositive timeout reads as
+      // interval × 800 seconds at check time, so a stored 0 (or less) gets the
+      // type default, while on 2.x a stored 0 is legal and kept. A timeout the
+      // same edit sets is never overwritten.
+      const timeoutUnset =
+        typeChanged &&
+        !touched.has("timeout") &&
+        (typeof monitor.timeout !== "number" ||
+          monitor.timeout < 0 ||
+          (monitor.timeout === 0 && s.majorVersion < 2));
+      if (timeoutUnset) {
+        monitor.timeout = defaultTimeoutSeconds(s, type);
+      }
+      // The UI's submit() sends httpBodyEncoding null outside the encoding
+      // types on both versions; a stored "json" does not follow the type
+      // change, but one the edit sets does.
+      if (
+        typeChanged &&
+        !touched.has("httpBodyEncoding") &&
+        !(BODY_ENCODING_TYPES as readonly string[]).includes(type)
+      ) {
+        monitor.httpBodyEncoding = null;
+      }
+      // The UI's interval watcher moves retryInterval only while the two
+      // stored values were equal; a retryInterval the edit sets wins.
+      if (
+        monitor.interval !== fetched.interval &&
+        sets.retryInterval === undefined &&
+        fileConfig.retryInterval === undefined &&
+        fetched.retryInterval === fetched.interval
+      ) {
+        monitor.retryInterval = monitor.interval;
+      }
+      if (timingTouched || timeoutUnset) {
         deriveMonitorTiming(monitor, defaultTimeoutSeconds(s, type), capsTimeout(s, type));
       }
-      validateFinalMonitor(s, monitor, { touched, typeChanged: monitor.type !== fetched.type });
+      validateFinalMonitor(s, monitor, { touched, typeChanged });
       checkKuma2Ping(s, monitor);
+      if (typeChanged) checkTailscalePing(s, monitor.type);
+      if (monitor.type === "gamedig" && (typeChanged || touched.has("game"))) {
+        await checkGameId(s, monitor);
+      }
       await s.request("editMonitor", [monitor]);
       // editMonitor ignores fields like `active`, so print what Kuma saved.
       // The save already happened, so a failed re-read degrades to the sent

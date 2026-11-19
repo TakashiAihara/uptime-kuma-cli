@@ -45,6 +45,15 @@ beforeEach(async () => {
       http(2, "dav", { notificationIDList: [4] }),
       { ...http(9, "trade1 push"), type: "push", url: null, active: false },
     ],
+    // the notification rows the fixture monitors link to; none is a default
+    notifications: [3, 4, 5].map((id) => ({
+      id,
+      name: `n${id}`,
+      active: true,
+      isDefault: false,
+      userId: 1,
+      config: "{}",
+    })),
   });
 });
 afterEach(async () => {
@@ -97,19 +106,20 @@ describe("monitors list", () => {
     expect(r.code).toBe(0);
     expect(r.stdout).not.toContain("fixture-hidden-u1");
     const out = r.json();
-    expect(out.find((m: any) => m.id === 7).url).toBe("https://u1:***@x.example.com/p");
+    expect(out.find((m: any) => m.id === 7).url).toBe("https://***@x.example.com/p");
     expect(out.find((m: any) => m.id === 2).url).toBe("https://dav.example.com");
   });
 
-  test("hides a schemeless user:pass@host value entirely", async () => {
+  test("hides a schemeless credential and a lone userinfo token entirely", async () => {
     kuma.state.monitors.find((m) => m.id === 7)!.url = "u1:fixture-hidden-u3@x.example.com:2375";
-    kuma.state.monitors.find((m) => m.id === 2)!.url = "https://user@x.example.com/";
+    kuma.state.monitors.find((m) => m.id === 2)!.url = "https://fixture-hidden-t1@x.example.com/";
     const r = await run(sb, ["monitors", "list"], creds(kuma.url));
     expect(r.code).toBe(0);
     expect(r.stdout).not.toContain("fixture-hidden-u3");
+    expect(r.stdout).not.toContain("fixture-hidden-t1");
     const out = r.json();
     expect(out.find((m: any) => m.id === 7).url).toBe("***");
-    expect(out.find((m: any) => m.id === 2).url).toBe("https://user@x.example.com/");
+    expect(out.find((m: any) => m.id === 2).url).toBe("https://***@x.example.com/");
   });
 
   test("--name filters case-insensitively by substring", async () => {
@@ -203,7 +213,7 @@ describe("monitors get", () => {
     const r = await run(sb, ["monitors", "get", "7"], creds(kuma.url));
     expect(r.code).toBe(0);
     expect(r.stdout).not.toContain("fixture-hidden-u2");
-    expect(r.json().url).toBe("https://u1:***@x.example.com/");
+    expect(r.json().url).toBe("https://***@x.example.com/");
   });
 
   test("an empty secret field stays empty so the reader can tell it is unset", async () => {
@@ -405,6 +415,14 @@ describe("monitors add", () => {
   });
 
   test("--notifications-from copies an object-shaped list and --notification-id adds to it", async () => {
+    kuma.state.notifications.push({
+      id: 8,
+      name: "n8",
+      active: true,
+      isDefault: false,
+      userId: 1,
+      config: "{}",
+    });
     const r = await run(
       sb,
       [
@@ -442,9 +460,14 @@ describe("monitors add", () => {
   test("--notifications-from keeps the default notifications on top of the copied list", async () => {
     // unlike the UI's Clone, which sends the source list alone: `add` follows
     // the UI's Add flow, where defaults attach to every new monitor
-    kuma.state.notifications = [
-      { id: 6, name: "def", active: true, isDefault: true, userId: 1, config: "{}" },
-    ];
+    kuma.state.notifications.push({
+      id: 6,
+      name: "def",
+      active: true,
+      isDefault: true,
+      userId: 1,
+      config: "{}",
+    });
     const r = await run(
       sb,
       ["monitors", "add", "--type", "push", "--name", "n3", "--notifications-from", "7"],
@@ -456,6 +479,35 @@ describe("monitors add", () => {
       "5": true,
       "6": true,
     });
+  });
+
+  test.each([[["--notification-id", "99"]], [["--set", "notificationIDList=[99]"]]])(
+    "a notification id missing from notificationList exits 1: %p",
+    async (extra) => {
+      const r = await run(
+        sb,
+        ["monitors", "add", "--type", "push", "--name", "nn", ...extra],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("notification 99 not found");
+      expect(addCalls()).toHaveLength(0);
+    },
+  );
+
+  test("--notifications-from fails on ids a deleted notification left behind", async () => {
+    kuma.state.monitors.push({
+      ...http(20, "stale"),
+      notificationIDList: { "77": true },
+    });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "push", "--name", "nn", "--notifications-from", "20"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("notification 77 not found");
+    expect(addCalls()).toHaveLength(0);
   });
 
   test("--proxy-id, --max-retries, --retry-interval, --resend-interval and --timeout are sent as numbers", async () => {
@@ -528,6 +580,82 @@ describe("monitors add", () => {
     expect(r.code).toBe(2);
     expect(r.stderr).toContain(word);
     expect(kuma.calls).toHaveLength(0);
+  });
+
+  test.each([
+    [["--type", "push", "--name", "x", "--keyword", "k"], "--keyword"],
+    [["--type", "push", "--name", "x", "--packet-size", "32"], "--packet-size"],
+    [["--type", "http", "--name", "x", "--url", "https://x", "--mqtt-topic", "t"], "--mqtt-topic"],
+    [["--type", "port", "--name", "x", "--hostname", "h", "--port", "1", "--game", "g"], "--game"],
+    [["--type", "push", "--name", "x", "--docker-container", "c"], "--docker-container"],
+    [["--type", "http", "--name", "x", "--url", "https://x", "--push-token", "t"], "--push-token"],
+  ])("a type-specific flag on another type exits 2 before connecting: %p", async (args, word) => {
+    const r = await run(sb, ["monitors", "add", ...args], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(`${word} only applies to --type`);
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test.each(["push", "port", "ping"])(
+    "a %s add sends httpBodyEncoding null like the UI's submit",
+    async (type) => {
+      const extra =
+        type === "push"
+          ? []
+          : type === "port"
+            ? ["--hostname", "h", "--port", "80"]
+            : ["--hostname", "h"];
+      const r = await run(
+        sb,
+        ["monitors", "add", "--type", type, "--name", `be-${type}`, ...extra],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(0);
+      expect((addCalls()[0]!.args[0] as any).httpBodyEncoding).toBeNull();
+    },
+  );
+
+  test("an http add keeps the json httpBodyEncoding default", async () => {
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "http", "--name", "be-http", "--url", "https://b.example.com"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).httpBodyEncoding).toBe("json");
+  });
+
+  test("a credential-bearing url in --config-file satisfies the url requirement", async () => {
+    const userPass = ["op", "pw-fixture"].join(":");
+    const url = `https://${userPass}@c.example.com/watched`;
+    const f = join(sb.dir, "cfg.json");
+    writeFileSync(f, JSON.stringify({ url }));
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "http", "--name", "cfg-url", "--config-file", f],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).url).toBe(url);
+  });
+
+  test("a --set url satisfies the url requirement without --url", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "set-url",
+        "--set",
+        "url=https://s.example.com",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).url).toBe("https://s.example.com");
   });
 
   test("adds default notifications and, for http, the default proxy like the UI", async () => {
@@ -707,7 +835,7 @@ describe("monitors add", () => {
     expect(r.code).toBe(0);
     const out = r.json();
     expect(out.pushUrl).toBe(
-      `https://user:***@status.example.org/api/push/${out.pushToken}?status=up&msg=OK&ping=`,
+      `https://***@status.example.org/api/push/${out.pushToken}?status=up&msg=OK&ping=`,
     );
     expect(r.stdout).not.toContain("s3cret");
   });
@@ -721,7 +849,7 @@ describe("monitors add", () => {
     );
     expect(r.code).toBe(0);
     expect(r.json().pushUrl).toBe(
-      "https://user:***@status.example.org/kuma/api/push/..?status=up&msg=OK&ping=",
+      "https://***@status.example.org/kuma/api/push/..?status=up&msg=OK&ping=",
     );
   });
 
@@ -731,7 +859,7 @@ describe("monitors add", () => {
     expect(r.code).toBe(0);
     const out = r.json();
     expect(out.pushUrl).toBe(
-      `${kuma.url.replace("://", "://user:***@")}/api/push/${out.pushToken}?status=up&msg=OK&ping=`,
+      `${kuma.url.replace("://", "://***@")}/api/push/${out.pushToken}?status=up&msg=OK&ping=`,
     );
     expect(r.stdout).not.toContain("s3cret");
   });
@@ -754,6 +882,10 @@ describe("monitors add", () => {
     [["--type", "push", "--name", "x", "--timeout", "1e2"], "--timeout"],
     [
       ["--type", "ping", "--name", "x", "--hostname", "h", "--packet-size", "0x10"],
+      "--packet-size",
+    ],
+    [
+      ["--type", "ping", "--name", "x", "--hostname", "h", "--packet-size", "65501"],
       "--packet-size",
     ],
     [["--type", "port", "--name", "x", "--hostname", "h", "--port", "1e2"], "--port"],
@@ -807,6 +939,27 @@ describe("monitors add", () => {
     );
     expect(r.code).toBe(0);
     expect((addCalls()[0]!.args[0] as any).packetSize).toBe(128);
+  });
+
+  test("ping: --packet-size 65500 is the accepted upper bound", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "ping",
+        "--name",
+        "p3",
+        "--hostname",
+        "10.0.0.1",
+        "--packet-size",
+        "65500",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).packetSize).toBe(65500);
   });
 
   test("dns: sends hostname, resolver 1.1.1.1, type A and port 53", async () => {
@@ -939,6 +1092,196 @@ describe("monitors add", () => {
     expect(sent.port).toBe(25565);
     expect(sent.game).toBe("minecraft");
     expect(sent.gamedigGivenPortOnly).toBe(true);
+  });
+
+  test("gamedig: a game alias is accepted and stored as the canonical keys[0]", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "gamedig",
+        "--name",
+        "mcpe",
+        "--hostname",
+        "mc.example.com",
+        "--port",
+        "19132",
+        "--game",
+        "minecraftpe",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).game).toBe("minecraft");
+  });
+
+  test("gamedig: a protocol-* game is accepted without the game list", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "gamedig",
+        "--name",
+        "valve",
+        "--hostname",
+        "gs.example.com",
+        "--port",
+        "27015",
+        "--game",
+        "protocol-valve",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).game).toBe("protocol-valve");
+    expect(kuma.calls.map((c) => c.event)).not.toContain("getGameList");
+  });
+
+  test("gamedig: a game outside the server's game list exits 1 before add", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "gamedig",
+        "--name",
+        "bad",
+        "--hostname",
+        "gs.example.com",
+        "--port",
+        "28960",
+        "--game",
+        "not-a-game",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain('game "not-a-game" is not in the server');
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test("gamedig: a malformed getGameList response exits 70", async () => {
+    kuma.state.getGameListResult = { ok: true };
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "gamedig",
+        "--name",
+        "bad",
+        "--hostname",
+        "gs.example.com",
+        "--port",
+        "28960",
+        "--game",
+        "minecraft",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(70);
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test("gamedig: a gameList entry without keys exits 70", async () => {
+    kuma.state.getGameListResult = { ok: true, gameList: [{ pretty: "Minecraft" }] };
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "gamedig",
+        "--name",
+        "bad",
+        "--hostname",
+        "gs.example.com",
+        "--port",
+        "28960",
+        "--game",
+        "minecraft",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(70);
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test("edit --set game is checked against the server's game list", async () => {
+    kuma.state.monitors.push({
+      ...http(11, "mc"),
+      type: "gamedig",
+      url: null,
+      hostname: "mc.example.com",
+      port: 25565,
+      game: "minecraft",
+    });
+    const r = await run(sb, ["monitors", "edit", "11", "--set", "game=nope"], creds(kuma.url));
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain('game "nope" is not in the server');
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit keeps a stored game the list no longer offers when it is untouched", async () => {
+    kuma.state.monitors.push({
+      ...http(11, "old"),
+      type: "gamedig",
+      url: null,
+      hostname: "old.example.com",
+      port: 27015,
+      game: "delisted",
+    });
+    const r = await run(sb, ["monitors", "edit", "11", "--set", "name=old2"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.game).toBe("delisted");
+  });
+
+  test("tailscale-ping on a container server exits 2 before add", async () => {
+    kuma.state.info!.isContainer = true;
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "tailscale-ping",
+        "--name",
+        "ts",
+        "--hostname",
+        "node.tailnet.ts.net",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("tailscale-ping is not available");
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test("edit --set type=tailscale-ping on a container server exits 2", async () => {
+    kuma.state.info!.isContainer = true;
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "type=tailscale-ping",
+        "--set",
+        "hostname=node.tailnet.ts.net",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("tailscale-ping is not available");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
   });
 
   test("tailscale-ping: sends hostname only", async () => {
@@ -1882,6 +2225,98 @@ describe("monitors add", () => {
     expect(kuma.calls).toHaveLength(0);
   });
 
+  test.each([
+    "url=https://u:p@example.com",
+    "url=ftp://u:p@example.com/x",
+    "url=u:p@example.com",
+    "url=https://tok123@example.com",
+  ])("--set %s would put credentials in argv and exits 2", async (set) => {
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "http", "--name", "x", "--url", "https://x", "--set", set],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--config-file");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("a url carrying credentials is accepted through --config-file", async () => {
+    const f = join(sb.dir, "url-creds.json");
+    writeFileSync(f, JSON.stringify({ url: "https://u:p@example.com" }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        "--config-file",
+        f,
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).url).toBe("https://u:p@example.com");
+  });
+
+  test("the --url flag refuses a credentialed url like --set does", async () => {
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "http", "--name", "x", "--url", "https://u:p@example.com"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--config-file");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("a url with @ only in its path is accepted through --set", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        "--set",
+        "url=https://example.com/@user",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).url).toBe("https://example.com/@user");
+  });
+
+  test("a plain url through --set is accepted", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "x",
+        "--url",
+        "https://x",
+        "--set",
+        "url=https://plain.example.com",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).url).toBe("https://plain.example.com");
+  });
+
   // A 2.x-only field passes the pre-connect allowlist but is refused once the
   // server reports 1.x: 1.23's add would fail on the unknown column
   test("a Kuma 2.x field in --config-file exits 2 on a 1.x server before add", async () => {
@@ -2213,14 +2648,14 @@ describe("monitors add", () => {
         "--set",
         "interval=100",
         "--set",
-        "retryInterval=10",
+        "retryInterval=25",
       ],
       creds(kuma.url),
     );
     expect(r.code).toBe(0);
     const sent = addCalls()[0]!.args[0] as Record<string, any>;
     expect(sent.interval).toBe(100);
-    expect(sent.retryInterval).toBe(10);
+    expect(sent.retryInterval).toBe(25);
     expect(sent.timeout).toBe(30);
   });
 
@@ -2331,6 +2766,7 @@ describe("monitors add", () => {
     ["port=[80]"],
     ["packetSize=0"],
     ["packetSize=1.5"],
+    ["packetSize=65501"],
     ["proxyId=abc"],
     ["proxyId=0"],
     ["dns_resolve_type=BOGUS"],
@@ -3337,6 +3773,126 @@ describe("monitors add", () => {
     expect((addCalls()[0]!.args[0] as any).interval).toBe(20);
   });
 
+  test.each([[["--retry-interval", "19"]], [["--set", "retryInterval=19"]]])(
+    "a retryInterval below 20 on Kuma 1.x exits 2 after connecting: %p",
+    async (extra) => {
+      const r = await run(
+        sb,
+        [
+          "monitors",
+          "add",
+          "--type",
+          "http",
+          "--name",
+          "x",
+          "--url",
+          "https://x.example.com",
+          ...extra,
+        ],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("must be at least 20 seconds on Uptime Kuma 1.x");
+      expect(addCalls()).toHaveLength(0);
+    },
+  );
+
+  test("--retry-interval 20 is accepted on Kuma 1.x", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        "--retry-interval",
+        "20",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).retryInterval).toBe(20);
+  });
+
+  test.each([
+    ["interval", ["--interval", "1.5"]],
+    ["interval", ["--set", "interval=1.5"]],
+    ["retryInterval", ["--retry-interval", "25.5"]],
+    ["retryInterval", ["--set", "retryInterval=25.5"]],
+  ])("a non-integer %s exits 2 after connecting: %p", async (_field, extra) => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        ...extra,
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("must be an integer number of seconds");
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test.each([
+    [["--interval", "abc"], "interval=60"],
+    [["--retry-interval", "abc"], "retryInterval=30"],
+    [["--timeout", "abc"], "timeout=10"],
+  ])("a bad timing flag exits 2 even when a hatch overrides it: %p", async (flagArgs, hatch) => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        ...flagArgs,
+        "--set",
+        hatch,
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(kuma.calls).toHaveLength(0);
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test("--set url with a non-string value exits 2 before connecting", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        "--set",
+        'url=["https://u:p@example.com"]',
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("url must be a string or null");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
   test('--expected-value "" exits 2 before connecting', async () => {
     const r = await run(
       sb,
@@ -3430,7 +3986,7 @@ describe("monitors add", () => {
   });
 
   test.each(["redis", "mongodb"])(
-    "%s: --database-query is ignored like the other type-specific flags",
+    "%s: --database-query is refused like the other type-specific flags",
     async (type) => {
       const f = join(sb.dir, `dbnq-${type}.json`);
       writeFileSync(f, JSON.stringify({ databaseConnectionString: "conn" }));
@@ -3450,9 +4006,9 @@ describe("monitors add", () => {
         ],
         creds(kuma.url),
       );
-      expect(r.code).toBe(0);
-      const sent = addCalls()[0]!.args[0] as Record<string, any>;
-      expect(sent.databaseQuery).toBeUndefined();
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("--database-query");
+      expect(addCalls()).toHaveLength(0);
     },
   );
 
@@ -3580,10 +4136,55 @@ describe("monitors edit", () => {
     expect(r.code).toBe(1);
   });
 
-  test("prints what Kuma saved, not the local merge", async () => {
+  test("edit --set active=false exits 2 pointing at pause/resume", async () => {
     const r = await run(sb, ["monitors", "edit", "7", "--set", "active=false"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("active");
+    expect(r.stderr).toContain("pause");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("edit --config-file active=false exits 2 pointing at pause/resume", async () => {
+    const f = join(sb.dir, "act.json");
+    writeFileSync(f, JSON.stringify({ active: false }));
+    const r = await run(sb, ["monitors", "edit", "7", "--config-file", f], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("active");
+    expect(r.stderr).toContain("pause");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("edit --set url carrying credentials exits 2 before connecting", async () => {
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "url=https://u:p@example.com"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--config-file");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("edit --set notificationIDList with an unknown id exits 1 before editMonitor", async () => {
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "notificationIDList=[99]"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("notification 99 not found");
+    expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
+  });
+
+  test("edit keeps stored notification ids a deleted notification left behind", async () => {
+    kuma.state.monitors.push({
+      ...http(21, "stale"),
+      notificationIDList: { "77": true },
+    });
+    const r = await run(sb, ["monitors", "edit", "21", "--set", "name=s2"], creds(kuma.url));
     expect(r.code).toBe(0);
-    expect(r.json().active).toBe(true);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.notificationIDList).toEqual({ "77": true });
   });
 
   test("a failure on the post-edit re-read prints the sent monitor and exits 0", async () => {
@@ -4054,14 +4655,75 @@ describe("monitors edit", () => {
 
   test("edit derives timeout from the final interval like add", async () => {
     const m7 = kuma.state.monitors.find((m) => m.id === 7)!;
-    m7.retryInterval = 60;
+    m7.retryInterval = 90;
     m7.timeout = 48;
     const r = await run(sb, ["monitors", "edit", "7", "--set", "interval=30"], creds(kuma.url));
     expect(r.code).toBe(0);
     const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
     expect(sent.interval).toBe(30);
-    expect(sent.retryInterval).toBe(60);
+    expect(sent.retryInterval).toBe(90);
     expect(sent.timeout).toBe(24);
+  });
+
+  test("edit --set interval moves retryInterval along while the stored values were equal", async () => {
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "interval=30"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.interval).toBe(30);
+    expect(sent.retryInterval).toBe(30);
+  });
+
+  test("edit --set interval leaves a retryInterval set in the same edit alone", async () => {
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "interval=30", "--set", "retryInterval=25"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.interval).toBe(30);
+    expect(sent.retryInterval).toBe(25);
+  });
+
+  test("edit --set type=group normalizes a stored timeout of 0", async () => {
+    kuma.state.monitors.find((m) => m.id === 7)!.timeout = 0;
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "type=group"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.type).toBe("group");
+    expect(sent.timeout).toBe(48);
+  });
+
+  test("edit --set type keeps a positive stored timeout", async () => {
+    kuma.state.monitors.find((m) => m.id === 7)!.timeout = 30;
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "type=group"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.type).toBe("group");
+    expect(sent.timeout).toBe(30);
+  });
+
+  test("edit --set type=group sends httpBodyEncoding null like the UI submit", async () => {
+    kuma.state.monitors.find((m) => m.id === 7)!.httpBodyEncoding = "json";
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "type=group"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.type).toBe("group");
+    expect(sent.httpBodyEncoding).toBeNull();
+  });
+
+  test("edit --config-file retryInterval wins over the interval follow", async () => {
+    const f = join(sb.dir, "edit-ri.json");
+    writeFileSync(f, JSON.stringify({ retryInterval: 25 }));
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "interval=30", "--config-file", f],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.interval).toBe(30);
+    expect(sent.retryInterval).toBe(25);
   });
 
   test("edit a docker monitor: --config-file docker_host null exits 2", async () => {

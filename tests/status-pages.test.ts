@@ -162,9 +162,7 @@ describe("status-pages", () => {
       const r = await run(sb, ["status-pages", "get", "status"], creds(kuma.url));
       expect(r.code).toBe(0);
       expect(r.stdout).not.toContain("urlpw-in-fixture");
-      expect(r.json().publicGroupList[0].monitorList[0].url).toBe(
-        "https://probe:***@example.com/health",
-      );
+      expect(r.json().publicGroupList[0].monitorList[0].url).toBe("https://***@example.com/health");
     });
 
     test("a failed HTTP fetch exits 1 naming the URL", async () => {

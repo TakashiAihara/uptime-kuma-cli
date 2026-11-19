@@ -230,6 +230,11 @@ export type FakeState = {
   // heartbeat-triggered sendStats interleaving with it
   earlyAvgPing: number[];
   testNotificationResult: { ok: boolean; msg: string };
+  // getGameList's gameList: gamedig GameResolver entries, each carrying the
+  // list of game codes the lookup accepts in `keys`
+  gameList: { keys: string[]; pretty?: string }[];
+  // getGameList answer override; null answers state.gameList
+  getGameListResult: Record<string, unknown> | null;
   // getSettings data; primaryBaseURL is what the UI uses for push URLs
   settings: Record<string, unknown>;
   // getSettings answer override; null answers the stored settings with the
@@ -526,7 +531,8 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
           primaryBaseURL: null,
           serverTimezone: "UTC",
           serverTimezoneOffset: "+00:00",
-          // the rest mirrors 2.5.11's sendInfo; no test reads these yet
+          // mirrors 2.5.11's sendInfo; isContainer is the official image's
+          // UPTIME_KUMA_IS_CONTAINER and drives the tailscale-ping refusal
           isContainer: true,
           dbType: "sqlite",
           runtime: { platform: "linux", arch: "x64" },
@@ -537,6 +543,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
           primaryBaseURL: null,
           serverTimezone: "UTC",
           serverTimezoneOffset: "+00:00",
+          isContainer: false,
         },
     infoBeforeLoginAck: profile2x,
     infoDelayMs: 0,
@@ -553,6 +560,12 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     resendStats: {},
     silentStats: [],
     testNotificationResult: { ok: true, msg: "Sent Successfully." },
+    gameList: [
+      { keys: ["minecraft", "minecraftpe"], pretty: "Minecraft" },
+      { keys: ["csgo"], pretty: "Counter-Strike: Global Offensive" },
+      { keys: ["terraria"], pretty: "Terraria" },
+    ],
+    getGameListResult: null,
     settings: {},
     getSettingsResult: null,
     getMonitorResult: null,
@@ -1329,6 +1342,12 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     }));
 
     handle("getTags", () => ({ ok: true, tags: structuredClone(state.tags) }));
+
+    handle("getGameList", () =>
+      state.getGameListResult !== null
+        ? structuredClone(state.getGameListResult)
+        : { ok: true, gameList: structuredClone(state.gameList) },
+    );
 
     handle("addTag", (tag: { name: string; color: string }) => {
       if (state.addTagResult !== null) return state.addTagResult;
