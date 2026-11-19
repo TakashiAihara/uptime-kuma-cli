@@ -162,7 +162,7 @@ describe("monitors add on Kuma 2.x", () => {
     expect(stored(k, "jq").jsonPathOperator).toBe("contains");
   });
 
-  test("--json-path-operator is ignored on a non-json-query type", async () => {
+  test("--json-path-operator on a non-json-query type exits 2", async () => {
     const k = await useFake({ profile: "2.x" });
     const r = await run(
       sb,
@@ -180,9 +180,9 @@ describe("monitors add on Kuma 2.x", () => {
       ],
       creds(k.url),
     );
-    expect(r.code).toBe(0);
-    // the flag is ignored; the 2.x default every type gets stays
-    expect(stored(k, "http-x").jsonPathOperator).toBe("==");
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--json-path-operator only applies to --type json-query");
+    expect(k.calls).toHaveLength(0);
   });
 
   test("an http add on 2.x stores the == operator default like the 2.x UI", async () => {
@@ -194,6 +194,27 @@ describe("monitors add on Kuma 2.x", () => {
     );
     expect(r.code).toBe(0);
     expect(stored(k, "h2").jsonPathOperator).toBe("==");
+  });
+
+  test("tailscale-ping exits 2 on a container server like the picker's hidden type", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "tailscale-ping",
+        "--name",
+        "ts",
+        "--hostname",
+        "node.tailnet.ts.net",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("tailscale-ping is not available");
+    expect(addCalls(k)).toHaveLength(0);
   });
 
   test("--set jsonPathOperator with an unknown operator exits 2 before connecting", async () => {
@@ -346,7 +367,7 @@ describe("monitors edit on Kuma 2.x", () => {
     expect(stored(k, "jq").jsonPathOperator).toBe(">");
   });
 
-  test("edit --json-path-operator is ignored on a non-json-query monitor", async () => {
+  test("edit --json-path-operator on a non-json-query monitor exits 2", async () => {
     // a real 2.x http monitor carries the "==" the add defaults gave it
     const k = await useFake({
       profile: "2.x",
@@ -357,9 +378,9 @@ describe("monitors edit on Kuma 2.x", () => {
       ["monitors", "edit", "7", "--json-path-operator", "!=", "--set", "description=x"],
       creds(k.url),
     );
-    expect(r.code).toBe(0);
-    const sent = editCalls(k)[0]!.args[0] as Record<string, unknown>;
-    expect(sent.jsonPathOperator).toBe("==");
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--json-path-operator only applies to --type json-query");
+    expect(editCalls(k)).toHaveLength(0);
   });
 
   test.each([
@@ -525,7 +546,7 @@ describe("2.x-only fields on Kuma 1.x", () => {
     expect(sent).not.toHaveProperty("jsonPathOperator");
   });
 
-  test("--json-path-operator on a non-json-query add is ignored on a 1.x server too", async () => {
+  test("--json-path-operator on a non-json-query add exits 2 on a 1.x server too", async () => {
     const k = await useFake({});
     const r = await run(
       sb,
@@ -543,8 +564,9 @@ describe("2.x-only fields on Kuma 1.x", () => {
       ],
       creds(k.url),
     );
-    expect(r.code).toBe(0);
-    expect(stored(k, "h1")).not.toHaveProperty("jsonPathOperator");
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--json-path-operator only applies to --type json-query");
+    expect(k.calls).toHaveLength(0);
   });
 
   test("add --set with a non-secret 2.x key exits 2 on a 1.x server before add", async () => {
@@ -890,7 +912,30 @@ describe("monitor timing on Kuma 2.x", () => {
     expect(stored(k, "x").timeout).toBe(0);
   });
 
-  test("--retry-interval 0.5 exits 2 after connect with no add call", async () => {
+  test("--retry-interval 0 exits 2 before connecting on 2.x too", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        "--retry-interval",
+        "0",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--retry-interval");
+    expect(k.calls).toHaveLength(0);
+  });
+
+  test("--retry-interval 0.5 exits 2 after connect naming the integer rule", async () => {
     const k = await useFake({ profile: "2.x" });
     const r = await run(
       sb,
@@ -909,8 +954,7 @@ describe("monitor timing on Kuma 2.x", () => {
       creds(k.url),
     );
     expect(r.code).toBe(2);
-    expect(r.stderr).toContain("--retry-interval must be at least 1 second on Uptime Kuma 2.x");
-    expect(k.calls.map((c) => c.event)).toContain("login");
+    expect(r.stderr).toContain("--retry-interval must be an integer");
     expect(addCalls(k)).toHaveLength(0);
   });
 

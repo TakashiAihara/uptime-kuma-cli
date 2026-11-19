@@ -471,4 +471,65 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
       expect(r.json()).toEqual({ id: statsId, deleted: true });
     }, 120_000);
   });
+
+  describe("gamedig / tailscale-ping", () => {
+    test("add a paused gamedig monitor with a game in the server's list", async () => {
+      const r = await cliRun(sb, [
+        "monitors",
+        "add",
+        "--type",
+        "gamedig",
+        "--name",
+        "it-game",
+        "--hostname",
+        "127.0.0.1",
+        "--port",
+        "25565",
+        "--game",
+        "minecraft",
+        "--paused",
+      ]);
+      expect(r.code).toBe(0);
+      const id = r.json().id;
+      const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
+      expect(del.code).toBe(0);
+    }, 120_000);
+
+    test("a game outside the server's list exits 1 without creating a monitor", async () => {
+      const r = await cliRun(sb, [
+        "monitors",
+        "add",
+        "--type",
+        "gamedig",
+        "--name",
+        "it-game-bad",
+        "--hostname",
+        "127.0.0.1",
+        "--port",
+        "25565",
+        "--game",
+        "not-a-real-game-xyz",
+        "--paused",
+      ]);
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("not in the server's game list");
+      const list = await cliRun(sb, ["monitors", "list", "--name", "it-game-bad"]);
+      expect(list.json()).toEqual([]);
+    }, 120_000);
+
+    test("tailscale-ping exits 2 on a container server like the picker's hidden type", async () => {
+      const r = await cliRun(sb, [
+        "monitors",
+        "add",
+        "--type",
+        "tailscale-ping",
+        "--name",
+        "it-ts",
+        "--hostname",
+        "127.0.0.1",
+      ]);
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("no tailscale binary");
+    }, 120_000);
+  });
 });
