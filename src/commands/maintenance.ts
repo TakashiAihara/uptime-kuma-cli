@@ -197,24 +197,31 @@ const CRON_PART_LIMITS = [
 
 // croner substitutes "?" with the field's current value at run time, so a
 // compound entry is only checkable where every possible value gives the
-// same verdict: a whole "?" entry, a step start ("?/5" — the current value
-// always sits inside the field's range), a day-of-week "?L" or "?#n" (the
-// rest side always parses), and a step value ("5/?") on day-of-month or
+// same verdict: a whole "?" entry; a step value ("5/?") on day-of-month or
 // month only, where the current value can never be 0 so the step stays in
-// 1..size. A "?" in a range bound or a "#" nth flips the verdict with the
-// clock, so those are refused.
+// 1..size; a step start ("?/5") where croner 8 always lands in-range —
+// croner 6 iterates from it raw, so on day-of-month or month a 31st or a
+// December "?" would start past the bitmap and the field goes all-zero;
+// a day-of-week "?L" or "?#n" (the rest side always parses); and a range
+// bound pinned to the field's end ("min-?" or "?-max"), since the current
+// value never crosses it — day-of-week's real top is 6 (getDay), though 7
+// stays a legal bound. Anywhere else "?" flips the verdict with the clock.
 function questionOk(entry: string, partIndex: number, version: CronMajor): boolean {
   if (!entry.includes("?")) return true;
+  const { min, max } = CRON_PART_LIMITS[partIndex]!;
   let rest = entry;
-  if (version === "8" && partIndex === 5) {
-    const seg = entry.split("#");
-    rest = seg[0]!;
-    if (seg[1]?.includes("?") === true) return false;
+  if (version === "8" && partIndex === 5) rest = entry.split("#")[0]!;
+  const lowerQ = /^(\d+)-\?$/.exec(rest);
+  if (lowerQ !== null) return Number(lowerQ[1]) === min;
+  const upperQ = /^\?-(\d+)$/.exec(rest);
+  if (upperQ !== null) {
+    const bound = Number(upperQ[1]);
+    return bound <= max && bound >= (partIndex === 5 ? 6 : max);
   }
   return (
     rest === "?" ||
     rest === "?L" ||
-    /^\?\/\d+$/.test(rest) ||
+    (/^\?\/\d+$/.test(rest) && (version === "8" || (partIndex !== 3 && partIndex !== 4))) ||
     ((partIndex === 3 || partIndex === 4) && rest.endsWith("/?"))
   );
 }
@@ -277,9 +284,11 @@ function cronParts(
 // bitmap length and a step of 0 throw on both; a range bound outside the
 // value range or a lower bound above the upper throws on both. croner 8's
 // extractNth allows "#" in day-of-week only, with an nth of 1-5 or "L", and
-// offsets the step start so a day/month start of 0 throws in setPart;
-// croner 6 never checks the step start, so a start past the bitmap end just
-// schedules nothing and stays accepted, matching the server.
+// offsets the step start so a day/month start of 0 throws in setPart.
+// Neither croner checks that a step start reaches the bitmap, so a start
+// past the end — or an empty one — stays accepted while scheduling
+// nothing; that is refused here since a dead schedule is exactly what
+// this check exists to keep off the server.
 function cronEntryOk(
   entry: string,
   partIndex: number,
@@ -333,7 +342,17 @@ function cronEntryOk(
     if (seg.length !== 2) return false;
     const steps = num(seg[1]!);
     if (Number.isNaN(steps) || steps === 0 || steps > fieldSize) return false;
-    return version !== "8" || seg[0] === "*" || seg[0] === "" || num(seg[0]!) >= min;
+    if (seg[0] === "*") return true;
+    // a start that never reaches the bitmap leaves the field all-zero — an
+    // all-zero month loops nextRun() forever, elsewhere the window simply
+    // never runs — so refuse what croner accepts into a dead schedule.
+    // croner 6 iterates from the raw start, so any index below the bitmap
+    // length schedules; croner 8 offsets the start by the field's minimum
+    // (and throws when the first hit lands below it), landing back on the
+    // value range
+    const start = num(seg[0]!);
+    if (version === "8") return start >= min && start - min < fieldSize;
+    return start >= 0 && start < fieldSize;
   }
   return inRange(num(rest));
 }

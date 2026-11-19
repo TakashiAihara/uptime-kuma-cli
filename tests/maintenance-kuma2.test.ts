@@ -200,11 +200,17 @@ describe("maintenance on Kuma 2.x", () => {
       "0 9 * * ?/5#3",
       "0 9 20-33/7 * *",
       "0 9 * * 2-8/7",
+      "0 9 31/5 * *",
+      "0 9 * 12/3 *",
       "0 9 L * *",
       "0 9 L, * *",
-      "0 9 * * /5",
       "0 9 * * ?/5",
       "0 9 ?/5 * *",
+      "0 9 * ?/5 *",
+      "0 9 ?-31 * *",
+      "0 9 1-? * *",
+      "0 9 * * ?-7",
+      "0 9 * * ?-6",
     ])("cron accepts %p on a 2.x server", async (cron) => {
       const k = await useFake();
       const f = writeJson("cron8.json", { cron });
@@ -217,7 +223,7 @@ describe("maintenance on Kuma 2.x", () => {
       expect(sentAdd(k).cron).toBe(cron);
     });
 
-    test.each(["0 9 * * */8", "0 9 0/5 * *", "0 9 ,5 * *"])(
+    test.each(["0 9 * * */8", "0 9 0/5 * *", "0 9 * 0/3 *", "0 9 * * 7/2", "0 9 ,5 * *"])(
       "a croner 6-only form %p exits 2 once the 2.x version is known",
       async (cron) => {
         const k = await useFake();
@@ -234,21 +240,26 @@ describe("maintenance on Kuma 2.x", () => {
       },
     );
 
-    test.each(["0 9 * * * * *", "0 9 * * L", "0 9 * * FOO", "0 9 * 13 *"])(
-      "cron still rejects %p before connecting",
-      async (cron) => {
-        const k = await useFake();
-        const f = writeJson("badcron.json", { cron });
-        const r = await run(
-          sb,
-          ["maintenance", "add", "--title", "w", "--strategy", "cron", "--config-file", f],
-          creds(k.url),
-        );
-        expect(r.code).toBe(2);
-        expect(r.stderr).toContain("5 or 6 whitespace-separated cron fields");
-        expect(k.calls).toHaveLength(0);
-      },
-    );
+    test.each([
+      "0 9 * * * * *",
+      "0 9 * * L",
+      "0 9 * * FOO",
+      "0 9 * 13 *",
+      "0 9 * * /5",
+      "0 9 * /5 *",
+      "0 9 /5 * *",
+    ])("cron still rejects %p before connecting", async (cron) => {
+      const k = await useFake();
+      const f = writeJson("badcron.json", { cron });
+      const r = await run(
+        sb,
+        ["maintenance", "add", "--title", "w", "--strategy", "cron", "--config-file", f],
+        creds(k.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("5 or 6 whitespace-separated cron fields");
+      expect(k.calls).toHaveLength(0);
+    });
   });
 
   describe("edit", () => {
