@@ -110,15 +110,16 @@ describe("monitors list", () => {
     expect(out.find((m: any) => m.id === 2).url).toBe("https://dav.example.com");
   });
 
-  test("hides a schemeless user:pass@host value entirely", async () => {
+  test("hides a schemeless credential and a lone userinfo token entirely", async () => {
     kuma.state.monitors.find((m) => m.id === 7)!.url = "u1:fixture-hidden-u3@x.example.com:2375";
-    kuma.state.monitors.find((m) => m.id === 2)!.url = "https://user@x.example.com/";
+    kuma.state.monitors.find((m) => m.id === 2)!.url = "https://fixture-hidden-t1@x.example.com/";
     const r = await run(sb, ["monitors", "list"], creds(kuma.url));
     expect(r.code).toBe(0);
     expect(r.stdout).not.toContain("fixture-hidden-u3");
+    expect(r.stdout).not.toContain("fixture-hidden-t1");
     const out = r.json();
     expect(out.find((m: any) => m.id === 7).url).toBe("***");
-    expect(out.find((m: any) => m.id === 2).url).toBe("https://user@x.example.com/");
+    expect(out.find((m: any) => m.id === 2).url).toBe("https://***@x.example.com/");
   });
 
   test("--name filters case-insensitively by substring", async () => {
@@ -2206,14 +2207,36 @@ describe("monitors add", () => {
     expect((addCalls()[0]!.args[0] as any).url).toBe("https://u:p@example.com");
   });
 
-  test("the --url flag itself accepts a credentialed url for basic auth", async () => {
+  test("the --url flag refuses a credentialed url like --set does", async () => {
     const r = await run(
       sb,
       ["monitors", "add", "--type", "http", "--name", "x", "--url", "https://u:p@example.com"],
       creds(kuma.url),
     );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--config-file");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
+  test("a url with @ only in its path is accepted through --set", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        "--set",
+        "url=https://example.com/@user",
+      ],
+      creds(kuma.url),
+    );
     expect(r.code).toBe(0);
-    expect((addCalls()[0]!.args[0] as any).url).toBe("https://u:p@example.com");
+    expect((addCalls()[0]!.args[0] as any).url).toBe("https://example.com/@user");
   });
 
   test("a plain url through --set is accepted", async () => {

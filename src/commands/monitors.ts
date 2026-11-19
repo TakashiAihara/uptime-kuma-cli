@@ -230,7 +230,7 @@ const SASL_VISIBLE_KEYS = new Set(["mechanism", "username", "awsRegion", "access
 // --config-file so the secret stays out of argv.
 const HATCH_SECRET_KEYS = new Set([...SECRET_KEYS, "kafkaProducerSaslOptions"]);
 
-// A monitor URL may carry credentials as user:pass@; keep the URL readable and hide the password
+// A monitor URL may carry credentials as user[:pass]@; keep the URL readable and hide the password
 export function redactUrl(value: unknown): unknown {
   if (typeof value !== "string" || value === "") return value;
   let parsed: URL;
@@ -243,7 +243,11 @@ export function redactUrl(value: unknown): unknown {
   if (parsed.password === "") {
     // an opaque-path parse like "u:p@host:port" has no host, so the userinfo
     // boundary is unknowable — hide the whole value like the catch branch
-    return parsed.host === "" && value.includes("@") ? "***" : value;
+    if (parsed.host === "" && value.includes("@")) return "***";
+    // a lone userinfo slot usually holds a token, not a username — hide it
+    if (parsed.username === "") return value;
+    parsed.username = "***";
+    return parsed.toString();
   }
   parsed.password = "***";
   return parsed.toString();
@@ -1128,6 +1132,12 @@ export function registerMonitors(program: Command): void {
       const urlTypes = (URL_TYPES as readonly string[]).includes(type);
       if (urlTypes && !opts.url) {
         fail(2, `--type ${type} requires --url`);
+      }
+      if (typeof opts.url === "string" && urlCarriesCredentials(opts.url)) {
+        fail(
+          2,
+          "--url ... would put credentials in the command line; pass the url through --config-file instead",
+        );
       }
       if ((type === "keyword" || type === "grpc-keyword") && !opts.keyword) {
         fail(2, `--type ${type} requires --keyword`);
