@@ -636,6 +636,12 @@ const HATCH_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unknow
   packetSize: (v, k) => hatchNumber(v, k, parsePacketSize),
   proxyId: (v, k) => (v === null ? null : hatchNumber(v, k, parseId)),
   parent: (v) => normalizeParent(v),
+  // a parsed JSON value like an array skips the --set credential scan and
+  // would be stored as a non-string url, so the key takes only string | null
+  url: (v, k) => {
+    if (v !== null && typeof v !== "string") fail(2, `${k} must be a string or null`);
+    return v;
+  },
   docker_host: (v, k) => (v === null ? null : hatchNumber(v, k, parseId)),
   dns_resolve_type: (v, k) => {
     if (typeof v !== "string" || !(DNS_RESOLVE_TYPES as readonly string[]).includes(v)) {

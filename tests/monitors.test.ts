@@ -3716,6 +3716,97 @@ describe("monitors add", () => {
     expect((addCalls()[0]!.args[0] as any).interval).toBe(20);
   });
 
+  test.each([[["--retry-interval", "19"]], [["--set", "retryInterval=19"]]])(
+    "a retryInterval below 20 on Kuma 1.x exits 2 after connecting: %p",
+    async (extra) => {
+      const r = await run(
+        sb,
+        [
+          "monitors",
+          "add",
+          "--type",
+          "http",
+          "--name",
+          "x",
+          "--url",
+          "https://x.example.com",
+          ...extra,
+        ],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("must be at least 20 seconds on Uptime Kuma 1.x");
+      expect(addCalls()).toHaveLength(0);
+    },
+  );
+
+  test("--retry-interval 20 is accepted on Kuma 1.x", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        "--retry-interval",
+        "20",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).retryInterval).toBe(20);
+  });
+
+  test.each([[["--interval", "1.5"]], [["--set", "interval=1.5"]]])(
+    "a non-integer interval exits 2 after connecting: %p",
+    async (extra) => {
+      const r = await run(
+        sb,
+        [
+          "monitors",
+          "add",
+          "--type",
+          "http",
+          "--name",
+          "x",
+          "--url",
+          "https://x.example.com",
+          ...extra,
+        ],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("interval must be an integer number of seconds");
+      expect(addCalls()).toHaveLength(0);
+    },
+  );
+
+  test("--set url with a non-string value exits 2 before connecting", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        "--set",
+        'url=["https://u:p@example.com"]',
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("url must be a string or null");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
   test('--expected-value "" exits 2 before connecting', async () => {
     const r = await run(
       sb,
