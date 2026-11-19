@@ -109,11 +109,12 @@ const SETTING_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unkn
       if (value.includes("?") || value.includes("#")) {
         fail(2, `"${key}" must not contain a query string or fragment`);
       }
-      // get masks the password as ***; feeding that output back would store it
-      if (url.password === "***") {
+      // get masks the whole userinfo as ***; feeding that output
+      // back would store the mask
+      if (url.username === "***" || url.password === "***") {
         fail(
           2,
-          `"${key}" carries the masked password from settings get output; give the real URL through --config-file or omit the key`,
+          `"${key}" carries the masked credentials from settings get output; give the real URL through --config-file or omit the key`,
         );
       }
     }

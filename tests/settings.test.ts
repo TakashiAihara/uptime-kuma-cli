@@ -639,7 +639,7 @@ describe("settings set", () => {
     const f = writeJson("masked.json", { primaryBaseURL: `https://${masked}@kuma.example.com/` });
     const r = await run(sb, ["settings", "set", "--config-file", f], creds(kuma.url));
     expect(r.code).toBe(2);
-    expect(r.stderr).toContain("masked password");
+    expect(r.stderr).toContain("masked credentials");
     expect(kuma.calls).toHaveLength(0);
   });
 
@@ -651,9 +651,30 @@ describe("settings set", () => {
       creds(kuma.url),
     );
     expect(r.code).toBe(2);
-    expect(r.stderr).toContain("masked password");
+    expect(r.stderr).toContain("masked credentials");
     expect(kuma.calls).toHaveLength(0);
   });
+
+  test.each(["config-file", "--set"])(
+    "the masked primaryBaseURL username from get output is refused via %p",
+    async (source) => {
+      const masked = String.fromCharCode(42).repeat(3);
+      const url = "https://" + masked + "@kuma.example.com/";
+      const argv =
+        source === "config-file"
+          ? [
+              "settings",
+              "set",
+              "--config-file",
+              writeJson("masked-u.json", { primaryBaseURL: url }),
+            ]
+          : ["settings", "set", "--set", "primaryBaseURL=" + url];
+      const r = await run(sb, argv, creds(kuma.url));
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("masked credentials");
+      expect(kuma.calls).toHaveLength(0);
+    },
+  );
 
   test.each(["https://kuma.example.com/?", "https://kuma.example.com/#"])(
     "a bare trailing separator in primaryBaseURL %p exits 2",
