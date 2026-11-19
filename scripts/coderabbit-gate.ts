@@ -7,8 +7,8 @@
  * CodeRabbit reports through a commit status whose state is always `success` —
  * the outcome lives in the description ("Review completed", "Review paused",
  * "Review rate limited", ...), so that status cannot be required as is. This
- * script maps the description onto our own context: `success` only for
- * "Review completed", `pending` while a review is queued or running or has not
+ * script maps the description onto our own context: `success` for
+ * "Review completed" and "No files to review", `pending` while a review is queued or running or has not
  * reported yet, `failure` for every other terminal outcome, with a pointer to
  * `@coderabbitai review`. The workflow re-runs on every CodeRabbit status change
  * and on pull_request_target, so the gate follows the review without polling.
@@ -42,6 +42,13 @@ export function gateState(description: string | null | undefined): {
   // so added detail cannot wedge the gate; anything unrecognized still fails.
   if (description?.startsWith("Review completed")) {
     return { state: "success", description: "CodeRabbit review completed" };
+  }
+  // CodeRabbit says this for a push with no new PR diff (`gh pr update-branch`)
+  // and for a PR whose files it excludes; there is nothing left for it to
+  // review, and `@coderabbitai review` answers "Already reviewed" without
+  // changing the status, so failing would strand the PR
+  if (description?.startsWith("No files to review")) {
+    return { state: "success", description: "CodeRabbit: no files to review" };
   }
   if (description?.startsWith("Review queued")) {
     return { state: "pending", description: "CodeRabbit review queued" };

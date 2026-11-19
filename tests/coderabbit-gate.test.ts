@@ -18,10 +18,17 @@ const status = (over: Partial<CommitStatus>): CommitStatus => ({
 });
 
 describe("gateState", () => {
-  test("passes only on Review completed", () => {
+  test("passes on Review completed", () => {
     expect(gateState("Review completed")).toEqual({
       state: "success",
       description: "CodeRabbit review completed",
+    });
+  });
+
+  test("passes when a push leaves CodeRabbit no files to review", () => {
+    expect(gateState("No files to review")).toEqual({
+      state: "success",
+      description: "CodeRabbit: no files to review",
     });
   });
 
@@ -46,7 +53,6 @@ describe("gateState", () => {
       "Review rate limited",
       "Review failed",
       "Review cancelled",
-      "No files to review",
       "Too many files to review",
       "Incremental review skipped",
       "something CodeRabbit adds later",
