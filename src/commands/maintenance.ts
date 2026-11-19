@@ -238,7 +238,7 @@ function questionOk(entry: string, partIndex: number, version: CronMajor): boole
 function cronParts(
   value: string,
   version: CronMajor,
-): { parts: string[]; lastDay: boolean } | null {
+): { parts: string[]; lastDay: boolean; qBare: ReadonlySet<number> } | null {
   let pattern = value;
   if (pattern.includes("@")) {
     pattern = (CRON_NICKNAMES.get(pattern.trim().toLowerCase()) ?? pattern).trim();
@@ -264,18 +264,20 @@ function cronParts(
     dow.length >= 3 ? alphaDays(dow) : dow,
   ];
   const parts: string[] = [];
+  const qBare = new Set<number>();
   for (const [i, part] of raw.entries()) {
     const q = part.indexOf("?");
     if (q !== -1) {
       if (part.indexOf("?", q + 1) !== -1) return null;
       if (!part.split(",").every((entry) => questionOk(entry, i, version))) return null;
+      if (part === "?") qBare.add(i);
     }
     parts.push(q === -1 ? part : part.replace("?", String(CRON_PART_LIMITS[i]!.min)));
   }
   const ok = parts.every((part, i) =>
     (i === 5 && version === "8" ? CRON_LEGAL_DOW_2X : CRON_LEGAL).test(part),
   );
-  return ok ? { parts, lastDay } : null;
+  return ok ? { parts, lastDay, qBare } : null;
 }
 
 // partToArray's reject rules for one comma-separated entry, applied per
@@ -295,9 +297,11 @@ function cronEntryOk(
 ): "live" | "dead" | "bad" {
   const { min, max, size } = CRON_PART_LIMITS[partIndex]!;
   const fieldSize = partIndex === 5 && version === "8" ? 7 : size;
+  // an empty entry with the day-of-month "L" flag still schedules the last
+  // day of the month on both croners
   if (entry === "") {
-    if (version === "6") return "dead";
-    return partIndex === 3 && lastDay ? "live" : "bad";
+    if (partIndex === 3 && lastDay) return "live";
+    return version === "6" ? "dead" : "bad";
   }
   if (entry === "*") return "live";
 
@@ -360,28 +364,106 @@ function cronEntryOk(
   return inRange(num(rest)) ? "live" : "bad";
 }
 
+const DAYS_IN_MONTH = [0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31] as const;
+
+// the values one entry lands on, for the day-of-month × month feasibility
+// check — a dead step start falls out as an empty set by the same rules
+// that judge it, and anything outside [0-9*/,-] shape never reaches here
+function entryValues(entry: string, partIndex: number, version: CronMajor): Set<number> {
+  const { min, max, size } = CRON_PART_LIMITS[partIndex]!;
+  const hits = new Set<number>();
+  if (entry === "*") {
+    for (let v = min; v <= max; v++) hits.add(v);
+    return hits;
+  }
+  const m = /^(\d+|\*)(?:-(\d+))?(?:\/(\d+))?$/.exec(entry);
+  if (m === null) return hits;
+  const first = m[1] === "*" ? min : Number(m[1]);
+  if (m[2] !== undefined) {
+    const step = m[3] === undefined ? 1 : Number(m[3]);
+    for (let v = first; v <= Number(m[2]); v += step) hits.add(v);
+    return hits;
+  }
+  if (m[3] === undefined) {
+    hits.add(first);
+    return hits;
+  }
+  // x/N lands on x + k·N — below the bitmap length on croner 6 and below
+  // the offset end on croner 8, so a dead start contributes nothing
+  const bound = version === "8" ? min + size : size;
+  for (let v = first; v < bound; v += Number(m[3])) {
+    if (v >= min) hits.add(v);
+  }
+  return hits;
+}
+
 // "either" is the pre-connect union — refuse only what both croners refuse,
 // so a 1.x server never stores what its unawaited validateCron would throw
 // on, while 2.x-only forms still reach a 2.x server. Within a field a
 // croner-legal entry that contributes no values is only refused when every
 // entry is dead like that — an all-zero field never runs, and an all-zero
 // month loops nextRun() forever — while a dead sibling next to a live one
-// still schedules on the server.
+// still schedules on the server. The two date fields decide jointly under
+// croner's OR matching: a restricted day-of-week rescues a dead
+// day-of-month and vice versa, and when day-of-week cannot rescue, the
+// day-of-month × month pair must still name a real date.
 function isCronExpression(value: string, version: CronMajor | "either"): boolean {
   if (version === "either") {
     return isCronExpression(value, "6") || isCronExpression(value, "8");
   }
   const shape = cronParts(value, version);
   if (shape === null) return false;
-  return shape.parts.every((part, i) => {
+  const dead = new Set<number>();
+  for (const [i, part] of shape.parts.entries()) {
     let live = false;
     for (const entry of part.split(",")) {
       const verdict = cronEntryOk(entry, i, version, shape.lastDay);
       if (verdict === "bad") return false;
       live ||= verdict === "live";
     }
-    return live;
-  });
+    if (!live) dead.add(i);
+  }
+  // seconds, minutes, hours and month each gate the run on their own
+  if (dead.has(0) || dead.has(1) || dead.has(2) || dead.has(4)) return false;
+  const domDead = dead.has(3);
+  const dowDead = dead.has(5);
+  const domStar = shape.parts[3] === "*";
+  const dowStar = shape.parts[5] === "*";
+  // "*" hands the date decision to the other field; a restricted live one
+  // joins it through OR matching, so a dead date field is only fatal when
+  // the other side is dead or unrestricted
+  if ((domDead && (dowDead || dowStar)) || (dowDead && (domDead || domStar))) return false;
+  if (!shape.lastDay && !domStar && (dowStar || dowDead)) {
+    const qDom = shape.qBare.has(3);
+    const qMonth = shape.qBare.has(4);
+    const values = (i: number, bare: boolean): number[] => {
+      if (bare) {
+        const { min, max } = CRON_PART_LIMITS[i]!;
+        return Array.from({ length: max - min + 1 }, (_, k) => min + k);
+      }
+      const hits = new Set<number>();
+      for (const entry of shape.parts[i]!.split(",")) {
+        for (const v of entryValues(entry, i, version)) hits.add(v);
+      }
+      return [...hits];
+    };
+    const doms = values(3, qDom);
+    const months = values(4, qMonth);
+    // a bare "?" is one unknown current value — every possibility must
+    // still leave a real date; a concrete pair needs only one
+    const fits = (d: number, m: number) => d <= DAYS_IN_MONTH[m]!;
+    if (qDom && qMonth) return false;
+    if (qDom) {
+      if (!doms.every((d) => months.some((m) => fits(d, m)))) return false;
+    } else if (
+      qMonth
+        ? !months.every((m) => doms.some((d) => fits(d, m)))
+        : !months.some((m) => doms.some((d) => fits(d, m)))
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 // Maintenance.jsonToBean writes title, description, strategy, intervalDay,
@@ -854,12 +936,15 @@ export function registerMaintenance(program: Command): void {
         }
       }
       // a cron given outright is refused on the union before connecting,
-      // like add; the post-fetch check still narrows it to the server's
-      // croner major once the merged strategy is known to be cron
+      // like add, unless this edit also names a non-cron strategy where it
+      // is inert; non-string values are left for the post-fetch check,
+      // which knows the merged strategy
+      const preStrategy = sets.strategy ?? fileConfig.strategy;
       for (const candidate of [fileConfig.cron, sets.cron]) {
         if (
-          candidate !== undefined &&
-          (typeof candidate !== "string" || !isCronExpression(candidate, "either"))
+          typeof candidate === "string" &&
+          (preStrategy === undefined || String(preStrategy) === "cron") &&
+          !isCronExpression(candidate, "either")
         ) {
           fail(
             2,
