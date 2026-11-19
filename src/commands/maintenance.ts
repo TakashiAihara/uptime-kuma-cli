@@ -124,18 +124,17 @@ const isDayOfMonthList = (value: unknown): value is unknown[] =>
 // rejects a step over 31.
 const MAX_INTERVAL_DAY = 3650;
 
-// Shape check mirroring CronPattern.parse up to throwAtIllegalCharacters,
-// which is the same in croner 6.0.7 (Kuma 1.23) and 8.1.2 (Kuma 2.x) except
-// the day-of-week charset: a nickname expands first, the pattern splits on
-// whitespace into 5 or 6 parts (5 gets a leading seconds "0"), the first "L"
-// is stripped from day-of-month and day-of-week, month and day-of-week parts
-// of 3+ chars get the JAN-DEC / SUN-SAT names replaced, the first "?" of each
-// part becomes a number, and what remains may only contain [0-9*/,-] — plus
-// "#" and "L" in day-of-week on 2.x. Ranges and values are still croner's
-// job; Kuma 1.23.17 calls the async validateCron without await, so a bad
-// expression is stored anyway and the rejection goes unhandled — only the
-// shape is checked up front. On 2.x validateCron is synchronous, so a value
-// the shape check lets through is refused by the server instead.
+// Mirrors CronPattern.parse for croner 6.0.7 (Kuma 1.23) and 8.1.2 (Kuma
+// 2.x): the shape check up to throwAtIllegalCharacters, then partToArray's
+// numeric range and step checks. The majors differ in the day-of-week
+// charset (croner 8 also allows "#" and "L"), the day-of-week bitmap length
+// (8 on 6, 7 on 8), whether a day-of-week "L" is stripped or parsed, and
+// whether an empty comma entry or a day/month step start of 0 throws, so the
+// checks run per version. Kuma 1.23.17 calls the async validateCron without
+// await, so a bad expression is stored anyway and the rejection goes
+// unhandled — on 1.x only the CLI's check can refuse a bad pattern before it
+// is stored; on 2.x validateCron is synchronous, so the check also mirrors
+// what the server would refuse.
 const CRON_NICKNAMES = new Map([
   ["@yearly", "0 0 1 1 *"],
   ["@annually", "0 0 1 1 *"],
@@ -180,24 +179,55 @@ const alphaDays = (value: string): string =>
     .replace(/fri/gi, "5")
     .replace(/sat/gi, "6");
 
-function isCronExpression(value: string, kuma2: boolean): boolean {
+// croner 6.0.7 and 8.1.2
+type CronMajor = "6" | "8";
+
+// partToArray's per-field bounds: the config value range and the bitmap
+// length a step is capped by. day-of-week's bitmap is 8 on croner 6 (index 7
+// also means Sunday) and 7 on croner 8; the value range 0-7 is the same on
+// both, so only the step cap differs.
+const CRON_PART_LIMITS = [
+  { min: 0, max: 59, size: 60 }, // second
+  { min: 0, max: 59, size: 60 }, // minute
+  { min: 0, max: 23, size: 24 }, // hour
+  { min: 1, max: 31, size: 31 }, // day of month
+  { min: 1, max: 12, size: 12 }, // month
+  { min: 0, max: 7, size: 8 }, // day of week
+] as const;
+
+// parse's transforms up to throwAtIllegalCharacters: a nickname expands
+// first, the pattern splits on whitespace into 5 or 6 parts (5 gets a
+// leading seconds "0"), the first "L" is stripped from day-of-month, month
+// and day-of-week parts of 3+ chars get the JAN-DEC / SUN-SAT names
+// replaced, the first "?" of each part becomes a number, and what remains
+// may only contain [0-9*/,-] — plus "#" and "L" in day-of-week on croner 8.
+// Returns null where parse throws; an empty part or a bare day-of-week "L"
+// is refused too since the field stays all-zero and the window never runs
+// (croner 8 throws anyway). croner substitutes "?" with the field's current
+// value, so it can only be checked deterministically as a whole entry —
+// inside a range or step the result depends on the clock — and at most once
+// per part, as in croner.
+function cronParts(
+  value: string,
+  version: CronMajor,
+): { parts: string[]; lastDay: boolean } | null {
   let pattern = value;
   if (pattern.includes("@")) {
     pattern = (CRON_NICKNAMES.get(pattern.trim().toLowerCase()) ?? pattern).trim();
   }
   const fields = pattern.replace(/\s+/g, " ").split(" ");
-  if (fields.length !== 5 && fields.length !== 6) return false;
-  // an empty part or a bare day-of-week "L" would never schedule a run:
-  // croner 6.0.7 leaves the field all-zero so nextRun() is null, and
-  // croner 8.1.2 throws on both
-  if (fields.includes("")) return false;
+  if (fields.length !== 5 && fields.length !== 6) return null;
+  if (fields.includes("")) return null;
   const [second, minute, hour, day, month, dayOfWeek] = (
     fields.length === 5 ? ["0", ...fields] : fields
   ) as [string, string, string, string, string, string];
+  const lastDay = day.includes("L");
   const dom = day.replace("L", "");
-  const dow = dayOfWeek.replace("L", "");
-  if (dow === "") return false;
-  const parts = [
+  // croner 6 strips a day-of-week "L"; croner 8 keeps it, where "5L" parses
+  // as 5 and a bare "L" throws on parseInt — both end up refused either way
+  const dow = version === "6" ? dayOfWeek.replace("L", "") : dayOfWeek;
+  if (dow === "") return null;
+  const raw = [
     second,
     minute,
     hour,
@@ -205,10 +235,98 @@ function isCronExpression(value: string, kuma2: boolean): boolean {
     month.length >= 3 ? alphaMonths(month) : month,
     dow.length >= 3 ? alphaDays(dow) : dow,
   ];
-  // croner substitutes the first "?" of each part with a number; leftovers fail
-  return parts.every((part, i) =>
-    (i === 5 && kuma2 ? CRON_LEGAL_DOW_2X : CRON_LEGAL).test(part.replace("?", "0")),
+  const parts: string[] = [];
+  for (const [i, part] of raw.entries()) {
+    const q = part.indexOf("?");
+    if (q !== -1) {
+      if (part.indexOf("?", q + 1) !== -1) return null;
+      if (!part.split(",").includes("?")) return null;
+    }
+    parts.push(q === -1 ? part : part.replace("?", String(CRON_PART_LIMITS[i]!.min)));
+  }
+  const ok = parts.every((part, i) =>
+    (i === 5 && version === "8" ? CRON_LEGAL_DOW_2X : CRON_LEGAL).test(part),
   );
+  return ok ? { parts, lastDay } : null;
+}
+
+// partToArray's reject rules for one comma-separated entry, applied per
+// croner major: an empty entry is silently skipped on 6 but throws on 8
+// (unless the day-of-month part carried "L"); a step or range step over the
+// bitmap length and a step of 0 throw on both; a range bound outside the
+// value range or a lower bound above the upper throws on both. croner 8's
+// extractNth allows "#" in day-of-week only, with an nth of 1-5 or "L", and
+// offsets the step start so a day/month start of 0 throws in setPart;
+// croner 6 never checks the step start, so a start past the bitmap end just
+// schedules nothing and stays accepted, matching the server.
+function cronEntryOk(
+  entry: string,
+  partIndex: number,
+  version: CronMajor,
+  lastDay: boolean,
+): boolean {
+  const { min, max, size } = CRON_PART_LIMITS[partIndex]!;
+  const fieldSize = partIndex === 5 && version === "8" ? 7 : size;
+  if (entry === "") return version === "6" || (partIndex === 3 && lastDay);
+  if (entry === "*") return true;
+
+  let rest = entry;
+  if (version === "8" && partIndex === 5 && rest.includes("#")) {
+    const seg = rest.split("#");
+    rest = seg[0]!;
+    // setNthWeekdayOfMonth takes "L" or a numeric 1-5 (so "05" counts); an
+    // empty nth falls back to the default "any occurrence" bitmask
+    const nth = seg[1]!;
+    if (nth !== "" && nth !== "L" && (!/^\d+$/.test(nth) || Number(nth) < 1 || Number(nth) > 5)) {
+      return false;
+    }
+  }
+  const num = (s: string): number => Number.parseInt(s, 10);
+  const inRange = (n: number) => n >= min && n <= max;
+
+  if (rest.includes("-") && rest.includes("/")) {
+    const m = /^(\d+)-(\d+)\/(\d+)$/.exec(rest);
+    if (m === null) return false;
+    const steps = num(m[3]!);
+    if (steps === 0 || steps > fieldSize) return false;
+    return inRange(num(m[1]!)) && inRange(num(m[2]!)) && num(m[1]!) <= num(m[2]!);
+  }
+  if (rest.includes("-")) {
+    const seg = rest.split("-");
+    if (seg.length !== 2) return false;
+    const lower = num(seg[0]!);
+    const upper = num(seg[1]!);
+    return inRange(lower) && inRange(upper) && lower <= upper;
+  }
+  if (rest.includes("/")) {
+    const seg = rest.split("/");
+    if (seg.length !== 2) return false;
+    const steps = num(seg[1]!);
+    if (Number.isNaN(steps) || steps === 0 || steps > fieldSize) return false;
+    return version !== "8" || seg[0] === "*" || seg[0] === "" || num(seg[0]!) >= min;
+  }
+  return inRange(num(rest));
+}
+
+// "either" is the pre-connect union — refuse only what both croners refuse,
+// so a 1.x server never stores what its unawaited validateCron would throw
+// on, while 2.x-only forms still reach a 2.x server.
+function isCronExpression(value: string, version: CronMajor | "either"): boolean {
+  if (version === "either") {
+    return isCronExpression(value, "6") || isCronExpression(value, "8");
+  }
+  const shape = cronParts(value, version);
+  if (shape === null) return false;
+  return shape.parts.every((part, i) => {
+    const entries = part.split(",");
+    // a part whose comma entries are all empty leaves the field all-zero on
+    // croner 6 — the window never runs — while croner 8 throws; the
+    // day-of-month "L" flag is the one empty part that still schedules
+    if (entries.every((entry) => entry === "") && !(i === 3 && shape.lastDay)) {
+      return false;
+    }
+    return entries.every((entry) => cronEntryOk(entry, i, version, shape.lastDay));
+  });
 }
 
 // Maintenance.jsonToBean writes title, description, strategy, intervalDay,
@@ -227,7 +345,12 @@ function isCronExpression(value: string, kuma2: boolean): boolean {
 // scoping monitors edit uses for its touched/typeChanged rule.
 function validateMaintenance(
   m: Record<string, unknown>,
-  opts: { full: boolean; touched?: ReadonlySet<string>; edit?: boolean; kuma2: boolean },
+  opts: {
+    full: boolean;
+    touched?: ReadonlySet<string>;
+    edit?: boolean;
+    kuma2: boolean | "unknown";
+  },
 ): void {
   const need = (key: string) => opts.full || opts.touched?.has(key) === true;
   if (!Array.isArray(m.dateRange)) fail(2, "dateRange must be an array");
@@ -268,7 +391,7 @@ function validateMaintenance(
     // the UI's 3650. The other strategies only store it, so null stays
     // acceptable there
     const required = strategy === "recurring-interval";
-    const cap = required && !opts.kuma2 ? 31 : MAX_INTERVAL_DAY;
+    const cap = required && opts.kuma2 === false ? 31 : MAX_INTERVAL_DAY;
     const v = m.intervalDay;
     const ok = required
       ? isPosInt(v) && v <= cap
@@ -299,8 +422,12 @@ function validateMaintenance(
       if (typeof cron !== "string" || cron === "") {
         fail(2, 'strategy "cron" requires a non-empty "cron" expression');
       }
-      if (!isCronExpression(cron, opts.kuma2)) {
-        fail(2, 'strategy "cron" requires "cron" as 5 or 6 whitespace-separated cron fields');
+      const cronVersion = opts.kuma2 === "unknown" ? "either" : opts.kuma2 ? "8" : "6";
+      if (!isCronExpression(cron, cronVersion)) {
+        fail(
+          2,
+          'strategy "cron" requires "cron" as 5 or 6 whitespace-separated cron fields with in-range values and steps',
+        );
       }
     }
     if (need("durationMinutes") && !isPosInt(m.durationMinutes)) {
@@ -621,10 +748,11 @@ export function registerMaintenance(program: Command): void {
         fail(2, "--start and --end do not apply to --strategy manual");
       }
       // Before connecting the version is unknown, so the check applies the
-      // union of both versions' rules — which is the 2.x set: every value 1.x
-      // accepts, 2.x accepts too. Once connected the same check runs again
-      // under the server's own version, adding the 1.x restrictions back.
-      validateMaintenance(payload, { full: true, kuma2: true });
+      // union of both versions' rules — the 2.x set for the non-cron fields
+      // and either croner's grammar for cron, whose accepted forms differ.
+      // Once connected the same check runs again under the server's own
+      // version, adding the other version's restrictions back.
+      validateMaintenance(payload, { full: true, kuma2: "unknown" });
       const s = await connect(["maintenanceList"]);
       validateMaintenance(payload, { full: true, kuma2: s.majorVersion >= 2 });
       const existing = s.maintenances().find((m) => m.title === payload.title);

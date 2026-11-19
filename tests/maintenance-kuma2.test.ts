@@ -202,7 +202,24 @@ describe("maintenance on Kuma 2.x", () => {
       },
     );
 
-    test.each(["0 9 * * * * *", "0 9 * * L", "0 9 * * FOO"])(
+    test.each(["0 9 * * */8", "0 9 0/5 * *", "0 9 ,5 * *"])(
+      "a croner 6-only form %p exits 2 once the 2.x version is known",
+      async (cron) => {
+        const k = await useFake();
+        const f = writeJson("cron6.json", { cron });
+        const r = await run(
+          sb,
+          ["maintenance", "add", "--title", "w", "--strategy", "cron", "--config-file", f],
+          creds(k.url),
+        );
+        expect(r.code).toBe(2);
+        expect(r.stderr).toContain("in-range values and steps");
+        expect(k.calls.map((c) => c.event)).toContain("login");
+        expect(callsOf(k, "addMaintenance")).toHaveLength(0);
+      },
+    );
+
+    test.each(["0 9 * * * * *", "0 9 * * L", "0 9 * * FOO", "0 9 * 13 *"])(
       "cron still rejects %p before connecting",
       async (cron) => {
         const k = await useFake();
@@ -308,6 +325,28 @@ describe("maintenance on Kuma 2.x", () => {
       );
       expect(r.code).toBe(0);
       expect(sentEdit(k).cron).toBe("0 9 * * 5#3");
+    });
+
+    test("--set cron with an out-of-range value exits 2 without sending editMaintenance", async () => {
+      const k = await useFake({
+        maintenances: [
+          {
+            id: 1,
+            title: "cron win",
+            strategy: "cron",
+            cron: "0 4 * * *",
+            duration: 3600,
+          },
+        ],
+      });
+      const r = await run(
+        sb,
+        ["maintenance", "edit", "1", "--set", "cron=0 9 * * */8"],
+        creds(k.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("in-range values and steps");
+      expect(callsOf(k, "editMaintenance")).toHaveLength(0);
     });
 
     test("switching single to cron keeps the stored end date", async () => {

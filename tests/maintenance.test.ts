@@ -922,6 +922,24 @@ describe("maintenance", () => {
       expect(sent.dateRange).toEqual(["2032-06-01T10:00:00"]);
     });
 
+    test("--set cron with an out-of-range value exits 2 without sending editMaintenance", async () => {
+      kuma.state.maintenances[0] = {
+        ...kuma.state.maintenances[0]!,
+        strategy: "cron",
+        cron: "0 4 * * *",
+        duration: 3600,
+        dateRange: ["2030-01-01T02:00:00"],
+      };
+      const r = await run(
+        sb,
+        ["maintenance", "edit", "2", "--set", "cron=0 9 * 13 *"],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("in-range values and steps");
+      expect(callsOf("editMaintenance")).toHaveLength(0);
+    });
+
     test("--set id exits 2 before connecting", async () => {
       const r = await run(sb, ["maintenance", "edit", "1", "--set", "id=9"], creds(kuma.url));
       expect(r.code).toBe(2);
@@ -1545,6 +1563,75 @@ describe("maintenance", () => {
       expect(r.code).toBe(2);
       expect(r.stderr).toContain("5 or 6 whitespace-separated cron fields");
       expect(kuma.calls).toHaveLength(0);
+    });
+
+    test.each([
+      "60 * * * * *",
+      "0 60 * * *",
+      "0 24 * * *",
+      "0 9 0 * *",
+      "0 9 32 * *",
+      "0 9 * 0 *",
+      "0 9 * 13 *",
+      "0 9 * * 8",
+      "0 9 0-5 * *",
+      "0 9 5-1 * *",
+      "0 9 20-32 * *",
+      "0 9 0-5/2 * *",
+      "0 9 5-1/2 * *",
+      "0 9 20-32/3 * *",
+      "0 9 * DEC-FEB *",
+      "0 9 * * FRI-MON",
+      "0 9 */0 * *",
+      "*/61 * * * *",
+      "0 */25 * * *",
+      "0 9 */32 * *",
+      "0 9 * */13 *",
+      "0 9 * * */9",
+      "0 9 1-2/60 * *",
+      "0 9 * * 5#0",
+      "0 9 * * 5#6",
+      "0 9 * * *#L",
+      "0 9 ?-5 * *",
+      "0 9 , * *",
+      "0 9 ,, * *",
+    ])("an out-of-range cron %p exits 2 before connecting", async (cron) => {
+      const f = writeJson("badrange.json", { cron });
+      const r = await run(
+        sb,
+        ["maintenance", "add", "--title", "w", "--strategy", "cron", "--config-file", f],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("in-range values and steps");
+      expect(kuma.calls).toHaveLength(0);
+    });
+
+    test.each([
+      "59 59 23 31 12 7",
+      "0 0 0 1 1 0",
+      "0-59 0-59 0-23 1-31 1-12 0-7",
+      "*/60 */60 */24 */31 */12 */7",
+      "0 9 1/2 * *",
+      "0 9 5/30 * *",
+      "0 9 1-15/2 * *",
+      "0 9 * * 5-7",
+      "0 9 * * MON-SUN",
+      "0 9 * * */8",
+      "0 9 0/5 * *",
+      "0 9 * 0/3 *",
+      "0 9 ,5 * *",
+      "0 9 L,5 * *",
+    ])("a boundary cron %p is accepted", async (cron) => {
+      const f = writeJson("bounds.json", { cron });
+      const r = await run(
+        sb,
+        ["maintenance", "add", "--title", "w", "--strategy", "cron", "--config-file", f],
+        creds(kuma.url),
+      );
+      expect(r.code).toBe(0);
+      const sent = callsOf("addMaintenance")[0]!.args[0] as Record<string, unknown>;
+      expect(sent.cron).toBe(cron);
     });
 
     test.each(["0 9 * * 5#3", "0 9 * * 5#L"])(
