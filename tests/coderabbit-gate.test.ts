@@ -28,7 +28,7 @@ describe("gateState", () => {
   test("passes when a push leaves CodeRabbit no files to review", () => {
     expect(gateState("No files to review")).toEqual({
       state: "success",
-      description: "CodeRabbit: no files to review",
+      description: "CodeRabbit found no files to review",
     });
   });
 
@@ -44,6 +44,7 @@ describe("gateState", () => {
     expect(gateState("Review completed — 3 files reviewed").state).toBe("success");
     expect(gateState("Review in progress: scripts/coderabbit-gate.ts").state).toBe("pending");
     expect(gateState("Review queued: waiting for a free slot").state).toBe("pending");
+    expect(gateState("No files to review — all changed files are excluded").state).toBe("success");
   });
 
   test("fails every other outcome and says what to do", () => {
