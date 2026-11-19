@@ -1279,8 +1279,14 @@ export function registerMonitors(program: Command): void {
         pushToken = merged;
       }
 
-      // A hatch key beats the flag in the merge below, so a flag value it
-      // overrides is never parsed: `--interval 0 --set interval=30` sends 30.
+      // A hatch key beats the flag in the merge below, so an overridden flag
+      // value is never used — but it is still parsed: a flag the user typed
+      // should fail loudly, not pass silently under the hatch override.
+      if (opts.interval !== undefined) parseMonitorInterval(opts.interval, "--interval");
+      if (opts.retryInterval !== undefined) {
+        parsePositiveNumber(opts.retryInterval, "--retry-interval");
+      }
+      if (opts.timeout !== undefined) parseTimeoutSeconds(opts.timeout, "--timeout");
       const interval =
         sets.interval !== undefined || fileConfig.interval !== undefined
           ? undefined

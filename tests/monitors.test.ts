@@ -3844,6 +3844,33 @@ describe("monitors add", () => {
     expect(addCalls()).toHaveLength(0);
   });
 
+  test.each([
+    [["--interval", "abc"], "interval=60"],
+    [["--retry-interval", "abc"], "retryInterval=30"],
+    [["--timeout", "abc"], "timeout=10"],
+  ])("a bad timing flag exits 2 even when a hatch overrides it: %p", async (flagArgs, hatch) => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        ...flagArgs,
+        "--set",
+        hatch,
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(kuma.calls).toHaveLength(0);
+    expect(addCalls()).toHaveLength(0);
+  });
+
   test("--set url with a non-string value exits 2 before connecting", async () => {
     const r = await run(
       sb,
