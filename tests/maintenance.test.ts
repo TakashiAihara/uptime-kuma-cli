@@ -1533,6 +1533,7 @@ describe("maintenance", () => {
       "0 9 * feb,mar,apr,may,jun,jul,aug,sep,oct,nov tue,wed,thu,fri,sun",
       "0\t9 * * *",
       "0  0 9 * * *",
+      "0 9 L, * *",
     ])("a cron expression %p is accepted", async (cron) => {
       const f = writeJson("goodshape.json", { cron });
       const r = await run(
@@ -1595,6 +1596,7 @@ describe("maintenance", () => {
       "0 9 * * 5#3#-",
       "0 9 * * 5#3/2",
       "0 9 * * 5#-3",
+      "0 9 * * 5-6#2/1",
       "0 9 ?-5 * *",
       "0 9 , * *",
       "0 9 ,, * *",
