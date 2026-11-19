@@ -187,20 +187,24 @@ describe("maintenance on Kuma 2.x", () => {
       expect(k.calls).toHaveLength(0);
     });
 
-    test.each(["0 9 * * 5#3", "0 9 * * 5#L", "0 9 * * MON#2", "0 9 * * 5L"])(
-      "cron accepts the croner 8 day-of-week form %p",
-      async (cron) => {
-        const k = await useFake();
-        const f = writeJson("cron8.json", { cron });
-        const r = await run(
-          sb,
-          ["maintenance", "add", "--title", "w", "--strategy", "cron", "--config-file", f],
-          creds(k.url),
-        );
-        expect(r.code).toBe(0);
-        expect(sentAdd(k).cron).toBe(cron);
-      },
-    );
+    test.each([
+      "0 9 * * 5#3",
+      "0 9 * * 5#L",
+      "0 9 * * MON#2",
+      "0 9 * * 5L",
+      "0 9 * * 5-7#3",
+      "0 9 * * 5/2#3",
+    ])("cron accepts the croner 8 day-of-week form %p", async (cron) => {
+      const k = await useFake();
+      const f = writeJson("cron8.json", { cron });
+      const r = await run(
+        sb,
+        ["maintenance", "add", "--title", "w", "--strategy", "cron", "--config-file", f],
+        creds(k.url),
+      );
+      expect(r.code).toBe(0);
+      expect(sentAdd(k).cron).toBe(cron);
+    });
 
     test.each(["0 9 * * */8", "0 9 0/5 * *", "0 9 ,5 * *"])(
       "a croner 6-only form %p exits 2 once the 2.x version is known",

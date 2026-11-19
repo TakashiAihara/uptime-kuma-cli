@@ -284,21 +284,24 @@ function cronEntryOk(
   const num = (s: string): number => Number.parseInt(s, 10);
   const inRange = (n: number) => n >= min && n <= max;
 
-  if (rest.includes("-") && rest.includes("/")) {
+  // partToArray picks the handler on the untouched conf — "-" inside a
+  // day-of-week "#" nth still routes into the range or stepping handler,
+  // where it breaks the rest-only parse the same way it breaks croner's
+  if (entry.includes("-") && entry.includes("/")) {
     const m = /^(\d+)-(\d+)\/(\d+)$/.exec(rest);
     if (m === null) return false;
     const steps = num(m[3]!);
     if (steps === 0 || steps > fieldSize) return false;
     return inRange(num(m[1]!)) && inRange(num(m[2]!)) && num(m[1]!) <= num(m[2]!);
   }
-  if (rest.includes("-")) {
+  if (entry.includes("-")) {
     const seg = rest.split("-");
     if (seg.length !== 2) return false;
     const lower = num(seg[0]!);
     const upper = num(seg[1]!);
     return inRange(lower) && inRange(upper) && lower <= upper;
   }
-  if (rest.includes("/")) {
+  if (entry.includes("/")) {
     const seg = rest.split("/");
     if (seg.length !== 2) return false;
     const steps = num(seg[1]!);
