@@ -215,7 +215,7 @@ function questionOk(entry: string, partIndex: number, version: CronMajor): boole
     rest === "?" ||
     rest === "?L" ||
     /^\?\/\d+$/.test(rest) ||
-    ((partIndex === 3 || partIndex === 4) && /\/\?$/.test(rest))
+    ((partIndex === 3 || partIndex === 4) && rest.endsWith("/?"))
   );
 }
 
