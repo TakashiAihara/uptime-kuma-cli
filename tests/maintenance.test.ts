@@ -1598,6 +1598,11 @@ describe("maintenance", () => {
       "0 9 * * 5#-3",
       "0 9 * * 5-6#2/1",
       "0 9 ?-5 * *",
+      "0 9 5-? * *",
+      "0 9 * * ?-5",
+      "0 9 * * 5#?",
+      "0 9 * * ?/?",
+      "0 9 * * ?5",
       "0 9 , * *",
       "0 9 ,, * *",
     ])("an out-of-range cron %p exits 2 before connecting", async (cron) => {
@@ -1627,6 +1632,12 @@ describe("maintenance", () => {
       "0 9 * 0/3 *",
       "0 9 ,5 * *",
       "0 9 L,5 * *",
+      "0 9 ?/5 * *",
+      "0 9 5-10/? * *",
+      "0 9 */? * *",
+      "0 9 * * ?L",
+      "0 9 * * ?/5",
+      "0 9 * ?/5 *",
     ])("a boundary cron %p is accepted", async (cron) => {
       const f = writeJson("bounds.json", { cron });
       const r = await run(
@@ -1639,7 +1650,7 @@ describe("maintenance", () => {
       expect(sent.cron).toBe(cron);
     });
 
-    test.each(["0 9 * * 5#3", "0 9 * * 5#L"])(
+    test.each(["0 9 * * 5#3", "0 9 * * 5#L", "0 9 * * ?#3", "0 9 * * ?/5#3"])(
       "a croner 8 day-of-week form %p exits 2 once the 1.x version is known",
       async (cron) => {
         const f = writeJson("cron8-on-1x.json", { cron });
@@ -1650,6 +1661,22 @@ describe("maintenance", () => {
         );
         expect(r.code).toBe(2);
         expect(r.stderr).toContain("5 or 6 whitespace-separated cron fields");
+        expect(kuma.calls.map((c) => c.event)).toContain("login");
+        expect(callsOf("addMaintenance")).toHaveLength(0);
+      },
+    );
+
+    test.each(["0 9 20-33/7 * *", "0 9 * * 2-8/7"])(
+      "a croner 8-only value %p exits 2 once the 1.x version is known",
+      async (cron) => {
+        const f = writeJson("cron8value-on-1x.json", { cron });
+        const r = await run(
+          sb,
+          ["maintenance", "add", "--title", "w", "--strategy", "cron", "--config-file", f],
+          creds(kuma.url),
+        );
+        expect(r.code).toBe(2);
+        expect(r.stderr).toContain("in-range values and steps");
         expect(kuma.calls.map((c) => c.event)).toContain("login");
         expect(callsOf("addMaintenance")).toHaveLength(0);
       },

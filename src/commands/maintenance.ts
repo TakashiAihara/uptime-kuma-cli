@@ -195,6 +195,30 @@ const CRON_PART_LIMITS = [
   { min: 0, max: 7, size: 8 }, // day of week
 ] as const;
 
+// croner substitutes "?" with the field's current value at run time, so a
+// compound entry is only checkable where every possible value gives the
+// same verdict: a whole "?" entry, a step start ("?/5" — the current value
+// always sits inside the field's range), a day-of-week "?L" or "?#n" (the
+// rest side always parses), and a step value ("5/?") on day-of-month or
+// month only, where the current value can never be 0 so the step stays in
+// 1..size. A "?" in a range bound or a "#" nth flips the verdict with the
+// clock, so those are refused.
+function questionOk(entry: string, partIndex: number, version: CronMajor): boolean {
+  if (!entry.includes("?")) return true;
+  let rest = entry;
+  if (version === "8" && partIndex === 5) {
+    const seg = entry.split("#");
+    rest = seg[0]!;
+    if (seg[1]?.includes("?") === true) return false;
+  }
+  return (
+    rest === "?" ||
+    rest === "?L" ||
+    /^\?\/\d+$/.test(rest) ||
+    ((partIndex === 3 || partIndex === 4) && /\/\?$/.test(rest))
+  );
+}
+
 // parse's transforms up to throwAtIllegalCharacters: a nickname expands
 // first, the pattern splits on whitespace into 5 or 6 parts (5 gets a
 // leading seconds "0"), the first "L" is stripped from day-of-month, month
@@ -203,10 +227,7 @@ const CRON_PART_LIMITS = [
 // may only contain [0-9*/,-] — plus "#" and "L" in day-of-week on croner 8.
 // Returns null where parse throws; an empty part or a bare day-of-week "L"
 // is refused too since the field stays all-zero and the window never runs
-// (croner 8 throws anyway). croner substitutes "?" with the field's current
-// value, so it can only be checked deterministically as a whole entry —
-// inside a range or step the result depends on the clock — and at most once
-// per part, as in croner.
+// (croner 8 throws anyway). At most one "?" per part, as in croner.
 function cronParts(
   value: string,
   version: CronMajor,
@@ -240,7 +261,7 @@ function cronParts(
     const q = part.indexOf("?");
     if (q !== -1) {
       if (part.indexOf("?", q + 1) !== -1) return null;
-      if (!part.split(",").includes("?")) return null;
+      if (!part.split(",").every((entry) => questionOk(entry, i, version))) return null;
     }
     parts.push(q === -1 ? part : part.replace("?", String(CRON_PART_LIMITS[i]!.min)));
   }
@@ -290,9 +311,15 @@ function cronEntryOk(
   if (entry.includes("-") && entry.includes("/")) {
     const m = /^(\d+)-(\d+)\/(\d+)$/.exec(rest);
     if (m === null) return false;
+    const lower = num(m[1]!);
+    const upper = num(m[2]!);
     const steps = num(m[3]!);
-    if (steps === 0 || steps > fieldSize) return false;
-    return inRange(num(m[1]!)) && inRange(num(m[2]!)) && num(m[1]!) <= num(m[2]!);
+    if (steps === 0 || steps > fieldSize || !inRange(lower) || lower > upper) return false;
+    // croner 8 only checks the values the steps land on — an upper bound
+    // past the end of the field is fine while no step reaches it; croner 6
+    // throws "Value out of range" on the bound itself
+    if (version === "8") return lower + Math.floor((upper - lower) / steps) * steps <= max;
+    return inRange(upper);
   }
   if (entry.includes("-")) {
     const seg = rest.split("-");
@@ -486,7 +513,7 @@ function validateMaintenance(
   // strategies may carry a start but never an end on 1.x; 2.x's inferDuration
   // falls back to duration * 1000, so the end date is valid there.
   if (
-    !opts.kuma2 &&
+    opts.kuma2 === false &&
     strategy !== undefined &&
     (strategy === "cron" || strategy.startsWith("recurring-")) &&
     need("dateRange")
@@ -510,7 +537,7 @@ function validateMaintenance(
   // whenever dateRange is judged; on 1.x the refusal above already rejects
   // any end, so only the 2.x path needs it.
   if (
-    opts.kuma2 &&
+    opts.kuma2 !== false &&
     strategy !== undefined &&
     (strategy === "cron" || strategy.startsWith("recurring-")) &&
     need("dateRange")

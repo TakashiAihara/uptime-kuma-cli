@@ -194,7 +194,18 @@ describe("maintenance on Kuma 2.x", () => {
       "0 9 * * 5L",
       "0 9 * * 5-7#3",
       "0 9 * * 5/2#3",
-    ])("cron accepts the croner 8 day-of-week form %p", async (cron) => {
+      "0 9 * * 5#",
+      "0 9 * * ?#3",
+      "0 9 * * ?L",
+      "0 9 * * ?/5#3",
+      "0 9 20-33/7 * *",
+      "0 9 * * 2-8/7",
+      "0 9 L * *",
+      "0 9 L, * *",
+      "0 9 * * /5",
+      "0 9 * * ?/5",
+      "0 9 ?/5 * *",
+    ])("cron accepts %p on a 2.x server", async (cron) => {
       const k = await useFake();
       const f = writeJson("cron8.json", { cron });
       const r = await run(
