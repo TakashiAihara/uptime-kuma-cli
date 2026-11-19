@@ -43,7 +43,7 @@ describe("docker-hosts", () => {
         id: 5,
         name: "ci tcp",
         dockerType: "tcp",
-        dockerDaemon: "https://u1:***@tcp-daemon.example.com:2375/",
+        dockerDaemon: "https://***@tcp-daemon.example.com:2375/",
       },
     ]);
   });
@@ -374,7 +374,7 @@ describe("docker-hosts", () => {
     const r = await run(sb, ["docker-hosts", "test", "3"], creds(kuma.url));
     expect(r.code).toBe(1);
     expect(r.stderr).not.toContain(TCP_PW);
-    expect(r.stderr).toContain("http://u1:***@docker.example.com:2375/");
+    expect(r.stderr).toContain("http://***@docker.example.com:2375/");
   });
 
   test("delete removes the host and prints { id, deleted: true }", async () => {

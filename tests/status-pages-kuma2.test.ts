@@ -703,9 +703,7 @@ describe("status-pages save on Kuma 2.x", () => {
     ]);
     // ...but stdout only ever shows the redacted form
     expect(r.stdout).not.toContain("urlpw-custom");
-    expect(r.json().publicGroupList[0].monitorList[0].url).toBe(
-      "https://probe:***@example.com/health",
-    );
+    expect(r.json().publicGroupList[0].monitorList[0].url).toBe("https://***@example.com/health");
   });
 
   test("the degraded read-back print redacts a sent custom url", async () => {
@@ -733,9 +731,7 @@ describe("status-pages save on Kuma 2.x", () => {
     expect(r.code).toBe(0);
     expect(r.stderr).toContain("/api/status-page/status");
     expect(r.stdout).not.toContain("urlpw-custom");
-    expect(r.json().publicGroupList[0].monitorList[0].url).toBe(
-      "https://probe:***@example.com/health",
-    );
+    expect(r.json().publicGroupList[0].monitorList[0].url).toBe("https://***@example.com/health");
   });
 
   test("the save output carries incidents like get", async () => {

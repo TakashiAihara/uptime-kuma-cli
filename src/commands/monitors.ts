@@ -240,16 +240,13 @@ export function redactUrl(value: unknown): unknown {
     // unparseable: the userinfo boundary is unknown, so hide the whole value
     return value.includes("@") ? "***" : value;
   }
-  if (parsed.password === "") {
-    // an opaque-path parse like "u:p@host:port" has no host, so the userinfo
-    // boundary is unknowable — hide the whole value like the catch branch
-    if (parsed.host === "" && value.includes("@")) return "***";
-    // a lone userinfo slot usually holds a token, not a username — hide it
-    if (parsed.username === "") return value;
-    parsed.username = "***";
-    return parsed.toString();
-  }
-  parsed.password = "***";
+  // an opaque-path parse like "u:p@host:port" has no host, so the userinfo
+  // boundary is unknowable — hide the whole value like the catch branch
+  if (parsed.host === "" && value.includes("@")) return "***";
+  if (parsed.username === "" && parsed.password === "") return value;
+  // either userinfo slot can hold a token, not just a name — hide all of it
+  parsed.username = "***";
+  parsed.password = "";
   return parsed.toString();
 }
 
@@ -540,13 +537,21 @@ function checkTailscalePing(s: KumaSession, type: unknown): void {
 async function checkGameId(s: KumaSession, monitor: Record<string, unknown>): Promise<void> {
   const game = monitor.game;
   if (typeof game !== "string" || game === "") return; // needString reports an empty one
+  // gamedig resolves "protocol-*" without consulting its game list, so it is
+  // passed through like Kuma passes monitor.game.
+  if (game.startsWith("protocol-")) return;
   const res = await s.request("getGameList");
   const list = res?.gameList;
   if (!Array.isArray(list)) fail(70, "unexpected getGameList response");
   for (const entry of list) {
     const keys = (entry as { keys?: unknown }).keys;
     if (!Array.isArray(keys)) fail(70, "unexpected getGameList response");
-    if (keys.includes(game)) return;
+    // an alias resolves to the entry, but the UI stores keys[0] — write it
+    // back so the stored id is one the 2.x migrations understand.
+    if (keys.includes(game)) {
+      monitor.game = keys[0];
+      return;
+    }
   }
   fail(1, `game "${game}" is not in the server's game list`);
 }
@@ -1672,14 +1677,17 @@ export function registerMonitors(program: Command): void {
         sets.timeout !== undefined ||
         fileConfig.timeout !== undefined;
       const type = typeof monitor.type === "string" ? monitor.type : "";
-      // A type change that keeps a nonpositive stored timeout would send it
-      // back to a check that reads 0 as interval × 800 seconds on 1.23, so it
-      // is normalized like an unset one — unless the same edit set the value
-      // (an explicit timeout=0 is legal on 2.x and must not be overwritten).
+      // A type change that keeps a stored timeout the new type cannot run is
+      // normalized like an unset one — on 1.23 a nonpositive timeout reads as
+      // interval × 800 seconds at check time, so a stored 0 (or less) gets the
+      // type default, while on 2.x a stored 0 is legal and kept. A timeout the
+      // same edit sets is never overwritten.
       const timeoutUnset =
         typeChanged &&
         !touched.has("timeout") &&
-        !(typeof monitor.timeout === "number" && monitor.timeout > 0);
+        (typeof monitor.timeout !== "number" ||
+          monitor.timeout < 0 ||
+          (monitor.timeout === 0 && s.majorVersion < 2));
       if (timeoutUnset) {
         monitor.timeout = defaultTimeoutSeconds(s, type);
       }

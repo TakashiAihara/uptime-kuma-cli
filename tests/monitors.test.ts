@@ -106,7 +106,7 @@ describe("monitors list", () => {
     expect(r.code).toBe(0);
     expect(r.stdout).not.toContain("fixture-hidden-u1");
     const out = r.json();
-    expect(out.find((m: any) => m.id === 7).url).toBe("https://u1:***@x.example.com/p");
+    expect(out.find((m: any) => m.id === 7).url).toBe("https://***@x.example.com/p");
     expect(out.find((m: any) => m.id === 2).url).toBe("https://dav.example.com");
   });
 
@@ -213,7 +213,7 @@ describe("monitors get", () => {
     const r = await run(sb, ["monitors", "get", "7"], creds(kuma.url));
     expect(r.code).toBe(0);
     expect(r.stdout).not.toContain("fixture-hidden-u2");
-    expect(r.json().url).toBe("https://u1:***@x.example.com/");
+    expect(r.json().url).toBe("https://***@x.example.com/");
   });
 
   test("an empty secret field stays empty so the reader can tell it is unset", async () => {
@@ -802,7 +802,7 @@ describe("monitors add", () => {
     expect(r.code).toBe(0);
     const out = r.json();
     expect(out.pushUrl).toBe(
-      `https://user:***@status.example.org/api/push/${out.pushToken}?status=up&msg=OK&ping=`,
+      `https://***@status.example.org/api/push/${out.pushToken}?status=up&msg=OK&ping=`,
     );
     expect(r.stdout).not.toContain("s3cret");
   });
@@ -816,7 +816,7 @@ describe("monitors add", () => {
     );
     expect(r.code).toBe(0);
     expect(r.json().pushUrl).toBe(
-      "https://user:***@status.example.org/kuma/api/push/..?status=up&msg=OK&ping=",
+      "https://***@status.example.org/kuma/api/push/..?status=up&msg=OK&ping=",
     );
   });
 
@@ -826,7 +826,7 @@ describe("monitors add", () => {
     expect(r.code).toBe(0);
     const out = r.json();
     expect(out.pushUrl).toBe(
-      `${kuma.url.replace("://", "://user:***@")}/api/push/${out.pushToken}?status=up&msg=OK&ping=`,
+      `${kuma.url.replace("://", "://***@")}/api/push/${out.pushToken}?status=up&msg=OK&ping=`,
     );
     expect(r.stdout).not.toContain("s3cret");
   });
@@ -1061,7 +1061,7 @@ describe("monitors add", () => {
     expect(sent.gamedigGivenPortOnly).toBe(true);
   });
 
-  test("gamedig: a game alias in the server's game list is accepted", async () => {
+  test("gamedig: a game alias is accepted and stored as the canonical keys[0]", async () => {
     const r = await run(
       sb,
       [
@@ -1081,7 +1081,31 @@ describe("monitors add", () => {
       creds(kuma.url),
     );
     expect(r.code).toBe(0);
-    expect((addCalls()[0]!.args[0] as any).game).toBe("minecraftpe");
+    expect((addCalls()[0]!.args[0] as any).game).toBe("minecraft");
+  });
+
+  test("gamedig: a protocol-* game is accepted without the game list", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "gamedig",
+        "--name",
+        "valve",
+        "--hostname",
+        "gs.example.com",
+        "--port",
+        "27015",
+        "--game",
+        "protocol-valve",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).game).toBe("protocol-valve");
+    expect(kuma.calls.map((c) => c.event)).not.toContain("getGameList");
   });
 
   test("gamedig: a game outside the server's game list exits 1 before add", async () => {
@@ -3761,29 +3785,31 @@ describe("monitors add", () => {
     expect((addCalls()[0]!.args[0] as any).retryInterval).toBe(20);
   });
 
-  test.each([[["--interval", "1.5"]], [["--set", "interval=1.5"]]])(
-    "a non-integer interval exits 2 after connecting: %p",
-    async (extra) => {
-      const r = await run(
-        sb,
-        [
-          "monitors",
-          "add",
-          "--type",
-          "http",
-          "--name",
-          "x",
-          "--url",
-          "https://x.example.com",
-          ...extra,
-        ],
-        creds(kuma.url),
-      );
-      expect(r.code).toBe(2);
-      expect(r.stderr).toContain("interval must be an integer number of seconds");
-      expect(addCalls()).toHaveLength(0);
-    },
-  );
+  test.each([
+    ["interval", ["--interval", "1.5"]],
+    ["interval", ["--set", "interval=1.5"]],
+    ["retryInterval", ["--retry-interval", "25.5"]],
+    ["retryInterval", ["--set", "retryInterval=25.5"]],
+  ])("a non-integer %s exits 2 after connecting: %p", async (_field, extra) => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "x",
+        "--url",
+        "https://x.example.com",
+        ...extra,
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("must be an integer number of seconds");
+    expect(addCalls()).toHaveLength(0);
+  });
 
   test("--set url with a non-string value exits 2 before connecting", async () => {
     const r = await run(

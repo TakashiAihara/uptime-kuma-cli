@@ -846,7 +846,7 @@ describe("monitor timing on Kuma 2.x", () => {
     expect(stored(k, "pg").timeout).toBe(10);
   });
 
-  test("edit turning an http monitor with timeout 0 into ping gets the ping default", async () => {
+  test("edit turning an http monitor with timeout 0 into ping keeps the stored 0", async () => {
     const k = await useFake({
       profile: "2.x",
       monitors: [{ ...http(7, "h"), timeout: 0 }],
@@ -859,7 +859,7 @@ describe("monitor timing on Kuma 2.x", () => {
     expect(r.code).toBe(0);
     const sent = editCalls(k)[0]!.args[0] as Record<string, any>;
     expect(sent.type).toBe("ping");
-    expect(sent.timeout).toBe(10);
+    expect(sent.timeout).toBe(0);
   });
 
   test("edit --set type with an explicit --set timeout=0 keeps 0", async () => {

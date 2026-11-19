@@ -531,7 +531,8 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
           primaryBaseURL: null,
           serverTimezone: "UTC",
           serverTimezoneOffset: "+00:00",
-          // the rest mirrors 2.5.11's sendInfo; no test reads these yet
+          // mirrors 2.5.11's sendInfo; isContainer is the official image's
+          // UPTIME_KUMA_IS_CONTAINER and drives the tailscale-ping refusal
           isContainer: true,
           dbType: "sqlite",
           runtime: { platform: "linux", arch: "x64" },

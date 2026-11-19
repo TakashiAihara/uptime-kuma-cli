@@ -583,7 +583,7 @@ describe("settings set", () => {
     kuma.state.settings = { primaryBaseURL: url };
     const g = await run(sb, ["settings", "get"], creds(kuma.url));
     expect(g.code).toBe(0);
-    expect(g.json().primaryBaseURL).toBe("https://op:***@kuma.example.com/");
+    expect(g.json().primaryBaseURL).toBe("https://***@kuma.example.com/");
     expect(g.stdout).not.toContain("pw-fixture");
 
     const f = writeJson("url.json", { primaryBaseURL: url });
@@ -591,7 +591,7 @@ describe("settings set", () => {
     expect(s.code).toBe(0);
     // the raw value goes on the wire; only the printed output is redacted
     expect(sentSettings().primaryBaseURL).toBe(url);
-    expect(s.json().primaryBaseURL).toBe("https://op:***@kuma.example.com/");
+    expect(s.json().primaryBaseURL).toBe("https://***@kuma.example.com/");
     expect(s.stdout).not.toContain("pw-fixture");
     expect(kuma.state.settings.primaryBaseURL).toBe(url);
   });
