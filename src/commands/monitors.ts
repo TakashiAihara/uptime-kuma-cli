@@ -431,7 +431,7 @@ function checkMonitorTiming(s: KumaSession, timing: MonitorTiming): void {
 // slot counts too. redactUrl hides one the same way: when the URL does not
 // parse, "@" marks a credential boundary the parser could not find, so the
 // value counts as holding a secret.
-function urlCarriesCredentials(value: string): boolean {
+export function urlCarriesCredentials(value: string): boolean {
   try {
     const parsed = new URL(value);
     return (

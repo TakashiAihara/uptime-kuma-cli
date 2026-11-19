@@ -624,6 +624,17 @@ describe("settings set", () => {
     expect(kuma.calls).toHaveLength(0);
   });
 
+  test("--set primaryBaseURL with a lone userinfo token exits 2 before connecting", async () => {
+    const r = await run(
+      sb,
+      ["settings", "set", "--set", "primaryBaseURL=https://tok-fixture@kuma.example.com"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("use --config-file instead");
+    expect(kuma.calls).toHaveLength(0);
+  });
+
   test("--set primaryBaseURL without a password is accepted", async () => {
     const r = await run(
       sb,

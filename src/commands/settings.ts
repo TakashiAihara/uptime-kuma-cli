@@ -2,7 +2,7 @@ import { type Command } from "commander";
 import { CliError, fail, parseSets, printJson, readJsonFile } from "../lib.ts";
 import { connect, type KumaSession } from "../kuma.ts";
 import { KUMA_2X_TIMEZONES, KUMA_TIMEZONES } from "../timezones.ts";
-import { redactUrl } from "./monitors.ts";
+import { redactUrl, urlCarriesCredentials } from "./monitors.ts";
 
 const collect = (value: string, previous: string[]): string[] => [...previous, value];
 
@@ -321,12 +321,13 @@ export function registerSettings(program: Command): void {
       }
       validateSettingValues(sets);
       validateSettingValues(fileConfig);
-      // a password inside primaryBaseURL is a secret too: argv is no place for it
+      // any userinfo inside primaryBaseURL is a secret too: argv is no
+      // place for it — the username slot can hold a token on its own
       if (typeof sets.primaryBaseURL === "string" && sets.primaryBaseURL !== "") {
-        if (new URL(sets.primaryBaseURL).password !== "") {
+        if (urlCarriesCredentials(sets.primaryBaseURL)) {
           fail(
             2,
-            "--set primaryBaseURL with a password would put a secret in the command line; use --config-file instead",
+            "--set primaryBaseURL with credentials would put a secret in the command line; use --config-file instead",
           );
         }
       }
