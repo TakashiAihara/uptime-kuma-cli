@@ -662,6 +662,62 @@ describe("credentials and url", () => {
   });
 });
 
+// UPTIME_KUMA_URL may carry user:pass@ for a basic-auth proxy in front of Kuma
+describe("error messages do not print the password in UPTIME_KUMA_URL", () => {
+  const withPw = (url: string) => url.replace("://", "://proxyuser:s3cret@");
+  const expectMasked = (r: { code: number; stderr: string; stdout: string }, message: RegExp) => {
+    expect(r.code).toBe(2);
+    expect(r.stderr).toMatch(message);
+    expect(r.stderr).toContain("://***@");
+    expect(r.stderr + r.stdout).not.toContain("s3cret");
+    expect(r.stderr + r.stdout).not.toContain("proxyuser");
+  };
+
+  test("a url with the wrong scheme", async () => {
+    const r = await run(sb, list, {
+      ...creds(kuma.url),
+      UPTIME_KUMA_URL: "ftp://proxyuser:s3cret@h",
+    });
+    expectMasked(r, /must start with http:\/\/ or https:\/\//);
+  });
+
+  test("a refused connection", async () => {
+    const r = await run(sb, list, {
+      ...creds(withPw("http://127.0.0.1:1")),
+      UPTIME_KUMA_TIMEOUT: "2",
+    });
+    expectMasked(r, /failed to connect to/);
+  });
+
+  test("a server that never answers", async () => {
+    const silent: Server = createServer(() => {});
+    await new Promise<void>((r) => silent.listen(0, "127.0.0.1", r));
+    const port = (silent.address() as { port: number }).port;
+    const r = await run(sb, list, {
+      ...creds(withPw(`http://127.0.0.1:${port}`)),
+      UPTIME_KUMA_TIMEOUT: "1",
+    });
+    silent.close();
+    // our timer and socket.io's connect timeout share the budget; either may fire first
+    expectMasked(r, /timed out connecting to|failed to connect to .*: timeout/);
+  });
+
+  test("a server that never sends its info", async () => {
+    kuma.state.noPreLoginInfo = true;
+    const r = await run(sb, list, { ...creds(withPw(kuma.url)), UPTIME_KUMA_TIMEOUT: "1" });
+    expectMasked(r, /timed out waiting for the server info from/);
+  });
+
+  test("a dropped connection", async () => {
+    kuma.state.disconnectOn = "getMonitorBeats";
+    const r = await run(sb, ["beats", "1"], {
+      ...creds(withPw(kuma.url)),
+      UPTIME_KUMA_TIMEOUT: "20",
+    });
+    expectMasked(r, /socket disconnected from/);
+  });
+});
+
 describe("meta", () => {
   test("--help lists the command groups", async () => {
     const r = await run(sb, ["--help"]);

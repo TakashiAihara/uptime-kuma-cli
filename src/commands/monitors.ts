@@ -14,6 +14,7 @@ import {
   printJson,
   readJsonFile,
   readTextFile,
+  redactUrl,
 } from "../lib.ts";
 import {
   connect,
@@ -229,26 +230,6 @@ const SASL_VISIBLE_KEYS = new Set(["mechanism", "username", "awsRegion", "access
 // The fields docs/design/cli.md Output redacts. They may only arrive through
 // --config-file so the secret stays out of argv.
 const HATCH_SECRET_KEYS = new Set([...SECRET_KEYS, "kafkaProducerSaslOptions"]);
-
-// A monitor URL may carry credentials as user[:pass]@; keep the URL readable and hide the password
-export function redactUrl(value: unknown): unknown {
-  if (typeof value !== "string" || value === "") return value;
-  let parsed: URL;
-  try {
-    parsed = new URL(value);
-  } catch {
-    // unparseable: the userinfo boundary is unknown, so hide the whole value
-    return value.includes("@") ? "***" : value;
-  }
-  // an opaque-path parse like "u:p@host:port" has no host, so the userinfo
-  // boundary is unknowable — hide the whole value like the catch branch
-  if (parsed.host === "" && value.includes("@")) return "***";
-  if (parsed.username === "" && parsed.password === "") return value;
-  // either userinfo slot can hold a token, not just a name — hide all of it
-  parsed.username = "***";
-  parsed.password = "";
-  return parsed.toString();
-}
 
 function redactSecrets(monitor: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = { ...monitor, url: redactUrl(monitor.url) };

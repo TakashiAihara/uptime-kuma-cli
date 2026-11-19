@@ -1,8 +1,8 @@
 import { type Command } from "commander";
-import { CliError, fail, parseSets, printJson, readJsonFile } from "../lib.ts";
+import { CliError, fail, parseSets, printJson, readJsonFile, redactUrl } from "../lib.ts";
 import { connect, type KumaSession } from "../kuma.ts";
 import { KUMA_2X_TIMEZONES, KUMA_TIMEZONES } from "../timezones.ts";
-import { redactUrl, urlCarriesCredentials } from "./monitors.ts";
+import { urlCarriesCredentials } from "./monitors.ts";
 
 const collect = (value: string, previous: string[]): string[] => [...previous, value];
 
