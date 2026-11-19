@@ -698,8 +698,14 @@ describe("error messages do not print the password in UPTIME_KUMA_URL", () => {
       UPTIME_KUMA_TIMEOUT: "1",
     });
     silent.close();
-    // our timer and socket.io's connect timeout share the budget; either may fire first
-    expectMasked(r, /timed out connecting to|failed to connect to .*: timeout/);
+    // socket.io's own connect timer, armed first with the same budget, fires first
+    expectMasked(r, /failed to connect to .*: timeout/);
+  });
+
+  test("a server that never admits the socket to its namespace", async () => {
+    kuma.state.stallConnect = true;
+    const r = await run(sb, list, { ...creds(withPw(kuma.url)), UPTIME_KUMA_TIMEOUT: "1" });
+    expectMasked(r, /timed out connecting to/);
   });
 
   test("a server that never sends its info", async () => {

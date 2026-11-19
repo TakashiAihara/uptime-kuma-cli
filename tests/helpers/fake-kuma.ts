@@ -199,6 +199,8 @@ export type FakeState = {
   infoDelayMs: number;
   // send no pre-login info at all (Kuma always sends one)
   noPreLoginInfo: boolean;
+  // finish the Engine.IO handshake but never admit the socket to the namespace
+  stallConnect: boolean;
   // ms after connect before the fake answers events and sends the pre-login
   // info, like 2.5.11's awaited sendInfo; events before that are dropped
   listenersDelayMs: number;
@@ -548,6 +550,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     infoBeforeLoginAck: profile2x,
     infoDelayMs: 0,
     noPreLoginInfo: false,
+    stallConnect: false,
     listenersDelayMs: 0,
     fail: {},
     silentHeartbeat: [],
@@ -588,6 +591,9 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
   const emitted: Call[] = [];
   const http = createServer();
   const io = new Server(http);
+  io.use((_socket, next) => {
+    if (!state.stallConnect) next();
+  });
   // apicache of the /api/status-page/:slug route: keyed by req.url (path +
   // query); in Kuma several events call apicache.clear() and the fake models
   // the two relevant here — saveStatusPage and deleteMonitor
