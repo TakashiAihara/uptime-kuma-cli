@@ -426,13 +426,18 @@ function checkMonitorTiming(s: KumaSession, timing: MonitorTiming): void {
   }
 }
 
-// A URL carries credentials as user:pass@host; redactUrl hides one the same
-// way: when the URL does not parse, "@" marks a credential boundary the
-// parser could not find, so the value counts as holding a secret.
+// A URL carries credentials as user[:pass]@host — a token in the username
+// slot counts too. redactUrl hides one the same way: when the URL does not
+// parse, "@" marks a credential boundary the parser could not find, so the
+// value counts as holding a secret.
 function urlCarriesCredentials(value: string): boolean {
   try {
     const parsed = new URL(value);
-    return parsed.password !== "" || (parsed.host === "" && value.includes("@"));
+    return (
+      parsed.username !== "" ||
+      parsed.password !== "" ||
+      (parsed.host === "" && value.includes("@"))
+    );
   } catch {
     return value.includes("@");
   }
@@ -534,12 +539,12 @@ async function checkGameId(s: KumaSession, monitor: Record<string, unknown>): Pr
   const res = await s.request("getGameList");
   const list = res?.gameList;
   if (!Array.isArray(list)) fail(70, "unexpected getGameList response");
-  const known = list.some(
-    (entry) =>
-      Array.isArray((entry as { keys?: unknown }).keys) &&
-      ((entry as { keys: unknown[] }).keys as unknown[]).includes(game),
-  );
-  if (!known) fail(1, `game "${game}" is not in the server's game list`);
+  for (const entry of list) {
+    const keys = (entry as { keys?: unknown }).keys;
+    if (!Array.isArray(keys)) fail(70, "unexpected getGameList response");
+    if (keys.includes(game)) return;
+  }
+  fail(1, `game "${game}" is not in the server's game list`);
 }
 
 // A hatch value for a key that has a typed flag goes through the flag's
@@ -1640,8 +1645,8 @@ export function registerMonitors(program: Command): void {
       monitor.notificationIDList = notificationIdObject(monitor.notificationIDList);
       const touched = new Set([...Object.keys(fileConfig), ...Object.keys(sets)]);
       if (parentOpt !== undefined) touched.add("parent");
-      // Stored ids a deleted notification left behind are Kuma-side state, so
-      // the check only covers a list this edit supplies.
+      // Like every other field, a stored value the edit does not touch is
+      // not re-judged — the check only covers a list this edit supplies.
       if (touched.has("notificationIDList")) {
         checkNotificationIds(s, monitor.notificationIDList);
       }
@@ -1653,11 +1658,24 @@ export function registerMonitors(program: Command): void {
       const type = typeof monitor.type === "string" ? monitor.type : "";
       // A type change that keeps a nonpositive stored timeout would send it
       // back to a check that reads 0 as interval × 800 seconds on 1.23, so it
-      // is normalized like an unset one.
+      // is normalized like an unset one — unless the same edit set the value
+      // (an explicit timeout=0 is legal on 2.x and must not be overwritten).
       const timeoutUnset =
-        typeChanged && !(typeof monitor.timeout === "number" && monitor.timeout > 0);
+        typeChanged &&
+        !touched.has("timeout") &&
+        !(typeof monitor.timeout === "number" && monitor.timeout > 0);
       if (timeoutUnset) {
         monitor.timeout = defaultTimeoutSeconds(s, type);
+      }
+      // The UI's submit() sends httpBodyEncoding null outside the encoding
+      // types on both versions; a stored "json" does not follow the type
+      // change, but one the edit sets does.
+      if (
+        typeChanged &&
+        !touched.has("httpBodyEncoding") &&
+        !(BODY_ENCODING_TYPES as readonly string[]).includes(type)
+      ) {
+        monitor.httpBodyEncoding = null;
       }
       // The UI's interval watcher moves retryInterval only while the two
       // stored values were equal; a retryInterval the edit sets wins.

@@ -850,6 +850,10 @@ describe("monitors add", () => {
       ["--type", "ping", "--name", "x", "--hostname", "h", "--packet-size", "0x10"],
       "--packet-size",
     ],
+    [
+      ["--type", "ping", "--name", "x", "--hostname", "h", "--packet-size", "65501"],
+      "--packet-size",
+    ],
     [["--type", "port", "--name", "x", "--hostname", "h", "--port", "1e2"], "--port"],
   ])("empty or out-of-range values exit 2 before connecting: %p", async (args, word) => {
     const r = await run(sb, ["monitors", "add", ...args], creds(kuma.url));
@@ -901,6 +905,27 @@ describe("monitors add", () => {
     );
     expect(r.code).toBe(0);
     expect((addCalls()[0]!.args[0] as any).packetSize).toBe(128);
+  });
+
+  test("ping: --packet-size 65500 is the accepted upper bound", async () => {
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "ping",
+        "--name",
+        "p3",
+        "--hostname",
+        "10.0.0.1",
+        "--packet-size",
+        "65500",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).packetSize).toBe(65500);
   });
 
   test("dns: sends hostname, resolver 1.1.1.1, type A and port 53", async () => {
@@ -1084,6 +1109,30 @@ describe("monitors add", () => {
 
   test("gamedig: a malformed getGameList response exits 70", async () => {
     kuma.state.getGameListResult = { ok: true };
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "gamedig",
+        "--name",
+        "bad",
+        "--hostname",
+        "gs.example.com",
+        "--port",
+        "28960",
+        "--game",
+        "minecraft",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(70);
+    expect(addCalls()).toHaveLength(0);
+  });
+
+  test("gamedig: a gameList entry without keys exits 70", async () => {
+    kuma.state.getGameListResult = { ok: true, gameList: [{ pretty: "Minecraft" }] };
     const r = await run(
       sb,
       [
@@ -2118,19 +2167,21 @@ describe("monitors add", () => {
     expect(kuma.calls).toHaveLength(0);
   });
 
-  test.each(["url=https://u:p@example.com", "url=ftp://u:p@example.com/x", "url=u:p@example.com"])(
-    "--set %s would put credentials in argv and exits 2",
-    async (set) => {
-      const r = await run(
-        sb,
-        ["monitors", "add", "--type", "http", "--name", "x", "--url", "https://x", "--set", set],
-        creds(kuma.url),
-      );
-      expect(r.code).toBe(2);
-      expect(r.stderr).toContain("--config-file");
-      expect(kuma.calls).toHaveLength(0);
-    },
-  );
+  test.each([
+    "url=https://u:p@example.com",
+    "url=ftp://u:p@example.com/x",
+    "url=u:p@example.com",
+    "url=https://tok123@example.com",
+  ])("--set %s would put credentials in argv and exits 2", async (set) => {
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "http", "--name", "x", "--url", "https://x", "--set", set],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--config-file");
+    expect(kuma.calls).toHaveLength(0);
+  });
 
   test("a url carrying credentials is accepted through --config-file", async () => {
     const f = join(sb.dir, "url-creds.json");
@@ -2149,6 +2200,16 @@ describe("monitors add", () => {
         "--config-file",
         f,
       ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls()[0]!.args[0] as any).url).toBe("https://u:p@example.com");
+  });
+
+  test("the --url flag itself accepts a credentialed url for basic auth", async () => {
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "http", "--name", "x", "--url", "https://u:p@example.com"],
       creds(kuma.url),
     );
     expect(r.code).toBe(0);
@@ -2625,6 +2686,7 @@ describe("monitors add", () => {
     ["port=[80]"],
     ["packetSize=0"],
     ["packetSize=1.5"],
+    ["packetSize=65501"],
     ["proxyId=abc"],
     ["proxyId=0"],
     ["dns_resolve_type=BOGUS"],
@@ -4430,6 +4492,38 @@ describe("monitors edit", () => {
     const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
     expect(sent.type).toBe("group");
     expect(sent.timeout).toBe(48);
+  });
+
+  test("edit --set type keeps a positive stored timeout", async () => {
+    kuma.state.monitors.find((m) => m.id === 7)!.timeout = 30;
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "type=group"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.type).toBe("group");
+    expect(sent.timeout).toBe(30);
+  });
+
+  test("edit --set type=group sends httpBodyEncoding null like the UI submit", async () => {
+    kuma.state.monitors.find((m) => m.id === 7)!.httpBodyEncoding = "json";
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "type=group"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.type).toBe("group");
+    expect(sent.httpBodyEncoding).toBeNull();
+  });
+
+  test("edit --config-file retryInterval wins over the interval follow", async () => {
+    const f = join(sb.dir, "edit-ri.json");
+    writeFileSync(f, JSON.stringify({ retryInterval: 25 }));
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "interval=30", "--config-file", f],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.interval).toBe(30);
+    expect(sent.retryInterval).toBe(25);
   });
 
   test("edit a docker monitor: --config-file docker_host null exits 2", async () => {

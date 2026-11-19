@@ -846,6 +846,38 @@ describe("monitor timing on Kuma 2.x", () => {
     expect(stored(k, "pg").timeout).toBe(10);
   });
 
+  test("edit turning an http monitor with timeout 0 into ping gets the ping default", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [{ ...http(7, "h"), timeout: 0 }],
+    });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=ping", "--set", "hostname=127.0.0.1"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = editCalls(k)[0]!.args[0] as Record<string, any>;
+    expect(sent.type).toBe("ping");
+    expect(sent.timeout).toBe(10);
+  });
+
+  test("edit --set type with an explicit --set timeout=0 keeps 0", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [http(7, "h")],
+    });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=group", "--set", "timeout=0"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = editCalls(k)[0]!.args[0] as Record<string, any>;
+    expect(sent.type).toBe("group");
+    expect(sent.timeout).toBe(0);
+  });
+
   test("--interval 5 is accepted and stored", async () => {
     const k = await useFake({ profile: "2.x" });
     const r = await run(
