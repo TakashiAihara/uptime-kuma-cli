@@ -33,7 +33,29 @@ const PASSWORD = "it-Passw0rd-1234";
 
 const CALL_TIMEOUT_MS = 30_000;
 const COMPOSE_UP_TIMEOUT_MS = 300_000;
-const COMPOSE_DOWN_TIMEOUT_MS = 60_000;
+// Overridable so tests can reach the timeout path without waiting a minute.
+// setTimeout overflows above 2^31-1 and fires after ~1ms, so the bound is
+// the timer's own range, not just "positive" — the same check
+// UPTIME_KUMA_IT_BIN_TIMEOUT_MS gets in tests/helpers/run.ts.
+const DOWN_TIMEOUT_ENV = process.env.UPTIME_KUMA_IT_DOWN_TIMEOUT_MS;
+const COMPOSE_DOWN_TIMEOUT_MS = DOWN_TIMEOUT_ENV === undefined ? 60_000 : Number(DOWN_TIMEOUT_ENV);
+if (
+  DOWN_TIMEOUT_ENV !== undefined &&
+  (!Number.isInteger(COMPOSE_DOWN_TIMEOUT_MS) ||
+    COMPOSE_DOWN_TIMEOUT_MS <= 0 ||
+    COMPOSE_DOWN_TIMEOUT_MS > 2_147_483_647)
+) {
+  console.error(
+    `UPTIME_KUMA_IT_DOWN_TIMEOUT_MS must be an integer between 1 and 2147483647, got "${DOWN_TIMEOUT_ENV}"`,
+  );
+  process.exit(1);
+}
+// A signalled `down -v` exits non-zero (Ctrl-C reaches it through the shared
+// process group), so teardown retries: the next attempt usually finishes the
+// removal the signal interrupted.
+const TEARDOWN_ATTEMPTS = 3;
+// Children a signal kills get this long to exit before SIGKILL.
+const KILL_GRACE_MS = 5_000;
 // cliRun paces invocations to 15 logins/min, so the suite's floor grows with
 // its call count; 12 min leaves headroom for the tests still to come while
 // still catching a genuinely hung run well under the CI job's 20 min.
@@ -50,18 +72,31 @@ const IMAGE_MAJOR = /:(\d+)(?=[.\-@]|$)/.exec(process.env.UPTIME_KUMA_IT_IMAGE ?
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+type Child = ReturnType<typeof Bun.spawn>;
+
+// The compose child currently running, if any — tracked so a signal can kill
+// it: process.exit does not reap children, and an orphaned `up` could still
+// create containers after the down -v.
+let composeProc: Child | undefined;
+
 async function compose(args: string[], timeoutMs: number): Promise<number> {
   const proc = Bun.spawn(["docker", "compose", "-f", COMPOSE_FILE, "-p", PROJECT, ...args], {
     stdout: "inherit",
     stderr: "inherit",
   });
-  return Promise.race([
-    proc.exited,
-    sleep(timeoutMs).then(() => {
-      proc.kill();
-      return -1;
-    }),
-  ]);
+  composeProc = proc;
+  try {
+    return await Promise.race([
+      proc.exited,
+      sleep(timeoutMs).then(async () => {
+        killChild(proc);
+        await awaitChildren([proc]);
+        return -1;
+      }),
+    ]);
+  } finally {
+    if (composeProc === proc) composeProc = undefined;
+  }
 }
 
 function emitAck<T>(socket: Socket, event: string, args: unknown[], timeoutMs: number): Promise<T> {
@@ -141,12 +176,16 @@ async function setupKuma(): Promise<string> {
   }
 }
 
-let testProc: ReturnType<typeof Bun.spawn> | undefined;
+let testProc: Child | undefined;
 
 async function runTests(kumaVersion: string): Promise<number> {
   console.log("running bun test tests/integration");
+  // detached gives the test run its own process group so a signal (or the
+  // timeout below) reaches the compiled-binary grandchildren the suite
+  // spawns, not just the bun test wrapper.
   const proc = Bun.spawn(["bun", "test", "tests/integration"], {
     cwd: REPO_ROOT,
+    detached: true,
     env: {
       ...process.env,
       UPTIME_KUMA_IT_URL: BASE_URL,
@@ -162,10 +201,12 @@ async function runTests(kumaVersion: string): Promise<number> {
     stderr: "inherit",
   });
   testProc = proc;
+  groupKillPids.add(proc.pid);
   const code = await Promise.race([
     proc.exited,
-    sleep(TEST_LIMIT_MS).then(() => {
-      proc.kill();
+    sleep(TEST_LIMIT_MS).then(async () => {
+      killChild(proc);
+      await awaitChildren([proc]);
       return -1;
     }),
   ]);
@@ -184,22 +225,110 @@ function teardown(): Promise<boolean> {
       console.log("UPTIME_KUMA_IT_KEEP=1: leaving the compose project up");
       return true;
     }
-    try {
-      const code = await compose(["down", "-v"], COMPOSE_DOWN_TIMEOUT_MS);
-      if (code !== 0) {
+    for (let attempt = 1; attempt <= TEARDOWN_ATTEMPTS; attempt++) {
+      try {
+        const code = await compose(["down", "-v"], COMPOSE_DOWN_TIMEOUT_MS);
+        if (code === 0) return true;
         console.error(`docker compose down -v exited ${code}`);
-        return false;
+      } catch (e) {
+        console.error(`docker compose down -v failed: ${e instanceof Error ? e.message : e}`);
       }
-      return true;
-    } catch (e) {
-      console.error(`docker compose down -v failed: ${e instanceof Error ? e.message : e}`);
-      return false;
     }
+    console.error(
+      `could not remove the compose project; delete it with: docker compose -f ${COMPOSE_FILE} -p ${PROJECT} down -v`,
+    );
+    return false;
   })();
   return teardownPromise;
 }
 
 let signalExit: number | null = null;
+
+// Pids of children spawned detached: killing them must target the process
+// group (-pid) so grandchildren — the compile under scripts/build.ts — die
+// too. Tracked by pid rather than the buildProc variable because the 5s
+// SIGKILL escalation can fire after main cleared buildProc, and a detached
+// child's exited resolves when the wrapper dies while a TERM-ignoring
+// grandchild would linger.
+const groupKillPids = new Set<number>();
+
+// Waits for children a signal or a timeout killed, escalating to SIGKILL
+// after the grace period so one that ignores SIGTERM cannot outlive the
+// teardown and keep creating containers next to the down -v.
+async function awaitChildren(children: Child[]): Promise<void> {
+  if (children.length === 0) return;
+  const deadline = Date.now() + KILL_GRACE_MS;
+  await Promise.race([
+    Promise.all(children.map((c) => c.exited)),
+    sleep(KILL_GRACE_MS).then(() =>
+      Promise.all(
+        children.map((c) => {
+          killChild(c, "SIGKILL");
+          return c.exited;
+        }),
+      ),
+    ),
+  ]);
+  // exited only covers the tracked child itself: a detached group's
+  // grandchildren got the same SIGTERM and deserve the rest of the grace
+  // period, then whatever group survives gets SIGKILL.
+  for (const c of children) {
+    if (!groupKillPids.has(c.pid)) continue;
+    while (groupAlive(c.pid) && Date.now() < deadline) await sleep(50);
+    try {
+      process.kill(-c.pid, "SIGKILL");
+    } catch {
+      // the group is already gone
+    }
+  }
+}
+
+function groupAlive(pgid: number): boolean {
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// The build child runs detached in its own process group so signalling it
+// also reaches the compile grandchildren scripts/build.ts spawns; the other
+// children share this process group, where a plain kill() is enough.
+function killChild(child: Child, signal: "SIGTERM" | "SIGKILL" = "SIGTERM"): void {
+  if (groupKillPids.has(child.pid)) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      // the group is already gone
+    }
+  }
+  child.kill(signal);
+}
+
+// The signal path's child sweep + teardown + scratch-dir removal, shared
+// with the main finally: with KEEP=1 the teardown resolves instantly, so
+// without this the main flow's process.exit could cut the sweep off and
+// leave a TERM-ignoring grandchild behind.
+let signalCleanup: Promise<void> | undefined;
+
+// Waits for the children a signal killed, then runs the shared teardown and
+// exits. The main flow reaches the same cleanup through its finally; the
+// first process.exit wins, and both report the first signal's code.
+async function exitAfterTeardown(code: number, children: Child[]): Promise<void> {
+  // The first signal owns the cleanup; a second one only awaits it — its
+  // children were already killed individually by the handler, and
+  // overwriting the promise would let this path exit before the first
+  // cleanup's child sweep finishes.
+  signalCleanup ??= (async () => {
+    await awaitChildren(children);
+    await teardown();
+    rmSync(buildDir, { recursive: true, force: true });
+  })();
+  await signalCleanup;
+  process.exit(signalExit ?? code);
+}
 
 // The suite runs the compiled binary, so the host target is built before
 // anything else — a compile error should not wait behind a multi-minute image
@@ -221,57 +350,84 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
     const code = signal === "SIGINT" ? 130 : 143;
     signalExit ??= code;
     console.error(`\nreceived ${signal}, tearing down`);
-    testProc?.kill();
-    void teardown().finally(() => {
-      rmSync(buildDir, { recursive: true, force: true });
-      process.exit(code);
-    });
+    // Kill what the main flow may be waiting on so its awaits resolve; the
+    // exit path then waits for them before teardown, so nothing (like `up`)
+    // keeps working while the down -v runs.
+    const children = [testProc, composeProc, buildProc].filter((p): p is Child => p !== undefined);
+    for (const child of children) killChild(child);
+    void exitAfterTeardown(code, children);
   });
 }
 for (const name of ["src", "package.json", "node_modules"]) {
   symlinkSync(join(REPO_ROOT, name), join(buildDir, name));
 }
 console.log(`building uptime-kuma-cli-${HOST_TARGET}`);
-const build = Bun.spawnSync(["bun", join(REPO_ROOT, "scripts", "build.ts"), HOST_TARGET], {
+// spawn, not spawnSync: the event loop must stay free so the signal
+// handlers can kill a hung build through buildProc like the other children.
+// detached gives the build its own process group so killChild can reach the
+// compile grandchildren scripts/build.ts spawns.
+let buildProc: Child | undefined;
+const build = Bun.spawn(["bun", join(REPO_ROOT, "scripts", "build.ts"), HOST_TARGET], {
   cwd: buildDir,
   stdout: "inherit",
   stderr: "inherit",
+  detached: true,
 });
-if (build.exitCode !== 0) {
+buildProc = build;
+groupKillPids.add(build.pid);
+await build.exited;
+buildProc = undefined;
+// A null exitCode means the build child died to a signal — in practice
+// Ctrl+C hitting the whole foreground group — so report 130, not 1. When a
+// handled signal already started the teardown, let it own the exit instead.
+if (build.exitCode !== 0 && signalExit === null) {
   rmSync(buildDir, { recursive: true, force: true });
-  // A null exitCode means the build child died to a signal — in practice
-  // Ctrl+C hitting the whole foreground group — so report 130, not 1.
   process.exit(build.exitCode ?? 130);
 }
 const BIN = join(buildDir, "dist", `uptime-kuma-cli-${HOST_TARGET}`);
 
 let exitCode = 1;
 try {
-  // Remove what a KEEP=1 or killed run left behind; the result does not matter
-  await compose(["down", "-v"], COMPOSE_DOWN_TIMEOUT_MS);
-  // A signal during the build fires its handler at this first await; bail
-  // before compose up so the handler's exit cannot orphan the up child.
+  // Remove what a KEEP=1 or killed run left behind; the result does not
+  // matter — but only when no signal already started the teardown, whose
+  // own down -v must not overlap this one.
   if (signalExit === null) {
-    if (
-      (await compose(["up", "-d", "--wait", "--wait-timeout", "120"], COMPOSE_UP_TIMEOUT_MS)) !== 0
-    ) {
-      console.error("docker compose up failed");
-      console.error("--- Kuma server log (compose up failed) ---");
-      await compose(["logs", "--no-color", "--timestamps"], COMPOSE_DOWN_TIMEOUT_MS);
-    } else {
-      const version = await setupKuma();
-      console.log(`Kuma ${version} ready at ${BASE_URL}`);
-      // A CI job that names 2.5.11 must not go green on 1.23 if the image
-      // variable stops reaching compose.
-      if (IMAGE_MAJOR !== undefined && version.split(".")[0] !== IMAGE_MAJOR) {
-        throw new Error(`UPTIME_KUMA_IT_IMAGE names ${IMAGE_MAJOR}.x but Kuma reports ${version}`);
-      }
-      exitCode = await runTests(version);
-      // The server's side of a failure (what it was doing while a call timed
-      // out) is gone after down -v, so print its log while the container lives.
-      if (exitCode !== 0) {
-        console.error("--- Kuma server log (tests failed) ---");
+    await compose(["down", "-v"], COMPOSE_DOWN_TIMEOUT_MS);
+  }
+  // A signal during the build fires its handler at the build await; bail
+  // before compose up so the handler's exit cannot orphan the up child. The
+  // flag is re-checked after every await: a signal kills the in-flight
+  // compose child, and nothing may start the next phase behind the teardown.
+  if (signalExit === null) {
+    const upCode = await compose(
+      ["up", "-d", "--wait", "--wait-timeout", "120"],
+      COMPOSE_UP_TIMEOUT_MS,
+    );
+    if (signalExit === null) {
+      if (upCode !== 0) {
+        console.error("docker compose up failed");
+        console.error("--- Kuma server log (compose up failed) ---");
         await compose(["logs", "--no-color", "--timestamps"], COMPOSE_DOWN_TIMEOUT_MS);
+      } else {
+        const version = await setupKuma();
+        if (signalExit === null) {
+          console.log(`Kuma ${version} ready at ${BASE_URL}`);
+          // A CI job that names 2.5.11 must not go green on 1.23 if the image
+          // variable stops reaching compose.
+          if (IMAGE_MAJOR !== undefined && version.split(".")[0] !== IMAGE_MAJOR) {
+            throw new Error(
+              `UPTIME_KUMA_IT_IMAGE names ${IMAGE_MAJOR}.x but Kuma reports ${version}`,
+            );
+          }
+          exitCode = await runTests(version);
+          // The server's side of a failure (what it was doing while a call
+          // timed out) is gone after down -v, so print its log while the
+          // container lives.
+          if (exitCode !== 0 && signalExit === null) {
+            console.error("--- Kuma server log (tests failed) ---");
+            await compose(["logs", "--no-color", "--timestamps"], COMPOSE_DOWN_TIMEOUT_MS);
+          }
+        }
       }
     }
   }
@@ -279,10 +435,17 @@ try {
   console.error(`integration setup failed: ${e instanceof Error ? e.message : e}`);
   exitCode = 1;
   // a setup that timed out during login is the same #52 symptom
-  console.error("--- Kuma server log (setup failed) ---");
-  await compose(["logs", "--no-color", "--timestamps"], COMPOSE_DOWN_TIMEOUT_MS);
+  if (signalExit === null) {
+    console.error("--- Kuma server log (setup failed) ---");
+    await compose(["logs", "--no-color", "--timestamps"], COMPOSE_DOWN_TIMEOUT_MS);
+  }
 } finally {
-  rmSync(buildDir, { recursive: true, force: true });
-  if (!(await teardown()) && exitCode === 0) exitCode = 1;
+  if (signalCleanup === undefined) {
+    rmSync(buildDir, { recursive: true, force: true });
+    if (!(await teardown()) && exitCode === 0) exitCode = 1;
+  }
+  // Covers a signal that arrived while the normal teardown above ran: its
+  // cleanup still has to finish (child sweep included) before this exit.
+  await signalCleanup;
 }
 process.exit(signalExit ?? exitCode);
