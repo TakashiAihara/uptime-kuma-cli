@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { sandbox, type Sandbox } from "../helpers/run";
-import { cliRun, on2x, onNtp, onOracleDb, onSnmpV3, onWsUpgrade } from "./helpers";
+import { cliRun, on2x, on21, onNtp, onOracleDb, onSnmpV3, onWsUpgrade } from "./helpers";
 
 // Runs only when scripts/integration.ts provides UPTIME_KUMA_IT_*; a plain
 // `bun test` skips the whole file.
@@ -463,6 +463,18 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
       expect(s.avgPing === null || typeof s.avgPing === "number").toBe(true);
       expect(s.certExpiresAt === null || typeof s.certExpiresAt === "string").toBe(true);
       expect(s.certDaysRemaining === null || typeof s.certDaysRemaining === "number").toBe(true);
+      // uptime "1y" is pushed unconditionally since 2.0.0; domainInfo only
+      // for a domain with a resolved RDAP expiry, which localhost lacks —
+      // the keys are absent on both legs here
+      if (on2x) {
+        expect(typeof s.uptime1y).toBe("number");
+        expect(s.uptime1y).toBeGreaterThanOrEqual(0);
+        expect(s.uptime1y).toBeLessThanOrEqual(1);
+      } else {
+        expect("uptime1y" in s).toBe(false);
+      }
+      expect("domainExpiresAt" in s).toBe(false);
+      expect("domainDaysRemaining" in s).toBe(false);
     }, 120_000);
 
     test("delete the stats monitor", async () => {
@@ -470,6 +482,57 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
       expect(r.code).toBe(0);
       expect(r.json()).toEqual({ id: statsId, deleted: true });
     }, 120_000);
+  });
+
+  describe("delete --children", () => {
+    let groupId = 0;
+
+    test("add a paused group with a paused child", async () => {
+      const g = await cliRun(sb, [
+        "monitors",
+        "add",
+        "--type",
+        "group",
+        "--name",
+        "it-grp",
+        "--paused",
+      ]);
+      expect(g.code).toBe(0);
+      groupId = g.json().id;
+      const c = await cliRun(sb, [
+        "monitors",
+        "add",
+        "--type",
+        "push",
+        "--name",
+        "it-grp-child",
+        "--parent",
+        String(groupId),
+        "--paused",
+      ]);
+      expect(c.code).toBe(0);
+    }, 240_000);
+
+    test("--children: 2.1+ deletes the subtree, older servers refuse", async () => {
+      const r = await cliRun(sb, ["monitors", "delete", String(groupId), "--yes", "--children"]);
+      if (!on21) {
+        expect(r.code).toBe(2);
+        expect(r.stderr).toContain("--children needs Uptime Kuma >= 2.1.0");
+        // clean up the unlink way: the group goes, the child stays top-level
+        const d = await cliRun(sb, ["monitors", "delete", String(groupId), "--yes"]);
+        expect(d.code).toBe(0);
+        const cd = await cliRun(sb, ["monitors", "delete", "it-grp-child", "--yes"]);
+        expect(cd.code).toBe(0);
+        return;
+      }
+      expect(r.code).toBe(0);
+      expect(r.json()).toEqual({ id: groupId, deleted: true });
+      const list = await cliRun(sb, ["monitors", "list"]);
+      expect(list.code).toBe(0);
+      const names = (list.json() as { name: string }[]).map((m) => m.name);
+      expect(names).not.toContain("it-grp");
+      expect(names).not.toContain("it-grp-child");
+    }, 240_000);
   });
 
   describe("gamedig / tailscale-ping", () => {

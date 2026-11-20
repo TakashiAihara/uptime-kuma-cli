@@ -2,12 +2,20 @@ import { Option, type Command } from "commander";
 import {
   CliError,
   fail,
+  parseId,
   printJson,
   readJsonFile,
   redactUrl as redactMonitorUrl,
   socketTimeoutMs,
 } from "../lib.ts";
-import { connect, type KumaSession, type StatusPageRow } from "../kuma.ts";
+import {
+  connect,
+  meetsMinVersion,
+  refuseKumaVersion,
+  type KumaSession,
+  type MinVersion,
+  type StatusPageRow,
+} from "../kuma.ts";
 
 // The six styles the StatusPage.vue incident picker offers; createIncident
 // starts a new incident at "primary".
@@ -87,6 +95,107 @@ const byTitle = (a: StatusPageRow, b: StatusPageRow): number =>
 
 function statusPageBySlug(s: KumaSession, slug: string): StatusPageRow | undefined {
   return s.statusPages().find((p) => p.slug === slug);
+}
+
+// getIncidentHistory / editIncident / resolveIncident first ship in Kuma
+// 2.1.0 — on an older server the events have no listener and an emit would
+// sit out the request timeout, so the commands refuse once the version is
+// known. deleteIncident, added in the same upstream commit, is not exposed.
+const INCIDENT_MIN: MinVersion = [2, 1, 0];
+
+function requireIncidentEvents(s: KumaSession, command: string): void {
+  if (!meetsMinVersion(s, INCIDENT_MIN)) refuseKumaVersion(s, command, INCIDENT_MIN);
+}
+
+// getIncidentHistory pages INCIDENT_PAGE_SIZE (10) incidents per call,
+// created_date DESC; the CLI follows nextCursor to the end so the printed
+// array is the whole history. A cursor the walk already visited means a
+// misbehaving server — an immediate repeat, or a cycle of cursors — so the
+// walk stops rather than re-request forever; each request is timeout-bounded
+// but the loop itself is not. Rows sharing the boundary's created_date are
+// unreachable through the server's cursor (created_date < last), so a
+// collected count below the reported total is warned on rather than printed
+// as a quietly complete history. findId stops the walk as soon as that row
+// is seen (the incident-edit lookup), which is an intended truncation and
+// skips the shortfall warning.
+async function incidentHistory(
+  s: KumaSession,
+  slug: string,
+  findId?: number,
+): Promise<{ total: number; incidents: Record<string, unknown>[]; complete: boolean }> {
+  const incidents: Record<string, unknown>[] = [];
+  const seenCursors = new Set<string>();
+  const seenIds = new Set<number>();
+  let total = 0;
+  let cursor: string | null = null;
+  let found = false;
+  let truncated = false;
+  for (;;) {
+    const res = await s.request("getIncidentHistory", [slug, cursor]);
+    const page = res?.incidents;
+    // total drives the completeness check and the printed output, and id
+    // drives incident-edit's lookup, so a non-integer-or-negative total or
+    // a row without a numeric id is as malformed as a non-array incidents
+    if (
+      !Array.isArray(page) ||
+      typeof res?.total !== "number" ||
+      !Number.isInteger(res.total) ||
+      res.total < 0 ||
+      page.some((i) => {
+        if (i === null || typeof i !== "object" || Array.isArray(i)) return true;
+        const id = (i as Record<string, unknown>).id;
+        // incident ids are autoincrement rowids, so a NaN, fractional or
+        // non-positive one is as malformed as a non-numeric one
+        return typeof id !== "number" || !Number.isInteger(id) || id <= 0;
+      })
+    ) {
+      fail(70, "unexpected getIncidentHistory response");
+    }
+    const next = res?.nextCursor;
+    // ids are unique across the history, so rows a replayed page sends again
+    // add nothing — dedupe keeps rows a cycling server still delivered while
+    // the shortfall count stays honest
+    for (const row of page as Record<string, unknown>[]) {
+      const id = row.id as number;
+      if (seenIds.has(id)) continue;
+      seenIds.add(id);
+      incidents.push(row);
+    }
+    total = res.total;
+    // incident-edit looks one row up through the same pages; stop early once
+    // it is seen rather than walking the rest of the history
+    if (findId !== undefined && incidents.some((i) => i.id === findId)) {
+      found = true;
+      break;
+    }
+    if (res?.hasMore !== true) break;
+    // hasMore promises a continuable cursor — a missing or non-string one is
+    // a malformed page like a non-array incidents
+    if (typeof next !== "string") fail(70, "unexpected getIncidentHistory response");
+    // a revisited cursor means the request was replayed — following it again
+    // would loop, so the walk stops and the shortfall check reports what it
+    // actually gathered
+    if (seenCursors.has(next)) {
+      truncated = true;
+      break;
+    }
+    seenCursors.add(next);
+    cursor = next;
+  }
+  // more rows than the reported total is not a shortfall — an incident
+  // posted between page fetches explains it — so only a deficit warns; a
+  // count that matches the total while the cursor stalled still warns,
+  // since a server that cannot continue its own walk can miscount too
+  const short = incidents.length < total;
+  if (!found && (short || truncated)) {
+    const detail = short
+      ? `got ${incidents.length} of ${total} incidents`
+      : `stopped early at ${incidents.length} of ${total} incidents`;
+    console.error(`warning: incident history may be incomplete: ${detail}`);
+  }
+  // a findId hit ends the walk on purpose; anything else is complete only when
+  // it ran to hasMore false and fetched every row the total reports
+  return { total, incidents, complete: found || (!truncated && !short) };
 }
 
 function parseAddSlug(value: string): string {
@@ -633,6 +742,113 @@ export function registerStatusPages(program: Command): void {
       }
       if (incident === null || typeof incident !== "object" || Array.isArray(incident)) {
         fail(70, "unexpected postIncident response");
+      }
+      printJson(incident);
+    });
+
+  statusPages
+    .command("incident-history <slug>")
+    .description("List the incident history of a status page")
+    .action(async (slug) => {
+      const s = await connect(["statusPageList"]);
+      requireIncidentEvents(s, "incident-history");
+      if (!statusPageBySlug(s, slug)) fail(1, `status page ${slug} not found`);
+      const { total, incidents } = await incidentHistory(s, slug);
+      printJson({ slug, total, incidents });
+    });
+
+  statusPages
+    .command("incident-edit <slug> <id>")
+    .description("Edit an incident of a status page")
+    .option("--title <title>", "incident title")
+    .option("--content <content>", "incident content")
+    .addOption(new Option("--style <style>", "incident style").choices([...INCIDENT_STYLES]))
+    .option("--pin", "pin the incident")
+    .option("--unpin", "unpin the incident")
+    .action(async (slug, rawId, opts) => {
+      const incidentId = parseId(rawId, "incident id");
+      if (opts.pin === true && opts.unpin === true) {
+        fail(2, "--pin and --unpin cannot be combined");
+      }
+      if (
+        opts.title === undefined &&
+        opts.content === undefined &&
+        opts.style === undefined &&
+        opts.pin !== true &&
+        opts.unpin !== true
+      ) {
+        fail(
+          2,
+          "incident-edit requires at least one of --title, --content, --style, --pin or --unpin",
+        );
+      }
+      if (opts.title !== undefined && opts.title.trim() === "") {
+        fail(2, "incident title must not be empty");
+      }
+      if (opts.content !== undefined && opts.content.trim() === "") {
+        fail(2, "incident content must not be empty");
+      }
+      const s = await connect(["statusPageList"]);
+      requireIncidentEvents(s, "incident-edit");
+      if (!statusPageBySlug(s, slug)) fail(1, `status page ${slug} not found`);
+      // editIncident overwrites every field unconditionally like the UI's
+      // pre-filled form, so the stored incident is fetched and the flags
+      // merge over it — an omitted flag keeps its stored value
+      const fetched = await incidentHistory(s, slug, incidentId);
+      const existing = fetched.incidents.find((i) => i.id === incidentId);
+      if (existing === undefined) {
+        // an id absent from a complete history does not exist; one missing
+        // from a cut one may sit beyond the cursor's created_date boundary —
+        // or one the walk stopped fetching before a repeated cursor
+        if (!fetched.complete) {
+          const detail =
+            fetched.incidents.length < fetched.total
+              ? `incomplete (${fetched.incidents.length} of ${fetched.total} fetched)`
+              : `stopped early (${fetched.incidents.length} of ${fetched.total} fetched)`;
+          fail(1, `incident ${incidentId} may exist: the fetched history is ${detail}`);
+        }
+        fail(1, `incident ${incidentId} not found`);
+      }
+      const title = opts.title ?? existing.title;
+      const content = opts.content ?? existing.content;
+      const style = opts.style ?? existing.style;
+      // the flags passed their own empty check before connecting, so an
+      // unusable title or content here came from the stored row — a
+      // protocol violation like a non-object row, not bad input
+      if (typeof title !== "string" || title.trim() === "") {
+        fail(70, "unexpected getIncidentHistory response");
+      }
+      if (typeof content !== "string" || content.trim() === "") {
+        fail(70, "unexpected getIncidentHistory response");
+      }
+      // a sent pin follows the server's own rule (pin !== false -> pinned);
+      // an unstored or absent one pins like the UI's form default does, and a
+      // non-string stored style falls back to "warning" like validateIncident
+      const pin = opts.pin === true ? true : opts.unpin === true ? false : existing.pin !== false;
+      const res = await s.request("editIncident", [
+        slug,
+        incidentId,
+        { title, content, style: typeof style === "string" ? style : "warning", pin },
+      ]);
+      const incident = res?.incident;
+      if (incident === null || typeof incident !== "object" || Array.isArray(incident)) {
+        fail(70, "unexpected editIncident response");
+      }
+      printJson(incident);
+    });
+
+  statusPages
+    .command("incident-resolve <slug> <id>")
+    .description("Resolve an incident of a status page")
+    .action(async (slug, rawId) => {
+      const incidentId = parseId(rawId, "incident id");
+      const s = await connect(["statusPageList"]);
+      requireIncidentEvents(s, "incident-resolve");
+      if (!statusPageBySlug(s, slug)) fail(1, `status page ${slug} not found`);
+      const res = await s.request("resolveIncident", [slug, incidentId]);
+      const incident = res?.incident;
+      if (incident === null || typeof incident !== "object" || Array.isArray(incident)) {
+        fail(70, "unexpected resolveIncident response");
       }
       printJson(incident);
     });

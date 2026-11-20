@@ -300,4 +300,201 @@ describe("monitors stats", () => {
       certDaysRemaining: 47,
     });
   });
+
+  describe("on Kuma 2.x", () => {
+    beforeEach(async () => {
+      await kuma.close();
+      kuma = await startFakeKuma({
+        profile: "2.x",
+        monitors: [mon(1, "alpha"), mon(2, "beta")],
+        beats: { 1: [beat(1, 5, 1)] },
+        stats: {
+          1: {
+            uptime1y: 0.95,
+            domainInfo: { daysRemaining: 90, expiry: "2026-01-02T03:04:05.000Z" },
+          },
+        },
+      });
+    });
+
+    test("rows carry uptime1y and the domain expiry fields when the events arrive", async () => {
+      const r = await run(sb, ["monitors", "stats"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      expect(r.json()).toEqual([
+        {
+          id: 1,
+          name: "alpha",
+          uptime24h: 1,
+          uptime30d: 1,
+          uptime1y: 0.95,
+          avgPing: 12,
+          certExpiresAt: null,
+          certDaysRemaining: null,
+          domainExpiresAt: "2026-01-02T03:04:05.000Z",
+          domainDaysRemaining: 90,
+        },
+        // beta has no domain_expiry row, so 2.x sends uptime "1y" but no
+        // domainInfo: uptime1y stays, the domain keys are absent
+        {
+          id: 2,
+          name: "beta",
+          uptime24h: 0,
+          uptime30d: 0,
+          uptime1y: 0,
+          avgPing: null,
+          certExpiresAt: null,
+          certDaysRemaining: null,
+        },
+      ]);
+    });
+
+    test("a monitor without domainInfo omits the domain keys", async () => {
+      const r = await run(sb, ["monitors", "stats", "2"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      const row = r.json();
+      expect("domainExpiresAt" in row).toBe(false);
+      expect("domainDaysRemaining" in row).toBe(false);
+    });
+
+    test("an unparsable domain expiry reports domainExpiresAt null", async () => {
+      kuma.state.stats[1] = {
+        domainInfo: { daysRemaining: -1, expiry: "unknown" },
+      };
+      const r = await run(sb, ["monitors", "stats", "1"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      expect(r.json()).toMatchObject({ domainExpiresAt: null, domainDaysRemaining: -1 });
+    });
+
+    test("a domainInfo trailing a landed certInfo still counts", async () => {
+      // sendStats awaits a monitor read and the domain_expiry lookup between
+      // the certInfo and domainInfo emits, so the real 2.x gap is nonzero;
+      // a wait that ends on the certInfo's arrival would drop the domain
+      // keys even though they land well inside the 500 ms burst
+      kuma.state.stats[1] = {
+        certInfo: CERT_1,
+        domainInfo: { daysRemaining: 90, expiry: "2026-01-02T03:04:05.000Z" },
+      };
+      kuma.state.domainInfoDelay = { 1: 80 };
+      const r = await run(sb, ["monitors", "stats", "1"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      expect(r.json()).toMatchObject({
+        domainExpiresAt: "2026-01-02T03:04:05.000Z",
+        domainDaysRemaining: 90,
+      });
+    });
+
+    test("a domainInfo past its monitor's 500 ms burst reads as absent", async () => {
+      kuma.state.domainInfoDelay = { 1: 600 };
+      const r = await run(sb, ["monitors", "stats", "1"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      const row = r.json();
+      expect("domainExpiresAt" in row).toBe(false);
+      expect("domainDaysRemaining" in row).toBe(false);
+    });
+
+    test("a monitor whose certInfo landed waits only the domain tail", async () => {
+      // monitor 1 has a cert but no domain_expiry row: on 2.1+ a landed
+      // certInfo cannot end the wait outright — a trailing domainInfo can
+      // still be in flight — but it holds only the tail grace, not the bound
+      // monitor 2 pays for an absent cert. The fastest of three runs each
+      // drops one-off startup or load delays.
+      kuma.state.stats[1] = { certInfo: CERT_1 };
+      const fastest = async (id: string): Promise<number> => {
+        let best = Number.POSITIVE_INFINITY;
+        for (let i = 0; i < 3; i++) {
+          const t = Date.now();
+          const r = await run(sb, ["monitors", "stats", id], creds(kuma.url));
+          expect(r.code).toBe(0);
+          best = Math.min(best, Date.now() - t);
+        }
+        return best;
+      };
+      const withCertMs = await fastest("1");
+      const withoutCertMs = await fastest("2");
+      // waiting the whole bound anyway would add ~500 ms; the tail leaves
+      // ~300 of that unspent
+      expect(withoutCertMs - withCertMs).toBeGreaterThan(150);
+    }, 30_000);
+
+    test("a server that skips the uptime 1y push leaves the key absent", async () => {
+      kuma.state.skipStatEvents = { 1: ["uptime1y"] };
+      const r = await run(sb, ["monitors", "stats", "1"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      const row = r.json();
+      expect("uptime1y" in row).toBe(false);
+      expect(row.uptime24h).toBe(1);
+    });
+
+    test('a "1y" past its monitor\'s 500 ms burst reads as absent', async () => {
+      kuma.state.stats[1] = { uptime1y: 0.95 };
+      kuma.state.uptime1yDelay = { 1: 600 };
+      const r = await run(sb, ["monitors", "stats", "1"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      const row = r.json();
+      expect("uptime1y" in row).toBe(false);
+      expect(row.uptime24h).toBe(1);
+    });
+
+    test("a non-ISO domain expiry reports domainExpiresAt null", async () => {
+      // the wire carries a serialized Date (ISO); a "YYYY-MM-DD HH:mm:ss"
+      // DATETIME parsed as local time would shift the instant, so it reads
+      // as malformed instead
+      kuma.state.stats[1] = {
+        domainInfo: { daysRemaining: 5, expiry: "2026-01-02 03:04:05" },
+      };
+      const r = await run(sb, ["monitors", "stats", "1"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      expect(r.json()).toMatchObject({ domainExpiresAt: null, domainDaysRemaining: 5 });
+    });
+
+    test("an offset-less ISO datetime reports domainExpiresAt null", async () => {
+      // "2026-01-02T03:04:05" would parse as local time and shift the
+      // instant by the host zone — the wire's serialized Date always
+      // carries Z or an offset, so the value reads as malformed
+      kuma.state.stats[1] = {
+        domainInfo: { daysRemaining: 5, expiry: "2026-01-02T03:04:05" },
+      };
+      const r = await run(sb, ["monitors", "stats", "1"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      expect(r.json()).toMatchObject({ domainExpiresAt: null, domainDaysRemaining: 5 });
+    });
+
+    test("a non-Z offset domain expiry is kept as an instant", async () => {
+      kuma.state.stats[1] = {
+        domainInfo: { daysRemaining: 5, expiry: "2026-01-02T03:04:05+09:00" },
+      };
+      const r = await run(sb, ["monitors", "stats", "1"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      expect(r.json()).toMatchObject({
+        domainExpiresAt: "2026-01-01T18:04:05.000Z",
+        domainDaysRemaining: 5,
+      });
+    });
+
+    test("a domainInfo with a non-number daysRemaining keeps the keys with null", async () => {
+      // the event arriving malformed differs from it never coming — like a
+      // malformed certInfo, the keys stay and the unreadable field is null
+      kuma.state.stats[1] = {
+        domainInfo: { daysRemaining: "soon", expiry: "2026-01-02T03:04:05.000Z" },
+      };
+      const r = await run(sb, ["monitors", "stats", "1"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      expect(r.json()).toMatchObject({
+        domainExpiresAt: "2026-01-02T03:04:05.000Z",
+        domainDaysRemaining: null,
+      });
+    });
+
+    test("a domainInfo with a non-string expiry reports domainExpiresAt null", async () => {
+      kuma.state.stats[1] = {
+        domainInfo: { daysRemaining: 5, expiry: 1700000000 },
+      };
+      const r = await run(sb, ["monitors", "stats", "1"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      expect(r.json()).toMatchObject({
+        domainExpiresAt: null,
+        domainDaysRemaining: 5,
+      });
+    });
+  });
 });

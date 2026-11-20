@@ -187,22 +187,30 @@ export type ApiKeyRow = Record<string, unknown> & { id: number };
 // uptime values are Kuma's 0..1 ratios over its 24h and 30d windows,
 // avgPing is null when the monitor has no beats with a ping in 24h, and
 // certInfo is the raw monitor_tls_info info_json (undefined when the
-// monitor has no such row).
+// monitor has no such row). uptime1y and domainInfo are 2.x-only pushes —
+// left absent when the server never sent them (1.x sends neither; 2.x sends
+// uptime "1y" since 2.0.0 and domainInfo since 2.1.0 only when the monitor's
+// domain has a resolved expiry).
 export type MonitorStats = {
   avgPing: number | null;
   uptime24h: number;
   uptime30d: number;
   certInfo: string | undefined;
+  uptime1y?: number;
+  domainInfo?: { daysRemaining: number | null; expiryDate: string };
 };
 
 type BeatRow = Record<string, unknown>;
 
 // First-value-wins record of the stats pushes, kept event by event; sendStats
-// re-emits them on every heartbeat.
+// re-emits them on every heartbeat. uptime1y (the string period "1y") and
+// domainInfo exist on 2.x only.
 type MonitorStatEvents = {
   avgPing?: { value: number | null };
   uptime: Map<number, { at: number; value: number }>;
   certInfo?: { at: number; json: string };
+  uptime1y?: { at: number; value: number };
+  domainInfo?: { at: number; daysRemaining: number | null; expiryDate: string };
 };
 
 // Grace after the pushed lists for the versioned `info` (connect() below).
@@ -405,8 +413,10 @@ export class KumaSession {
 
   // The stats pushes of Kuma 1.23.17: sendStats emits, per monitor, avgPing,
   // uptime 24h, uptime 30d and — only when a monitor_tls_info row exists —
-  // certInfo right after the uptime 30d. Besides the post-login walk it runs
-  // on every heartbeat of any monitor, outside that walk, so another
+  // certInfo right after the uptime 30d. 2.x adds uptime "1y" between the 30d
+  // and the certInfo, and domainInfo after the certInfo (2.1.0+, only when
+  // the monitor's domain has a resolved expiry). Besides the post-login walk
+  // it runs on every heartbeat of any monitor, outside that walk, so another
   // monitor's pushes can interleave; each monitor's certInfo wait therefore
   // ends 500 ms after its own uptime 30d (a certInfo that has arrived is used
   // either way) and never makes the command fail. The listeners in connect()
@@ -422,18 +432,45 @@ export class KumaSession {
       return rec?.avgPing !== undefined && rec.uptime.has(24) && rec.uptime.has(720);
     };
 
-    // a monitor's own bound: certInfo counts only when it came within 500 ms
-    // of that monitor's uptime 30d, whatever else the command still waits for
+    // a monitor's own bound: a stats value counts only when it came within
+    // 500 ms of that monitor's uptime 30d, whatever else the command still
+    // waits for. certInfo, uptime "1y" and domainInfo ride the same burst on
+    // 2.x — "1y" and domainInfo only bound the wait through the certInfo
+    // grace (they land between/after the same emits), so a server that never
+    // sends them does not make the command wait
+    const inBurst = (uptime30d: { at: number } | undefined, at: number): boolean =>
+      uptime30d !== undefined && at <= uptime30d.at + 500;
     const certInTime = (id: number): string | undefined => {
       const rec = this.statsEvents.get(id);
-      const uptime30d = rec?.uptime.get(720);
-      if (uptime30d === undefined || rec?.certInfo === undefined) return undefined;
-      return rec.certInfo.at <= uptime30d.at + 500 ? rec.certInfo.json : undefined;
+      const cert = rec?.certInfo;
+      return cert !== undefined && inBurst(rec?.uptime.get(720), cert.at) ? cert.json : undefined;
     };
+    // On 2.1+ the certInfo→domainInfo gap is two awaited reads — a few ms —
+    // so a landed certInfo still holds the wait this tail grace for the
+    // trailing emit, but no longer: a monitor without a resolvable domain
+    // expiry never emits domainInfo and must not pay the whole bound for an
+    // event that cannot come
+    const DOMAIN_TAIL_MS = 200;
     const certDone = (id: number): boolean => {
-      const uptime30d = this.statsEvents.get(id)?.uptime.get(720);
+      const rec = this.statsEvents.get(id);
+      const uptime30d = rec?.uptime.get(720);
       if (uptime30d === undefined) return false;
-      return certInTime(id) !== undefined || Date.now() >= uptime30d.at + 500;
+      if (Date.now() >= uptime30d.at + 500) return true;
+      // sendStats ends with sendDomainInfo, so on 2.1+ the wait ends on the
+      // burst's last event — a landed domainInfo — or the certInfo's tail
+      // grace, not on the certInfo itself. Before 2.1 certInfo is the last
+      // emit and breaks early.
+      if (meetsMinVersion(this, [2, 1, 0])) {
+        const dom = rec?.domainInfo;
+        if (dom !== undefined) return inBurst(uptime30d, dom.at);
+        const cert = rec?.certInfo;
+        return (
+          cert !== undefined &&
+          inBurst(uptime30d, cert.at) &&
+          Date.now() >= cert.at + DOMAIN_TAIL_MS
+        );
+      }
+      return certInTime(id) !== undefined;
     };
 
     for (;;) {
@@ -459,12 +496,19 @@ export class KumaSession {
       if (avgPing === undefined || uptime24h === undefined || uptime30d === undefined) {
         fail(70, `stats of monitor ${id} missing after the wait`);
       }
-      out.set(id, {
+      const st: MonitorStats = {
         avgPing: avgPing.value,
         uptime24h: uptime24h.value,
         uptime30d: uptime30d.value,
         certInfo: certInTime(id),
-      });
+      };
+      const u1y = rec?.uptime1y;
+      if (u1y !== undefined && inBurst(rec?.uptime.get(720), u1y.at)) st.uptime1y = u1y.value;
+      const dom = rec?.domainInfo;
+      if (dom !== undefined && inBurst(rec?.uptime.get(720), dom.at)) {
+        st.domainInfo = { daysRemaining: dom.daysRemaining, expiryDate: dom.expiryDate };
+      }
+      out.set(id, st);
     }
     return out;
   }
@@ -497,13 +541,43 @@ export function parseMinorVersion(version: string | undefined): number {
   return match === null ? 0 : Number(match[1]);
 }
 
-// Same shape as the minor: when the major.minor already matched the gate's
-// minimum but the patch cannot be parsed ("2.5" reports no third part), the
-// fallback 0 stays on the safe side — entries needing a patch refuse,
-// entries at patch 0 accept.
+// Same shape as the minor: the patch only reaches a comparison after the
+// major.minor already matched the gate's minimum, which means the version
+// parsed — an unparseable or missing value can fall back to 0 because the
+// earlier checks refuse first.
 export function parsePatchVersion(version: string | undefined): number {
   const match = version === undefined ? null : /^\d+\.\d+\.(\d+)/.exec(version);
   return match === null ? 0 : Number(match[1]);
+}
+
+// The first release a 2.x-only capability appears in as [major, minor,
+// patch] — a capability can postdate 2.0.0 (incident events, deleteChildren
+// and domainInfo first ship in 2.1.0, oracledb in 2.3.0, ntp in 2.5.0), so
+// the minor matters and, since a capability can first ship in a patch
+// release (2.5.4), so does the patch.
+export type MinVersion = readonly [number, number, number];
+
+export function meetsMinVersion(s: KumaSession, [maj, min, pat]: MinVersion): boolean {
+  return (
+    s.majorVersion > maj ||
+    (s.majorVersion === maj &&
+      (s.minorVersion > min || (s.minorVersion === min && s.patchVersion >= pat)))
+  );
+}
+
+export function refuseKumaVersion(
+  s: KumaSession,
+  what: string,
+  [maj, min, pat]: MinVersion,
+): never {
+  const needs =
+    maj === 2 && min === 0 && pat === 0 ? "Uptime Kuma 2.x" : `Uptime Kuma >= ${maj}.${min}.${pat}`;
+  return fail(
+    2,
+    s.serverVersion === undefined
+      ? `${what} needs ${needs}; the server sent no version, so 1.x was assumed`
+      : `${what} needs ${needs}; the server reports ${s.serverVersion}`,
+  );
 }
 
 // monitorList, notificationList, proxyList and dockerHostList are pushed in
@@ -634,16 +708,14 @@ export async function connect(
   });
   socket.on("uptime", (id: unknown, period: unknown, value: unknown) => {
     const mid = statId(id);
-    if (
-      Number.isNaN(mid) ||
-      typeof period !== "number" ||
-      !Number.isFinite(period) ||
-      typeof value !== "number" ||
-      !Number.isFinite(value)
-    ) {
+    if (Number.isNaN(mid) || typeof value !== "number" || !Number.isFinite(value)) return;
+    const rec = statRecord(mid);
+    // 2.x emits a third period, the string "1y", after 24 and 720
+    if (period === "1y") {
+      if (rec.uptime1y === undefined) rec.uptime1y = { at: Date.now(), value };
       return;
     }
-    const rec = statRecord(mid);
+    if (typeof period !== "number" || !Number.isFinite(period)) return;
     if (!rec.uptime.has(period)) {
       rec.uptime.set(period, { at: Date.now(), value });
     }
@@ -654,6 +726,28 @@ export async function connect(
     const rec = statRecord(mid);
     if (rec.certInfo === undefined) {
       rec.certInfo = { at: Date.now(), json: data };
+    }
+  });
+  // 2.1.0+ sendDomainInfo emits (id, daysRemaining, expiryDate) right after
+  // certInfo, only for monitors whose domain resolved an expiry through RDAP.
+  // A malformed field records null like a malformed certInfo does — the event
+  // arriving and being unreadable differs from it never coming, so it is not
+  // dropped whole
+  socket.on("domainInfo", (id: unknown, daysRemaining: unknown, expiryDate: unknown) => {
+    const mid = statId(id);
+    if (Number.isNaN(mid)) {
+      return;
+    }
+    const rec = statRecord(mid);
+    if (rec.domainInfo === undefined) {
+      rec.domainInfo = {
+        at: Date.now(),
+        daysRemaining:
+          typeof daysRemaining === "number" && Number.isFinite(daysRemaining)
+            ? daysRemaining
+            : null,
+        expiryDate: typeof expiryDate === "string" ? expiryDate : "",
+      };
     }
   });
 

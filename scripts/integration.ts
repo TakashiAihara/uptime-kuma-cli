@@ -57,9 +57,10 @@ const TEARDOWN_ATTEMPTS = 3;
 // Children a signal kills get this long to exit before SIGKILL.
 const KILL_GRACE_MS = 5_000;
 // cliRun paces invocations to 15 logins/min, so the suite's floor grows with
-// its call count; 15 min leaves headroom for the tests still to come while
-// still catching a genuinely hung run well under the CI job's 20 min.
-const TEST_LIMIT_MS = 15 * 60_000;
+// its call count; the 2.5.11 leg already measures about 15 min, so the bound
+// sits at 18. The CI job allows 25: setup (~2 min) + this bound + the sweep,
+// server log and down -v after it fit inside.
+const TEST_LIMIT_MS = 18 * 60_000;
 const KEEP = process.env.UPTIME_KUMA_IT_KEEP === "1";
 // An empty value (a mistyped CI matrix key) would make compose fall back to
 // 1.23.17 while the job claims another image.
@@ -86,14 +87,23 @@ async function compose(args: string[], timeoutMs: number): Promise<number> {
   });
   composeProc = proc;
   try {
-    return await Promise.race([
-      proc.exited,
-      sleep(timeoutMs).then(async () => {
-        killChild(proc);
-        await awaitChildren([proc]);
-        return -1;
-      }),
-    ]);
+    // cleared when the child exits first: a pending timer would still fire
+    // killChild on a pid the OS may have recycled to another process
+    let timedOut = false;
+    let sweep: Promise<void> | undefined;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killChild(proc);
+      // escalates to SIGKILL after the grace if the child ignores the TERM,
+      // which is what lets proc.exited settle below
+      sweep = awaitChildren([proc]);
+    }, timeoutMs);
+    const code = await proc.exited;
+    clearTimeout(timer);
+    // the TERM→KILL sweep is awaited before the caller moves on, like the
+    // signal path does — a TERM-ignoring child must not outlive the teardown
+    if (timedOut) await sweep;
+    return timedOut ? -1 : code;
   } finally {
     if (composeProc === proc) composeProc = undefined;
   }
@@ -202,17 +212,29 @@ async function runTests(kumaVersion: string): Promise<number> {
   });
   testProc = proc;
   groupKillPids.add(proc.pid);
-  const code = await Promise.race([
-    proc.exited,
-    sleep(TEST_LIMIT_MS).then(async () => {
-      killChild(proc);
-      await awaitChildren([proc]);
-      return -1;
-    }),
-  ]);
+  // the flag, not the exit code, marks a timeout: killChild's SIGTERM
+  // settles proc.exited with 143, which a raced sentinel would have
+  // reported without the "exceeded" message. The timer is cleared when the
+  // child exits first — a pending one would fire killChild on a pid the OS
+  // may have recycled to another process by then
+  let timedOut = false;
+  let sweep: Promise<void> | undefined;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    killChild(proc);
+    sweep = awaitChildren([proc]);
+  }, TEST_LIMIT_MS);
+  const code = await proc.exited;
+  clearTimeout(timer);
   testProc = undefined;
-  if (code === -1) console.error(`test run exceeded ${TEST_LIMIT_MS / 60_000} minutes`);
-  return code === -1 ? 1 : code;
+  if (timedOut) {
+    console.error(`test run exceeded ${TEST_LIMIT_MS / 60_000} minutes`);
+    // the detached group's grandchildren got the same TERM; wait out the
+    // escalation like the signal path does so none outlive the teardown
+    await sweep;
+    return 1;
+  }
+  return code;
 }
 
 // Shared so the finally and a signal handler await the same down -v.
