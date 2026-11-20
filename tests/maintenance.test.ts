@@ -1708,6 +1708,11 @@ describe("maintenance", () => {
       "0 0 ?/31 2 *",
       "0 0 ?/5 2 *",
       "0 0 31/? 2,? *",
+      "0 0 1-28/2*3 2 *",
+      "0 0 1-2/3* 2 *",
+      "0 0 *1-5 2 *",
+      "0 0 30-31* 2 *",
+      "0 0 31* 2 *",
     ])("an out-of-range cron %p exits 2 before connecting", async (cron) => {
       const f = writeJson("badrange.json", { cron });
       const r = await run(
@@ -1776,6 +1781,12 @@ describe("maintenance", () => {
       "0 0 *,1-?/8 * *",
       "0 0 11-23/7 12 0-?/2",
       "0 0 5 * ?-6/7,1-1",
+      "0 0 1-28* 2 *",
+      "0 0 29-31* 2 *",
+      "0 0 28*-30 2 *",
+      "0 0 5*3 2 *",
+      "0 0 5/2*3 2 *",
+      "0 0 */5* 2 *",
     ])("a boundary cron %p is accepted", async (cron) => {
       const f = writeJson("bounds.json", { cron });
       const r = await run(

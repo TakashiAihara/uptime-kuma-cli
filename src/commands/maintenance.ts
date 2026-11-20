@@ -367,8 +367,10 @@ function cronEntryOk(
 const DAYS_IN_MONTH = [0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31] as const;
 
 // the values one entry lands on, for the day-of-month × month feasibility
-// check — a dead step start falls out as an empty set by the same rules
-// that judge it, and anything outside [0-9*/,-] shape never reaches here
+// check — parsed with the same rules that judge it in cronEntryOk, where a
+// bound's trailing characters are ignored the way both croners' parseInt
+// ignores them ("1-28*" enumerates 1-28), and anything outside [0-9*/,-]
+// shape never reaches here
 function entryValues(entry: string, partIndex: number, version: CronMajor): Set<number> {
   const { min, max, size } = CRON_PART_LIMITS[partIndex]!;
   const hits = new Set<number>();
@@ -376,30 +378,44 @@ function entryValues(entry: string, partIndex: number, version: CronMajor): Set<
     for (let v = min; v <= max; v++) hits.add(v);
     return hits;
   }
-  const m = /^(\d+|\*)(?:-(\d+))?(?:\/(\d+))?$/.exec(entry);
-  if (m === null) return hits;
-  const first = m[1] === "*" ? min : Number(m[1]);
-  if (m[2] !== undefined) {
-    const step = m[3] === undefined ? 1 : Number(m[3]);
-    for (let v = first; v <= Number(m[2]); v += step) hits.add(v);
+  const num = (s: string): number => Number.parseInt(s, 10);
+
+  if (entry.includes("-") && entry.includes("/")) {
+    const m = /^(\d+)-(\d+)\/(\d+)$/.exec(entry);
+    if (m === null) return hits;
+    for (let v = num(m[1]!); v <= num(m[2]!); v += num(m[3]!)) hits.add(v);
     return hits;
   }
-  if (m[3] === undefined) {
-    hits.add(first);
+  if (entry.includes("-")) {
+    const seg = entry.split("-");
+    if (seg.length !== 2) return hits;
+    const lower = num(seg[0]!);
+    const upper = num(seg[1]!);
+    if (Number.isNaN(lower) || Number.isNaN(upper) || lower > upper) return hits;
+    for (let v = lower; v <= upper; v++) hits.add(v);
     return hits;
   }
-  // x/N lands on x + k·N — croner 6 walks raw bitmap indexes so index i is
-  // value i + min ("*" starts at index 0), while croner 8 offsets the start
-  // by the minimum. A dead start contributes nothing on either
-  if (version === "6") {
-    for (let i = m[1] === "*" ? 0 : Number(m[1]); i < size; i += Number(m[3])) {
-      hits.add(i + min);
+  if (entry.includes("/")) {
+    const seg = entry.split("/");
+    if (seg.length !== 2) return hits;
+    const steps = num(seg[1]!);
+    if (Number.isNaN(steps) || steps === 0) return hits;
+    // x/N lands on x + k·N — croner 6 walks raw bitmap indexes so index i is
+    // value i + min ("*" starts at index 0), while croner 8 offsets the start
+    // by the minimum. A dead start contributes nothing on either
+    if (version === "6") {
+      for (let i = seg[0] === "*" ? 0 : num(seg[0]!); i < size; i += steps) {
+        hits.add(i + min);
+      }
+      return hits;
+    }
+    for (let v = seg[0] === "*" ? min : num(seg[0]!); v < min + size; v += steps) {
+      if (v >= min) hits.add(v);
     }
     return hits;
   }
-  for (let v = first; v < min + size; v += Number(m[3])) {
-    if (v >= min) hits.add(v);
-  }
+  const v = num(entry);
+  if (!Number.isNaN(v)) hits.add(v);
   return hits;
 }
 
