@@ -195,23 +195,29 @@ const CRON_PART_LIMITS = [
   { min: 0, max: 7, size: 8 }, // day of week
 ] as const;
 
-// croner substitutes "?" with the field's current value at run time, so an
-// entry carrying one is only checkable when no possible current value
-// makes it unusable: substitute every value the clock can produce and run
-// the same per-entry verdict croner would. "bad" is refused outright —
-// a form like "5-?" or "?-59" in seconds flips its verdict with the
-// clock. "dead" needs no verdict of its own: outside day-of-month and
-// month the current value always stays under the bitmap so a step start
-// can never go dead, and inside them the per-today checks below judge it
-// like any other dead entry. Day-of-week's real top is 6 (getDay), though
-// 7 stays a legal bound in the pattern.
-function questionOk(entry: string, partIndex: number, version: CronMajor): boolean {
-  if (!entry.includes("?")) return true;
+// croner substitutes "?" with the field's current value at run time, so a
+// part carrying one is only checkable when no possible current value makes
+// it unusable: substitute every value the clock can produce and run the
+// same per-entry verdict croner would. A "bad" entry on any current value
+// is refused outright — a form like "5-?" or "?-59" in seconds flips its
+// verdict with the clock, and so does a "?" inside a larger number, where
+// "?0/5" steps from 60 on most minutes. An all-dead field is refused only
+// where no rescue exists — seconds, minutes and hours gate the run on
+// their own, while a dead "?" in day-of-month, month or day-of-week goes
+// to the per-today checks below like any other dead entry. Day-of-week's
+// real top is 6 (getDay), though 7 stays a legal bound in the pattern.
+function questionOk(part: string, partIndex: number, version: CronMajor): boolean {
+  if (!part.includes("?")) return true;
   const { min, max } = CRON_PART_LIMITS[partIndex]!;
+  const entries = part.split(",");
   for (let c = min; c <= (partIndex === 5 ? 6 : max); c++) {
-    if (cronEntryOk(entry.replace("?", String(c)), partIndex, version, false) === "bad") {
-      return false;
+    let live = false;
+    for (const entry of entries) {
+      const verdict = cronEntryOk(entry.replace("?", String(c)), partIndex, version, false);
+      if (verdict === "bad") return false;
+      live ||= verdict === "live";
     }
+    if (!live && partIndex !== 3 && partIndex !== 4 && partIndex !== 5) return false;
   }
   return true;
 }
@@ -258,7 +264,7 @@ function cronParts(
   for (const [i, part] of raw.entries()) {
     if (part.includes("?")) {
       if (part.indexOf("?", part.indexOf("?") + 1) !== -1) return null;
-      if (!part.split(",").every((entry) => questionOk(entry, i, version))) return null;
+      if (!questionOk(part, i, version)) return null;
       q.set(i, part);
     }
     parts.push(part.replace("?", String(CRON_PART_LIMITS[i]!.min)));
@@ -458,11 +464,25 @@ function isCronExpression(value: string, version: CronMajor | "either"): boolean
       if (hits(4, m0).length === 0) return false;
     }
   }
+  // a "?" in day-of-week can die on some clock values too — "?0/5" stays
+  // live only on the zeroth weekday — and on those todays the field acts
+  // like a static dead one, judged by the same joint rule
+  const dowQDead =
+    shape.q.has(5) &&
+    [0, 1, 2, 3, 4, 5, 6].some(
+      (c) =>
+        !shape.q
+          .get(5)!
+          .split(",")
+          .some(
+            (entry) => cronEntryOk(entry.replace("?", String(c)), 5, version, false) === "live",
+          ),
+    );
   // "*" hands the date decision to the other field; a restricted live one
   // joins it through OR matching, so a dead date field is only fatal when
   // the other side is dead or unrestricted
-  if ((domDead && (dowDead || dowStar)) || (dowDead && (domDead || domStar))) return false;
-  if (!shape.lastDay && !domStar && (dowStar || dowDead)) {
+  if ((domDead && dowStar) || ((dowDead || dowQDead) && (domDead || domStar))) return false;
+  if (!shape.lastDay && !domStar && (dowStar || dowDead || dowQDead)) {
     // every possible today must still leave a real date — and both fields
     // take the same today, so impossible today-pairs do not apply
     const domHits = hits(3, null);
