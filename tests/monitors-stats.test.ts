@@ -422,5 +422,29 @@ describe("monitors stats", () => {
       expect(r.code).toBe(0);
       expect(r.json()).toMatchObject({ domainExpiresAt: null, domainDaysRemaining: 5 });
     });
+
+    test("an offset-less ISO datetime reports domainExpiresAt null", async () => {
+      // "2026-01-02T03:04:05" would parse as local time and shift the
+      // instant by the host zone — the wire's serialized Date always
+      // carries Z or an offset, so the value reads as malformed
+      kuma.state.stats[1] = {
+        domainInfo: { daysRemaining: 5, expiry: "2026-01-02T03:04:05" },
+      };
+      const r = await run(sb, ["monitors", "stats", "1"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      expect(r.json()).toMatchObject({ domainExpiresAt: null, domainDaysRemaining: 5 });
+    });
+
+    test("a non-Z offset domain expiry is kept as an instant", async () => {
+      kuma.state.stats[1] = {
+        domainInfo: { daysRemaining: 5, expiry: "2026-01-02T03:04:05+09:00" },
+      };
+      const r = await run(sb, ["monitors", "stats", "1"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      expect(r.json()).toMatchObject({
+        domainExpiresAt: "2026-01-01T18:04:05.000Z",
+        domainDaysRemaining: 5,
+      });
+    });
   });
 });

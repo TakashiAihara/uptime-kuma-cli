@@ -598,11 +598,12 @@ describe("status-pages", () => {
         const r = await run(sb, ["status-pages", "incident-history", "status"], creds(kuma.url));
         expect(r.code).toBe(0);
         expect(callsOf("getIncidentHistory")).toHaveLength(2);
-        // the repeated page's row is real data, so it counts twice — the
-        // warning still reports the walk could not finish the history
+        // the replayed page's rows are not collected again, so the count
+        // honestly reports the shortfall
         expect(r.stderr).toContain(
-          "warning: incident history may be incomplete: got 2 of 5 incidents",
+          "warning: incident history may be incomplete: got 1 of 5 incidents",
         );
+        expect(r.json().incidents).toHaveLength(1);
       });
 
       test("a non-number total exits 70", async () => {
@@ -758,12 +759,15 @@ describe("status-pages", () => {
       });
 
       test("an id unfound on a repeated-cursor walk is reported maybe-existing", async () => {
-        // a repeated cursor ends the walk even when the collected count still
-        // matches the total (the repeated row counts twice) — only the
-        // truncated flag marks that walk incomplete
+        // a repeated cursor ends the walk before the replayed rows are
+        // collected, so a total that still matches the gathered count leaves
+        // only the truncated flag to mark the walk incomplete
         kuma.state.incidentHistoryResult = {
           ok: true,
-          incidents: [{ id: 1, title: "i1" }],
+          incidents: [
+            { id: 1, title: "i1" },
+            { id: 2, title: "i2" },
+          ],
           total: 2,
           hasMore: true,
           nextCursor: "2024-01-01T00:00:00.000Z",

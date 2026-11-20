@@ -138,6 +138,15 @@ async function incidentHistory(
     ) {
       fail(70, "unexpected getIncidentHistory response");
     }
+    const next = res?.nextCursor;
+    // a repeated cursor means the request was replayed — the page's rows
+    // duplicate the previous answer's, so collecting them would fake a
+    // matching count. Stop before the push so the shortfall check below
+    // reports what the walk actually gathered
+    if (res?.hasMore === true && typeof next === "string" && next === cursor) {
+      truncated = true;
+      break;
+    }
     incidents.push(...(page as Record<string, unknown>[]));
     total = res.total;
     // incident-edit looks one row up through the same pages; stop early once
@@ -146,17 +155,10 @@ async function incidentHistory(
       found = true;
       break;
     }
-    const next = res?.nextCursor;
     if (res?.hasMore !== true) break;
     // hasMore promises a continuable cursor — a missing or non-string one is
-    // a malformed page like a non-array incidents; a repeated one only risks
-    // a request loop, so that alone still stops quietly (the count check
-    // below then reports the shortfall)
+    // a malformed page like a non-array incidents
     if (typeof next !== "string") fail(70, "unexpected getIncidentHistory response");
-    if (next === cursor) {
-      truncated = true;
-      break;
-    }
     cursor = next;
   }
   const short = incidents.length !== total;
