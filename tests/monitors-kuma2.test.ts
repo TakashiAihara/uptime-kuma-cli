@@ -2806,6 +2806,30 @@ describe("websocket-upgrade monitors", () => {
     expect(addCalls(k)).toHaveLength(0);
   });
 
+  // the ws client also throws SyntaxError on a duplicated subprotocol
+  test("add --set wsSubprotocol with a duplicate entry exits 2", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "websocket-upgrade",
+        "--name",
+        "ws1",
+        "--url",
+        "wss://ws.example.com",
+        "--set",
+        "wsSubprotocol=soap, soap",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("wsSubprotocol");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
   test("add --set wsSubprotocol accepts comma-separated names with spaces", async () => {
     const k = await useFake({ profile: "2.x" });
     const r = await run(

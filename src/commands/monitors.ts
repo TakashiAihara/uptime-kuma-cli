@@ -936,19 +936,20 @@ const HATCH_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unknow
     if (typeof v !== "string") fail(2, `${k} must be a string`);
     // websocket-upgrade.js strips whitespace and splits on commas, so an
     // empty or non-token entry makes `new WebSocket` throw SyntaxError at
-    // every check (websocket-upgrade.js:126-127). "" is the column's
+    // every check (websocket-upgrade.js:126-127), and the ws client throws
+    // SyntaxError on a duplicated subprotocol too. "" is the column's
     // unset value and is fine — a falsy subprotocol sends no header.
-    if (
-      v !== "" &&
-      v
-        .replace(/\s/g, "")
-        .split(",")
-        .some((t) => !WS_SUBPROTOCOL_TOKEN.test(t))
-    ) {
-      fail(
-        2,
-        `${k} must be a comma-separated list of subprotocol names like "soap" or "graphql-ws"`,
-      );
+    if (v !== "") {
+      const tokens = v.replace(/\s/g, "").split(",");
+      if (
+        tokens.some((t) => !WS_SUBPROTOCOL_TOKEN.test(t)) ||
+        new Set(tokens).size !== tokens.length
+      ) {
+        fail(
+          2,
+          `${k} must be a comma-separated list of distinct subprotocol names like "soap" or "graphql-ws"`,
+        );
+      }
     }
     return v;
   },
