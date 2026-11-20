@@ -3,10 +3,10 @@ import {
   CliError,
   fail,
   isIdLiteral,
+  redactUrl,
   resolveCredentials,
   resolveTotp,
   sleep,
-  redactUrl,
   socketTimeoutMs,
 } from "./lib.ts";
 
