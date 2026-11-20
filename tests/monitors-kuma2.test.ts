@@ -1225,8 +1225,87 @@ describe("ntp monitors", () => {
       creds(k.url),
     );
     expect(r.code).toBe(2);
-    expect(r.stderr).toContain('"ntpStratumThreshold" needs Uptime Kuma 2.x');
+    expect(r.stderr).toContain('"ntpStratumThreshold" needs Uptime Kuma >= 2.5.0');
     expect(editCalls(k)).toHaveLength(0);
+  });
+
+  // The ntp_*_threshold columns ship in 2.5.0 with the type: on 2.0-2.4
+  // `editMonitor` would silently drop the key while answering ok
+  test("add --set ntpStratumThreshold exits 2 on a 2.4 server naming 2.5.0", async () => {
+    const k = await useFake({ profile: "2.x", info: { version: "2.4.0" } });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "h",
+        "--url",
+        "https://h.test",
+        "--set",
+        "ntpStratumThreshold=10",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(
+      '"ntpStratumThreshold" needs Uptime Kuma >= 2.5.0; the server reports 2.4.0',
+    );
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set ntpStratumThreshold exits 2 on a 2.4 server naming 2.5.0", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      info: { version: "2.4.0" },
+      monitors: [http(7, "h")],
+    });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "ntpStratumThreshold=10"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(
+      '"ntpStratumThreshold" needs Uptime Kuma >= 2.5.0; the server reports 2.4.0',
+    );
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set ntpStratumThreshold runs on 2.5.0, the first release with the columns", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      info: { version: "2.5.0" },
+      monitors: [{ ...http(7, "n"), type: "ntp" }],
+    });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "ntpStratumThreshold=10"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = editCalls(k)[0]!.args[0] as Record<string, unknown>;
+    expect(sent.ntpStratumThreshold).toBe(10);
+  });
+
+  // a 2.x field without a min-version entry (smtpSecurity shipped in beta.3)
+  // only needs major 2
+  test("edit --set smtpSecurity runs on a 2.4 server", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      info: { version: "2.4.0" },
+      monitors: [{ ...http(7, "s"), type: "smtp", hostname: "s.test", port: 25 }],
+    });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "smtpSecurity=secure"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = editCalls(k)[0]!.args[0] as Record<string, unknown>;
+    expect(sent.smtpSecurity).toBe("secure");
   });
 
   // toJSON emits the ntp fields, so the fetched monitor carries them back —

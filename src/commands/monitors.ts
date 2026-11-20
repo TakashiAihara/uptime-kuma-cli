@@ -68,6 +68,18 @@ const MONITOR_2X_TYPES = ["manual", "ntp", "smtp"] as const;
 // (manual in beta.4, smtp in beta.3) and needs only major 2.
 const KUMA2_TYPE_MIN_VERSION: Record<string, readonly [number, number]> = { ntp: [2, 5] };
 
+// The ntp_*_threshold columns and ntp.js share upstream commit 73f199f4
+// (first released 2.5.0), so on 2.0-2.4 `editMonitor` silently drops a set
+// ntp*Threshold key while answering ok — the same drop the field gate
+// refuses on 1.x. Entries are the first release carrying the column as
+// [major, minor]; a field absent from the map shipped with 2.0.0
+// (manual_status in beta.4, smtpSecurity in beta.3) and needs only major 2.
+const KUMA2_FIELD_MIN_VERSION: Record<string, readonly [number, number]> = {
+  ntpStratumThreshold: [2, 5],
+  ntpTimeOffsetThreshold: [2, 5],
+  ntpRootDispersionThreshold: [2, 5],
+};
+
 // The five database types of EditMonitor.vue all show a required
 // databaseConnectionString. The UI's type watcher prefills it with a template
 // (connectionStringTemplates); the CLI sends no default, so a missing one is
@@ -378,18 +390,23 @@ function checkEditFields(fields: Record<string, unknown>, source: string): void 
 
 // A 2.x-only field can only be refused once the version is known: on 1.23
 // `add` would fail on the unknown column and `editMonitor` would silently
-// drop the value while answering ok.
+// drop the value while answering ok. A field with a KUMA2_FIELD_MIN_VERSION
+// entry would drop the same on a 2.x older than the release that shipped
+// its column.
 function checkKuma2xFields(s: KumaSession, keys: Iterable<string>): void {
-  if (s.majorVersion >= 2) return;
   for (const key of keys) {
-    if (MONITOR_2X_FIELDS.has(key)) {
-      fail(
-        2,
-        s.serverVersion === undefined
-          ? `"${key}" needs Uptime Kuma 2.x; the server sent no version, so 1.x was assumed`
-          : `"${key}" needs Uptime Kuma 2.x; the server reports ${s.serverVersion}`,
-      );
+    if (!MONITOR_2X_FIELDS.has(key)) continue;
+    const [minMajor, minMinor] = KUMA2_FIELD_MIN_VERSION[key] ?? [2, 0];
+    if (s.majorVersion > minMajor || (s.majorVersion === minMajor && s.minorVersion >= minMinor)) {
+      continue;
     }
+    const needs = minMinor === 0 ? "Uptime Kuma 2.x" : `Uptime Kuma >= ${minMajor}.${minMinor}.0`;
+    fail(
+      2,
+      s.serverVersion === undefined
+        ? `"${key}" needs ${needs}; the server sent no version, so 1.x was assumed`
+        : `"${key}" needs ${needs}; the server reports ${s.serverVersion}`,
+    );
   }
 }
 
