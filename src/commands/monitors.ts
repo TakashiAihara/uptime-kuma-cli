@@ -722,12 +722,13 @@ const HATCH_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unknow
     }
     return v;
   },
-  // a manual monitor's check writes manual_status into the heartbeat row, so
-  // it must be a heartbeat status (0 down, 1 up, 2 pending, 3 maintenance);
-  // null is "no status set", the same as leaving it unset
+  // a manual monitor's check writes manual_status into the heartbeat row.
+  // The server would store any smallint, but the UI only offers Up/Down and
+  // manual.js gives every other value a "Pending" msg, so only the UI's
+  // values are accepted; null is "no status set"
   manual_status: (v, k) => {
-    if (v !== null && (typeof v !== "number" || !Number.isInteger(v) || v < 0 || v > 3)) {
-      fail(2, `${k} must be null or a heartbeat status integer 0..3`);
+    if (v !== null && v !== 0 && v !== 1) {
+      fail(2, `${k} must be null, 0 (down), or 1 (up)`);
     }
     return v;
   },

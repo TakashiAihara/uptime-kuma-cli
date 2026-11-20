@@ -605,11 +605,18 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
   const monitorTags = (m: Monitor): MonitorTagRow[] =>
     [...tagsOf(m)].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
+  // Monitor.toJSON does not emit manual_status (2.5.11 editMonitor reads it
+  // from the payload anyway), so a fetched monitor cannot carry it back
+  const monitorJSON = (m: Monitor): Monitor => {
+    const { manual_status: _omitted, ...rest } = structuredClone(m);
+    return { ...rest, tags: monitorTags(m) } as Monitor;
+  };
+
   const monitorList = () => {
     const out: Record<string, Monitor> = {};
     for (const m of state.monitors) {
       if (state.unlistedMonitors.includes(m.id)) continue;
-      out[String(m.id)] = structuredClone({ ...m, tags: monitorTags(m) });
+      out[String(m.id)] = monitorJSON(m);
     }
     return out;
   };
@@ -1042,7 +1049,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
       }
       const m = state.monitors.find((x) => x.id === Number(id));
       if (!m) throw new Error("Cannot read properties of null (reading 'toJSON')");
-      return { ok: true, monitor: structuredClone({ ...m, tags: monitorTags(m) }) };
+      return { ok: true, monitor: monitorJSON(m) };
     });
 
     handle("add", (monitor: Monitor) => {
@@ -1082,8 +1089,15 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
       for (const k in list) if (list[k]) ids[k] = true;
       // editMonitor copies a fixed field list onto the bean; `active` is not among them
       const before = state.monitors[i]!;
+      const row = structuredClone(monitor);
+      // bean.manual_status = monitor.manual_status is unconditional, but a key
+      // absent from the payload exports as undefined and knex's _prepUpdate
+      // drops undefined keys from the UPDATE, so the stored value survives
+      if (!("manual_status" in row) && before.manual_status !== undefined) {
+        row.manual_status = before.manual_status;
+      }
       state.monitors[i] = {
-        ...structuredClone(monitor),
+        ...row,
         active: before.active,
         notificationIDList: ids,
       };

@@ -643,6 +643,17 @@ describe("manual monitors", () => {
     expect(stored(k, "m1").manual_status).toBe(1);
   });
 
+  test("add --type manual --set manual_status=null stores null", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "manual", "--name", "m1", "--set", "manual_status=null"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "m1").manual_status).toBeNull();
+  });
+
   test("add --type manual --config-file manual_status=0 stores the status", async () => {
     const k = await useFake({ profile: "2.x" });
     const f = join(sb.dir, "ms.json");
@@ -656,20 +667,38 @@ describe("manual monitors", () => {
     expect(stored(k, "m1").manual_status).toBe(0);
   });
 
-  test.each([["manual_status=4"], ["manual_status=1.5"], ['manual_status="up"']])(
-    "add --set %s exits 2 before connecting",
-    async (set) => {
-      const k = await useFake({ profile: "2.x" });
-      const r = await run(
-        sb,
-        ["monitors", "add", "--type", "manual", "--name", "m1", "--set", set],
-        creds(k.url),
-      );
-      expect(r.code).toBe(2);
-      expect(r.stderr).toContain("manual_status must be null or a heartbeat status integer 0..3");
-      expect(k.calls).toHaveLength(0);
-    },
-  );
+  test.each([
+    ["manual_status=2"],
+    ["manual_status=3"],
+    ["manual_status=4"],
+    ["manual_status=-1"],
+    ["manual_status=1.5"],
+    ['manual_status="up"'],
+  ])("add --set %s exits 2 before connecting", async (set) => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "manual", "--name", "m1", "--set", set],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("manual_status must be null, 0 (down), or 1 (up)");
+    expect(k.calls).toHaveLength(0);
+  });
+
+  test("add --type manual --config-file with a bad manual_status exits 2 before connecting", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const f = join(sb.dir, "ms.json");
+    writeFileSync(f, JSON.stringify({ manual_status: 2 }));
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "manual", "--name", "m1", "--config-file", f],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("manual_status must be null, 0 (down), or 1 (up)");
+    expect(k.calls).toHaveLength(0);
+  });
 
   test("add --type manual exits 2 on a 1.x server after connect", async () => {
     const k = await useFake();
@@ -702,6 +731,14 @@ describe("manual monitors", () => {
     expect(editCalls(k)).toHaveLength(0);
   });
 
+  test("edit --set type=manual names the assumed 1.x when no version arrives", async () => {
+    const k = await useFake({ info: null, monitors: [http(7, "h")] });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "type=manual"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('type "manual" needs Uptime Kuma 2.x; the server sent no version');
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
   test("edit --set manual_status stores it on 2.x", async () => {
     const k = await useFake({
       profile: "2.x",
@@ -712,6 +749,29 @@ describe("manual monitors", () => {
     expect(stored(k, "m").manual_status).toBe(0);
   });
 
+  // the fetched monitor cannot carry manual_status (toJSON does not emit it),
+  // so an edit without the key sends none — and knex drops undefined update
+  // keys, leaving the stored status alone
+  test("edit without manual_status keeps the stored status", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [{ ...http(7, "m"), type: "manual", url: null, manual_status: 1 }],
+    });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", 'name="m2"'], creds(k.url));
+    expect(r.code).toBe(0);
+    expect(stored(k, "m2").manual_status).toBe(1);
+  });
+
+  test("edit --set manual_status=null clears the stored status", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [{ ...http(7, "m"), type: "manual", url: null, manual_status: 1 }],
+    });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "manual_status=null"], creds(k.url));
+    expect(r.code).toBe(0);
+    expect(stored(k, "m").manual_status).toBeNull();
+  });
+
   test("edit --set manual_status=5 exits 2 before editMonitor", async () => {
     const k = await useFake({
       profile: "2.x",
@@ -719,7 +779,7 @@ describe("manual monitors", () => {
     });
     const r = await run(sb, ["monitors", "edit", "7", "--set", "manual_status=5"], creds(k.url));
     expect(r.code).toBe(2);
-    expect(r.stderr).toContain("manual_status must be null or a heartbeat status integer 0..3");
+    expect(r.stderr).toContain("manual_status must be null, 0 (down), or 1 (up)");
     expect(editCalls(k)).toHaveLength(0);
   });
 
