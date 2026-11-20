@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { sandbox, type Sandbox } from "../helpers/run";
-import { cliRun, on2x } from "./helpers";
+import { cliRun, on2x, onNtp } from "./helpers";
 
 // Runs only when scripts/integration.ts provides UPTIME_KUMA_IT_*; a plain
 // `bun test` skips the whole file.
@@ -585,7 +585,7 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
     expect(del.code).toBe(0);
   }, 300_000);
 
-  test("ntp: 2.x stores the thresholds and a down beat arrives; 1.x refuses the type", async () => {
+  test("ntp: 2.5+ stores the thresholds and a down beat arrives; older servers refuse", async () => {
     const r = await cliRun(sb, [
       "monitors",
       "add",
@@ -606,9 +606,9 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
       "--timeout",
       "5",
     ]);
-    if (!on2x) {
+    if (!onNtp) {
       expect(r.code).toBe(2);
-      expect(r.stderr).toContain('type "ntp" needs Uptime Kuma 2.x');
+      expect(r.stderr).toContain('type "ntp" needs Uptime Kuma >= 2.5.0');
       return;
     }
     expect(r.code).toBe(0);

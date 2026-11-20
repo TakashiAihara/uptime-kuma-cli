@@ -986,7 +986,7 @@ describe("ntp monitors", () => {
       creds(k.url),
     );
     expect(r.code).toBe(2);
-    expect(r.stderr).toContain('type "ntp" needs Uptime Kuma 2.x; the server reports 1.23.17');
+    expect(r.stderr).toContain('type "ntp" needs Uptime Kuma >= 2.5.0; the server reports 1.23.17');
     expect(addCalls(k)).toHaveLength(0);
   });
 
@@ -998,8 +998,73 @@ describe("ntp monitors", () => {
       creds(k.url),
     );
     expect(r.code).toBe(2);
-    expect(r.stderr).toContain('type "ntp" needs Uptime Kuma 2.x; the server sent no version');
+    expect(r.stderr).toContain('type "ntp" needs Uptime Kuma >= 2.5.0; the server sent no version');
     expect(addCalls(k)).toHaveLength(0);
+  });
+
+  // ntp.js first ships in 2.5.0 (upstream #7214): on 2.0-2.4 the row would
+  // store and every check would throw "Unknown Monitor Type"
+  test("add --type ntp exits 2 on a 2.4 server naming 2.5.0", async () => {
+    const k = await useFake({ profile: "2.x", info: { version: "2.4.0" } });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "ntp", "--name", "n1", "--hostname", "h"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('type "ntp" needs Uptime Kuma >= 2.5.0; the server reports 2.4.0');
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --type ntp runs on 2.5.0, the first release with the type", async () => {
+    const k = await useFake({ profile: "2.x", info: { version: "2.5.0" } });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "ntp", "--name", "n1", "--hostname", "ntp.example.com"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "n1")).toMatchObject({ type: "ntp", port: 123 });
+  });
+
+  // nightly builds report 3.x, which carries every 2.x type
+  test("add --type ntp runs on a 3.x server", async () => {
+    const k = await useFake({ profile: "2.x", info: { version: "3.0.0" } });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "ntp", "--name", "n1", "--hostname", "ntp.example.com"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "n1")).toMatchObject({ type: "ntp" });
+  });
+
+  // the gate is per type: smtp exists since 2.0.0-beta.3, so 2.4 allows it
+  test("add --type smtp still runs on a 2.4 server", async () => {
+    const k = await useFake({ profile: "2.x", info: { version: "2.4.0" } });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "smtp", "--name", "s1", "--hostname", "smtp.example.com"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "s1")).toMatchObject({ type: "smtp" });
+  });
+
+  test("edit --set type=ntp exits 2 on a 2.4 server before editMonitor", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      info: { version: "2.4.0" },
+      monitors: [http(7, "h")],
+    });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=ntp", "--set", "hostname=ntp.example.com"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('type "ntp" needs Uptime Kuma >= 2.5.0; the server reports 2.4.0');
+    expect(editCalls(k)).toHaveLength(0);
   });
 
   test("edit --set type=ntp on an http monitor needs hostname on the merged monitor", async () => {
@@ -1148,7 +1213,7 @@ describe("ntp monitors", () => {
     const k = await useFake({ monitors: [http(7, "h")] });
     const r = await run(sb, ["monitors", "edit", "7", "--set", "type=ntp"], creds(k.url));
     expect(r.code).toBe(2);
-    expect(r.stderr).toContain('type "ntp" needs Uptime Kuma 2.x; the server reports 1.23.17');
+    expect(r.stderr).toContain('type "ntp" needs Uptime Kuma >= 2.5.0; the server reports 1.23.17');
     expect(editCalls(k)).toHaveLength(0);
   });
 

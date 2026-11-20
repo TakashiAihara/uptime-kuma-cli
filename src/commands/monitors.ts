@@ -60,6 +60,14 @@ const MONITOR_TYPES = [
 // "Unknown Monitor Type" — so the pre-connect choices list takes the union.
 const MONITOR_2X_TYPES = ["manual", "ntp", "smtp"] as const;
 
+// server/monitor-types/ntp.js first ships in 2.5.0 (upstream #7214), so the
+// major gate alone would let a 2.0-2.4 server store an ntp row whose checks
+// all throw "Unknown Monitor Type" — the failure the type gate exists to
+// prevent. Entries are the first release carrying the type's monitor-types
+// file as [major, minor]; a type absent from the map shipped with 2.0.0
+// (manual in beta.4, smtp in beta.3) and needs only major 2.
+const KUMA2_TYPE_MIN_VERSION: Record<string, readonly [number, number]> = { ntp: [2, 5] };
+
 // The five database types of EditMonitor.vue all show a required
 // databaseConnectionString. The UI's type watcher prefills it with a template
 // (connectionStringTemplates); the CLI sends no default, so a missing one is
@@ -551,18 +559,22 @@ function checkNotificationIds(s: KumaSession, value: unknown): void {
 
 // A 2.x-only type is refused once the version is known, like a 2.x-only
 // field: 1.23 would store the row and every check would throw "Unknown
-// Monitor Type". Checked on the type the merged monitor ends up with — on
-// add always, on edit only when the type changes.
+// Monitor Type". A type with a KUMA2_TYPE_MIN_VERSION entry would throw the
+// same on a 2.x older than the release that shipped its monitor-types file.
+// Checked on the type the merged monitor ends up with — on add always, on
+// edit only when the type changes.
 function checkKuma2xType(s: KumaSession, type: unknown): void {
-  if (s.majorVersion >= 2) return;
-  if (typeof type === "string" && (MONITOR_2X_TYPES as readonly string[]).includes(type)) {
-    fail(
-      2,
-      s.serverVersion === undefined
-        ? `type "${type}" needs Uptime Kuma 2.x; the server sent no version, so 1.x was assumed`
-        : `type "${type}" needs Uptime Kuma 2.x; the server reports ${s.serverVersion}`,
-    );
-  }
+  if (typeof type !== "string" || !(MONITOR_2X_TYPES as readonly string[]).includes(type)) return;
+  const [minMajor, minMinor] = KUMA2_TYPE_MIN_VERSION[type] ?? [2, 0];
+  if (s.majorVersion > minMajor || (s.majorVersion === minMajor && s.minorVersion >= minMinor))
+    return;
+  const needs = minMinor === 0 ? "Uptime Kuma 2.x" : `Uptime Kuma >= ${minMajor}.${minMinor}.0`;
+  fail(
+    2,
+    s.serverVersion === undefined
+      ? `type "${type}" needs ${needs}; the server sent no version, so 1.x was assumed`
+      : `type "${type}" needs ${needs}; the server reports ${s.serverVersion}`,
+  );
 }
 
 // The official image ships no tailscale binary, so the picker hides

@@ -1,10 +1,17 @@
 import { io, type Socket } from "socket.io-client";
-import { parseMajorVersion } from "../../src/kuma";
+import { parseMajorVersion, parseMinorVersion } from "../../src/kuma";
 import { run, type Result, type Sandbox } from "../helpers/run";
 
 // Tests that 2.x breaks until the named issue lands are skipped with
 // skipIf(on2x); the fix removes the skip.
-export const on2x = parseMajorVersion(process.env.UPTIME_KUMA_IT_KUMA_VERSION) >= 2;
+const itVersion = process.env.UPTIME_KUMA_IT_KUMA_VERSION;
+export const on2x = parseMajorVersion(itVersion) >= 2;
+
+// ntp.js first ships in 2.5.0 (upstream #7214), so on2x alone does not say
+// the monitor type exists — a 2.0-2.4 leg must take the refusal branch too.
+export const onNtp =
+  parseMajorVersion(itVersion) > 2 ||
+  (parseMajorVersion(itVersion) === 2 && parseMinorVersion(itVersion) >= 5);
 
 // Every CLI invocation logs in once (the integration admin has no 2FA) and
 // Kuma 1.23 allows 20 logins per minute for the whole instance, so
