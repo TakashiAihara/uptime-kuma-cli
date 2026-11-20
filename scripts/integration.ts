@@ -57,9 +57,9 @@ const TEARDOWN_ATTEMPTS = 3;
 // Children a signal kills get this long to exit before SIGKILL.
 const KILL_GRACE_MS = 5_000;
 // cliRun paces invocations to 15 logins/min, so the suite's floor grows with
-// its call count; 15 min leaves headroom for the tests still to come while
-// still catching a genuinely hung run well under the CI job's 20 min.
-const TEST_LIMIT_MS = 15 * 60_000;
+// its call count; the 2.5.11 leg already measures about 15 min, so the bound
+// sits at 18 — still catching a genuinely hung run inside the CI job's 20 min.
+const TEST_LIMIT_MS = 18 * 60_000;
 const KEEP = process.env.UPTIME_KUMA_IT_KEEP === "1";
 // An empty value (a mistyped CI matrix key) would make compose fall back to
 // 1.23.17 while the job claims another image.
@@ -202,17 +202,25 @@ async function runTests(kumaVersion: string): Promise<number> {
   });
   testProc = proc;
   groupKillPids.add(proc.pid);
+  // the flag, not the raced value, marks a timeout: killChild's SIGTERM
+  // settles proc.exited before the timeout branch can finish, so code would
+  // read 143 with the "exceeded" message never printed
+  let timedOut = false;
   const code = await Promise.race([
     proc.exited,
     sleep(TEST_LIMIT_MS).then(async () => {
+      timedOut = true;
       killChild(proc);
       await awaitChildren([proc]);
       return -1;
     }),
   ]);
   testProc = undefined;
-  if (code === -1) console.error(`test run exceeded ${TEST_LIMIT_MS / 60_000} minutes`);
-  return code === -1 ? 1 : code;
+  if (timedOut) {
+    console.error(`test run exceeded ${TEST_LIMIT_MS / 60_000} minutes`);
+    return 1;
+  }
+  return code;
 }
 
 // Shared so the finally and a signal handler await the same down -v.
