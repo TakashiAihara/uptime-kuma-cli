@@ -894,9 +894,9 @@ describe("status-pages", () => {
       });
 
       test("an id unfound on a repeated-cursor walk is reported maybe-existing", async () => {
-        // a repeated cursor ends the walk before the replayed rows are
-        // collected, so a total that still matches the gathered count leaves
-        // only the truncated flag to mark the walk incomplete
+        // the replayed page adds nothing new, so the gathered count still
+        // matches the total — only the truncated flag marks the walk cut
+        // short, and the message says so rather than calling it incomplete
         kuma.state.incidentHistoryResult = {
           ok: true,
           incidents: [
@@ -913,7 +913,9 @@ describe("status-pages", () => {
           creds(kuma.url),
         );
         expect(r.code).toBe(1);
-        expect(r.stderr).toContain("incident 9 may exist");
+        expect(r.stderr).toContain(
+          "incident 9 may exist: the fetched history is stopped early (2 of 2 fetched)",
+        );
         expect(callsOf("editIncident")).toHaveLength(0);
       });
 

@@ -795,12 +795,14 @@ export function registerStatusPages(program: Command): void {
       const existing = fetched.incidents.find((i) => i.id === incidentId);
       if (existing === undefined) {
         // an id absent from a complete history does not exist; one missing
-        // from a cut one may sit beyond the cursor's created_date boundary
+        // from a cut one may sit beyond the cursor's created_date boundary —
+        // or one the walk stopped fetching before a repeated cursor
         if (!fetched.complete) {
-          fail(
-            1,
-            `incident ${incidentId} may exist: the fetched history is incomplete (${fetched.incidents.length} of ${fetched.total} fetched)`,
-          );
+          const detail =
+            fetched.incidents.length < fetched.total
+              ? `incomplete (${fetched.incidents.length} of ${fetched.total} fetched)`
+              : `stopped early (${fetched.incidents.length} of ${fetched.total} fetched)`;
+          fail(1, `incident ${incidentId} may exist: the fetched history is ${detail}`);
         }
         fail(1, `incident ${incidentId} not found`);
       }
