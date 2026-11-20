@@ -222,8 +222,10 @@ const TYPE_CHANGE_PORT_DEFAULTS: Record<string, number> = { ntp: 123, smtp: 25 }
 // The ports that read as "another type's default" to the watcher:
 // 22 / 53 / 123 / 1812 are its own list (sftp / dns / ntp / radius), and
 // the map's values join them — the CLI stores those defaults where the
-// picker leaves the field blank, so a stored 25 is an smtp default, not
-// a custom port, when the monitor becomes another type.
+// picker leaves the field blank. The stored port alone cannot tell a
+// type's own default from a user's pick, so a 25 kept on a type other
+// than smtp is replaced the same way — the watcher's trade-off, taken
+// one value further for the port only the CLI writes.
 const TYPE_CHANGE_KNOWN_PORTS = new Set([
   22,
   53,
@@ -1825,8 +1827,8 @@ export function registerMonitors(program: Command): void {
       // port for TYPE_CHANGE_PORT_DEFAULTS. Its port branch means to
       // replace another type's default port but compares the string forms,
       // so a numeric stored port slips through there — the CLI covers the
-      // intent instead: an empty port or one of 22 / 53 / 123 / 1812 goes
-      // to the new type's own default. Values this edit sets win.
+      // intent instead: an empty port or a TYPE_CHANGE_KNOWN_PORTS one
+      // goes to the new type's own default. Values this edit sets win.
       // The defaulted interval is a timing change this edit makes, so it
       // re-derives the timeout's 80% cap like a touched interval would —
       // otherwise a stored timeout of e.g. 2000s would survive beside the
