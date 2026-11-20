@@ -727,7 +727,9 @@ export async function connect(
   }
   if (login?.ok !== true) {
     const msg = typeof login?.msg === "string" ? login.msg : "login failed";
-    fail(2, LOGIN_MSG_I18N[msg] ?? msg);
+    // hasOwn, not []: a wire-controlled msg like "toString" would resolve
+    // a prototype member and print it
+    fail(2, Object.hasOwn(LOGIN_MSG_I18N, msg) ? LOGIN_MSG_I18N[msg] : msg);
   }
 
   const wanted = new Set<keyof typeof pushed>([

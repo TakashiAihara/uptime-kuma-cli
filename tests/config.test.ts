@@ -138,6 +138,19 @@ describe("credentials and url", () => {
     }
   });
 
+  // an unmapped msg passes through as-is; "toString" must not resolve a
+  // prototype member through the LOGIN_MSG_I18N record lookup
+  test("an unmapped login failure msg prints as-is", async () => {
+    const k2 = await startFakeKuma({ profile: "2.x", fail: { login: "toString" } });
+    try {
+      const r = await run(sb, list, creds(k2.url));
+      expect(r.code).toBe(2);
+      expect(r.stderr).toBe("toString\n");
+    } finally {
+      await k2.close();
+    }
+  });
+
   const loginTokens = () =>
     kuma.calls
       .filter((c) => c.event === "login")
