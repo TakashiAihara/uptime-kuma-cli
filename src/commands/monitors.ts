@@ -61,11 +61,11 @@ const MONITOR_TYPES = [
 const MONITOR_2X_TYPES = ["websocket-upgrade", "manual", "ntp", "smtp", "snmp"] as const;
 
 // server/monitor-types/websocket-upgrade.js and ntp.js first ship in 2.1.0
-// and 2.5.0 (upstream #7214) respectively, so the major gate alone would
-// let an older 2.x store a row whose checks all throw "Unknown Monitor
-// Type" — the failure the type gate exists to prevent. A type absent from
-// the map shipped with 2.0.0 (manual in beta.4, smtp in beta.3, snmp in
-// beta.0) and needs only major 2.
+// and 2.5.0 (upstream #5613 and #7214) respectively, so the major gate
+// alone would let an older 2.x store a row whose checks all throw
+// "Unknown Monitor Type" — the failure the type gate exists to prevent. A
+// type absent from the map shipped with 2.0.0 (manual in beta.4, smtp in
+// beta.3, snmp in beta.0) and needs only major 2.
 
 // The first release a gated thing needs, as [major, minor, patch] — most
 // entries land on x.y.0, but ssh/sftp's fields first shipped in a patch
@@ -335,6 +335,28 @@ const WS_UPGRADE_URL_DEFAULT = "wss://";
 const HTTP_URL_DEFAULT = "https://";
 const WS_UPGRADE_STATUS_DEFAULT: readonly string[] = ["1000"];
 const HTTP_STATUS_DEFAULT: readonly string[] = ["200-299"];
+
+// Upstream submit()'s per-type url acceptList (2.5.11 EditMonitor.vue
+// :4266-4292): http / keyword / json-query take http:/https:,
+// websocket-upgrade takes ws:/wss:, and real-browser takes any parseable
+// scheme (null) — each also needs a non-empty host. The UI additionally
+// gives the field a stricter `wss?://.+` pattern, but the submit gate is
+// what the server will run: `ws:foo` passes here (new URL gives it host
+// "foo" and the ws library dials it like ws://foo). Monitor.validate does
+// not recheck any of this, and 1.23's submit has no such gate (its
+// Monitor.validate only bounds the interval), so the check is 2.x-only —
+// the same scope as the watcher swap above that produces these urls.
+const URL_ACCEPT_SCHEMES: Record<string, readonly string[] | null> = {
+  http: ["http:", "https:"],
+  keyword: ["http:", "https:"],
+  "json-query": ["http:", "https:"],
+  "real-browser": null,
+  "websocket-upgrade": ["ws:", "wss:"],
+};
+
+// One websocket subprotocol name — RFC 9110 token characters, which is
+// what `new WebSocket` enforces on each element of its protocols array.
+const WS_SUBPROTOCOL_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
 // True when the stored list is unset or still holds exactly the other
 // family's picker default — the watcher's "replace the default" intent.
@@ -912,6 +934,22 @@ const HATCH_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unknow
   // check time, and a non-boolean flag would store a truthy lie like "false"
   wsSubprotocol: (v, k) => {
     if (typeof v !== "string") fail(2, `${k} must be a string`);
+    // websocket-upgrade.js strips whitespace and splits on commas, so an
+    // empty or non-token entry makes `new WebSocket` throw SyntaxError at
+    // every check (websocket-upgrade.js:126-127). "" is the column's
+    // unset value and is fine — a falsy subprotocol sends no header.
+    if (
+      v !== "" &&
+      v
+        .replace(/\s/g, "")
+        .split(",")
+        .some((t) => !WS_SUBPROTOCOL_TOKEN.test(t))
+    ) {
+      fail(
+        2,
+        `${k} must be a comma-separated list of subprotocol names like "soap" or "graphql-ws"`,
+      );
+    }
     return v;
   },
   wsIgnoreSecWebsocketAcceptHeader: (v, k) => {
@@ -1028,27 +1066,34 @@ function validateFinalMonitor(
     const v = monitor[field];
     if (typeof v !== "string" || v === "") fail(2, `${field} must be a non-empty string`);
   };
-  if (type === "http" || type === "keyword" || type === "json-query" || type === "real-browser") {
+  if (type in URL_ACCEPT_SCHEMES) {
     needString("url");
-  }
-  if (type === "websocket-upgrade") {
-    needString("url");
-    // The picker's submit() limits the url to ws:/wss: (2.5.11
-    // EditMonitor.vue :4271); Monitor.validate does not recheck it, so a
-    // stored non-websocket scheme would only surface as a dead check.
-    if (inScope("url") && typeof monitor.url === "string" && monitor.url !== "") {
-      let protocol = "";
+    // A url the picker's submit() would not accept stores a check that
+    // can never connect — see the map's comment for the 2.x-only scope
+    // and why `ws:foo` passes while `ws://` does not.
+    if (
+      s.majorVersion >= 2 &&
+      inScope("url") &&
+      typeof monitor.url === "string" &&
+      monitor.url !== ""
+    ) {
+      const allowed = URL_ACCEPT_SCHEMES[type]!;
+      let parsed: URL | undefined;
       try {
-        protocol = new URL(monitor.url).protocol;
+        parsed = new URL(monitor.url);
       } catch {
         // unparseable urls fail the same refusal below
       }
-      if (protocol !== "ws:" && protocol !== "wss:") {
+      if (
+        parsed === undefined ||
+        parsed.host === "" ||
+        (allowed !== null && !allowed.includes(parsed.protocol))
+      ) {
         // redactUrl: a --config-file url may carry userinfo the flag
         // paths already refused — it must not reach stderr
         fail(
           2,
-          `url must start with ws:// or wss:// for type websocket-upgrade, got "${String(redactUrl(monitor.url))}"`,
+          `url must be a ${allowed === null ? "valid url with a host" : `${allowed.map((p) => `${p}//`).join(" or ")} url`} for type ${type}, got "${String(redactUrl(monitor.url))}"`,
         );
       }
     }
@@ -1907,8 +1952,12 @@ export function registerMonitors(program: Command): void {
       // The watcher's add path: a websocket-upgrade monitor starts from
       // http's "200-299" and gets its own close-code default — a stored
       // "200-299" would make every check throw "Unexpected status code".
+      // An explicitly set list is the user's choice like in the picker,
+      // even when it is "200-299" itself.
       if (
         type === "websocket-upgrade" &&
+        sets.accepted_statuscodes === undefined &&
+        fileConfig.accepted_statuscodes === undefined &&
         isDefaultStatusCodes(monitor.accepted_statuscodes, HTTP_STATUS_DEFAULT)
       ) {
         monitor.accepted_statuscodes = WS_UPGRADE_STATUS_DEFAULT;
