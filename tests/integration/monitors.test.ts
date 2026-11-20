@@ -652,6 +652,38 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
     expect(del.code).toBe(0);
   }, 300_000);
 
+  // the ntp_*_threshold columns ship with ntp.js in 2.5.0: below that
+  // editMonitor would drop the key while answering ok, so the field gate
+  // refuses it the same way it does on 1.x
+  test("ntp thresholds: edit --set refuses the keys below 2.5", async () => {
+    const a = await cliRun(sb, [
+      "monitors",
+      "add",
+      "--type",
+      "http",
+      "--name",
+      "it-ntpf",
+      "--url",
+      "http://localhost:3001",
+      "--paused",
+    ]);
+    expect(a.code).toBe(0);
+    const id = a.json().id;
+
+    const r = await cliRun(sb, ["monitors", "edit", String(id), "--set", "ntpStratumThreshold=10"]);
+    if (onNtp) {
+      expect(r.code).toBe(0);
+      const g = await cliRun(sb, ["monitors", "get", String(id)]);
+      expect(g.json().ntpStratumThreshold).toBe(10);
+    } else {
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain('"ntpStratumThreshold" needs Uptime Kuma >= 2.5.0');
+    }
+
+    const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
+    expect(del.code).toBe(0);
+  }, 120_000);
+
   test("smtp: 2.x stores smtpSecurity and a down beat arrives; 1.x refuses the type", async () => {
     const r = await cliRun(sb, [
       "monitors",

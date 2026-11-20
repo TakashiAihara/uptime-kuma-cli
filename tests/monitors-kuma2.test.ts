@@ -532,7 +532,7 @@ describe("2.x-only fields on Kuma 1.x", () => {
       creds(k.url),
     );
     expect(r.code).toBe(2);
-    expect(r.stderr).toContain('"sshPassword" needs Uptime Kuma 2.x');
+    expect(r.stderr).toContain('"sshPassword" needs Uptime Kuma >= 2.5.4');
     expect(r.stderr).toContain("1.23.17");
     expect(addCalls(k)).toHaveLength(0);
   });
@@ -577,7 +577,9 @@ describe("2.x-only fields on Kuma 1.x", () => {
       creds(k.url),
     );
     expect(r.code).toBe(2);
-    expect(r.stderr).toContain('"saveResponse" needs Uptime Kuma 2.x; the server reports 1.23.17');
+    expect(r.stderr).toContain(
+      '"saveResponse" needs Uptime Kuma >= 2.1.0; the server reports 1.23.17',
+    );
     expect(addCalls(k)).toHaveLength(0);
   });
 
@@ -585,7 +587,7 @@ describe("2.x-only fields on Kuma 1.x", () => {
     const k = await useFake({ monitors: [http(7, "Taba")] });
     const r = await run(sb, ["monitors", "edit", "7", "--set", "saveResponse=true"], creds(k.url));
     expect(r.code).toBe(2);
-    expect(r.stderr).toContain('"saveResponse" needs Uptime Kuma 2.x');
+    expect(r.stderr).toContain('"saveResponse" needs Uptime Kuma >= 2.1.0');
     expect(editCalls(k)).toHaveLength(0);
   });
 
@@ -595,7 +597,7 @@ describe("2.x-only fields on Kuma 1.x", () => {
     writeFileSync(f, JSON.stringify({ responseMaxLength: 100 }));
     const r = await run(sb, ["monitors", "edit", "7", "--config-file", f], creds(k.url));
     expect(r.code).toBe(2);
-    expect(r.stderr).toContain('"responseMaxLength" needs Uptime Kuma 2.x');
+    expect(r.stderr).toContain('"responseMaxLength" needs Uptime Kuma >= 2.1.0');
     expect(editCalls(k)).toHaveLength(0);
   });
 
@@ -616,6 +618,135 @@ describe("2.x-only fields on Kuma 1.x", () => {
     expect(r.code).toBe(2);
     expect(r.stderr).toContain('"jsonPathOperator" needs Uptime Kuma 2.x');
     expect(editCalls(k)).toHaveLength(0);
+  });
+
+  // the buckets below are the first upstream releases whose editMonitor
+  // reads the key (checked per tag: 2.0.x, 2.1.0, 2.4.0, 2.5.0, 2.5.4); on
+  // every older 2.x the set key would silently drop like on 1.x
+
+  test("edit --set saveResponse exits 2 on a 2.0 server naming 2.1.0", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      info: { version: "2.0.2" },
+      monitors: [http(7, "h")],
+    });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "saveResponse=true"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(
+      '"saveResponse" needs Uptime Kuma >= 2.1.0; the server reports 2.0.2',
+    );
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set saveResponse runs on 2.1.0, the first release reading the key", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      info: { version: "2.1.0" },
+      monitors: [http(7, "h")],
+    });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "saveResponse=true"], creds(k.url));
+    expect(r.code).toBe(0);
+    const sent = editCalls(k)[0]!.args[0] as Record<string, unknown>;
+    expect(sent.saveResponse).toBe(true);
+  });
+
+  test("edit --set wsSubprotocol exits 2 on a 2.0 server naming 2.1.0", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      info: { version: "2.0.2" },
+      monitors: [http(7, "h")],
+    });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "wsSubprotocol=chat"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(
+      '"wsSubprotocol" needs Uptime Kuma >= 2.1.0; the server reports 2.0.2',
+    );
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --config-file bearer_token exits 2 on a 2.3 server naming 2.4.0", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      info: { version: "2.3.2" },
+      monitors: [http(7, "h")],
+    });
+    const f = join(sb.dir, "bt.json");
+    writeFileSync(f, JSON.stringify({ bearer_token: "t" }));
+    const r = await run(sb, ["monitors", "edit", "7", "--config-file", f], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(
+      '"bearer_token" needs Uptime Kuma >= 2.4.0; the server reports 2.3.2',
+    );
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --config-file bearer_token runs on 2.4.0, the first release reading the key", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      info: { version: "2.4.0" },
+      monitors: [http(7, "h")],
+    });
+    const f = join(sb.dir, "bt.json");
+    writeFileSync(f, JSON.stringify({ bearer_token: "t" }));
+    const r = await run(sb, ["monitors", "edit", "7", "--config-file", f], creds(k.url));
+    expect(r.code).toBe(0);
+    const sent = editCalls(k)[0]!.args[0] as Record<string, unknown>;
+    expect(sent.bearer_token).toBe("t");
+  });
+
+  test("edit --set screenshot_delay exits 2 on a 2.4 server naming 2.5.0", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      info: { version: "2.4.0" },
+      monitors: [http(7, "h")],
+    });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "screenshot_delay=10"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(
+      '"screenshot_delay" needs Uptime Kuma >= 2.5.0; the server reports 2.4.0',
+    );
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set sftpPath exits 2 on a 2.5.3 server naming 2.5.4", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      info: { version: "2.5.3" },
+      monitors: [http(7, "h")],
+    });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "sftpPath=/tmp/x"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('"sftpPath" needs Uptime Kuma >= 2.5.4; the server reports 2.5.3');
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  // a greater major clears every entry — the gate is `>=`, not `==`
+  test("edit --set saveResponse runs on a 3.x server", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      info: { version: "3.0.0" },
+      monitors: [http(7, "h")],
+    });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "saveResponse=true"], creds(k.url));
+    expect(r.code).toBe(0);
+    const sent = editCalls(k)[0]!.args[0] as Record<string, unknown>;
+    expect(sent.saveResponse).toBe(true);
+  });
+
+  test("edit --set sftpPath runs on 2.5.4, the first release reading the key", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      info: { version: "2.5.4" },
+      monitors: [http(7, "h")],
+    });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "sftpPath=/tmp/x"], creds(k.url));
+    expect(r.code).toBe(0);
+    const sent = editCalls(k)[0]!.args[0] as Record<string, unknown>;
+    expect(sent.sftpPath).toBe("/tmp/x");
   });
 });
 
@@ -1225,8 +1356,87 @@ describe("ntp monitors", () => {
       creds(k.url),
     );
     expect(r.code).toBe(2);
-    expect(r.stderr).toContain('"ntpStratumThreshold" needs Uptime Kuma 2.x');
+    expect(r.stderr).toContain('"ntpStratumThreshold" needs Uptime Kuma >= 2.5.0');
     expect(editCalls(k)).toHaveLength(0);
+  });
+
+  // The ntp_*_threshold columns ship in 2.5.0 with the type: on 2.0-2.4
+  // `editMonitor` would silently drop the key while answering ok
+  test("add --set ntpStratumThreshold exits 2 on a 2.4 server naming 2.5.0", async () => {
+    const k = await useFake({ profile: "2.x", info: { version: "2.4.0" } });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "h",
+        "--url",
+        "https://h.test",
+        "--set",
+        "ntpStratumThreshold=10",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(
+      '"ntpStratumThreshold" needs Uptime Kuma >= 2.5.0; the server reports 2.4.0',
+    );
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set ntpStratumThreshold exits 2 on a 2.4 server naming 2.5.0", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      info: { version: "2.4.0" },
+      monitors: [http(7, "h")],
+    });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "ntpStratumThreshold=10"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(
+      '"ntpStratumThreshold" needs Uptime Kuma >= 2.5.0; the server reports 2.4.0',
+    );
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set ntpStratumThreshold runs on 2.5.0, the first release with the columns", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      info: { version: "2.5.0" },
+      monitors: [{ ...http(7, "n"), type: "ntp" }],
+    });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "ntpStratumThreshold=10"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = editCalls(k)[0]!.args[0] as Record<string, unknown>;
+    expect(sent.ntpStratumThreshold).toBe(10);
+  });
+
+  // a 2.x field without a min-version entry (smtpSecurity shipped in beta.3)
+  // only needs major 2
+  test("edit --set smtpSecurity runs on a 2.4 server", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      info: { version: "2.4.0" },
+      monitors: [{ ...http(7, "s"), type: "smtp", hostname: "s.test", port: 25 }],
+    });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "smtpSecurity=secure"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = editCalls(k)[0]!.args[0] as Record<string, unknown>;
+    expect(sent.smtpSecurity).toBe("secure");
   });
 
   // toJSON emits the ntp fields, so the fetched monitor carries them back —
