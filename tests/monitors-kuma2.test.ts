@@ -2653,6 +2653,24 @@ describe("websocket-upgrade monitors", () => {
     expect(addCalls(k)).toHaveLength(0);
   });
 
+  // a --config-file url may carry userinfo the flag paths refused — the
+  // scheme refusal must not echo it to stderr
+  test("add --type websocket-upgrade redacts userinfo in the scheme refusal", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const f = join(sb.dir, "wscred.json");
+    writeFileSync(f, JSON.stringify({ url: "https://wsuser:wspass@ws.example.com" }));
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "websocket-upgrade", "--name", "ws1", "--config-file", f],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("https://***@ws.example.com");
+    expect(r.stderr).not.toContain("wsuser");
+    expect(r.stderr).not.toContain("wspass");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
   test("add keeps an explicit accepted_statuscodes over the ws default", async () => {
     const k = await useFake({ profile: "2.x" });
     const r = await run(
