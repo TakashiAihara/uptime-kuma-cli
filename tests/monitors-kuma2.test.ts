@@ -2553,6 +2553,810 @@ describe("snmp monitors", () => {
   });
 });
 
+describe("websocket-upgrade monitors", () => {
+  // toJSON always emits both ws fields — the fixture carries the column
+  // defaults like a real fetched row
+  const ws = (id: number, name: string, extra: Record<string, unknown> = {}) => ({
+    ...http(id, name),
+    type: "websocket-upgrade",
+    url: `wss://${name}.example.com`,
+    accepted_statuscodes: ["1000"],
+    wsSubprotocol: "",
+    wsIgnoreSecWebsocketAcceptHeader: false,
+    ...extra,
+  });
+
+  test("add --type websocket-upgrade sends the ws close-code default and the generic timeout", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "websocket-upgrade",
+        "--name",
+        "ws1",
+        "--url",
+        "wss://ws.example.com/feed",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const m = addCalls(k)[0]!.args[0] as Record<string, unknown>;
+    expect(m.type).toBe("websocket-upgrade");
+    expect(m.url).toBe("wss://ws.example.com/feed");
+    expect(m.accepted_statuscodes).toEqual(["1000"]);
+    expect(m.timeout).toBe(48);
+  });
+
+  test("add --type websocket-upgrade accepts a plain ws:// url", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "websocket-upgrade",
+        "--name",
+        "ws1",
+        "--url",
+        "ws://127.0.0.1:9000/socket",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls(k)[0]!.args[0] as Record<string, unknown>).url).toBe(
+      "ws://127.0.0.1:9000/socket",
+    );
+  });
+
+  test("add --type websocket-upgrade without a url exits 2", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "websocket-upgrade", "--name", "ws1"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("requires --url");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --type websocket-upgrade with an https url exits 2", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "websocket-upgrade",
+        "--name",
+        "ws1",
+        "--url",
+        "https://ws.example.com",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("ws:// or wss://");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --type websocket-upgrade with an unparseable url exits 2", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "websocket-upgrade", "--name", "ws1", "--url", "notaurl"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("ws:// or wss://");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  // `new WebSocket` throws SyntaxError on a fragment before connecting —
+  // the stored monitor could never check
+  test("add --type websocket-upgrade with a fragment url exits 2", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "websocket-upgrade",
+        "--name",
+        "ws1",
+        "--url",
+        "wss://ws.example.com/#health",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("fragment");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  // a --config-file url may carry userinfo the flag paths refused — the
+  // scheme refusal must not echo it to stderr
+  test("add --type websocket-upgrade redacts userinfo in the scheme refusal", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const f = join(sb.dir, "wscred.json");
+    writeFileSync(f, JSON.stringify({ url: "https://wsuser:wspass@ws.example.com" }));
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "websocket-upgrade", "--name", "ws1", "--config-file", f],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("https://***@ws.example.com");
+    expect(r.stderr).not.toContain("wsuser");
+    expect(r.stderr).not.toContain("wspass");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add keeps an explicit accepted_statuscodes over the ws default", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "websocket-upgrade",
+        "--name",
+        "ws1",
+        "--url",
+        "wss://ws.example.com",
+        "--set",
+        'accepted_statuscodes=["1000","1006"]',
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls(k)[0]!.args[0] as Record<string, unknown>).accepted_statuscodes).toEqual([
+      "1000",
+      "1006",
+    ]);
+  });
+
+  // an explicit "200-299" reads identical to the http default but is the
+  // user's own choice — the picker's watcher ran before the user typed it
+  test("add keeps an explicit accepted_statuscodes that equals the http default", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "websocket-upgrade",
+        "--name",
+        "ws1",
+        "--url",
+        "wss://ws.example.com",
+        "--set",
+        'accepted_statuscodes=["200-299"]',
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls(k)[0]!.args[0] as Record<string, unknown>).accepted_statuscodes).toEqual([
+      "200-299",
+    ]);
+  });
+
+  test("add --set url=wss:// counts as the required url", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "websocket-upgrade",
+        "--name",
+        "ws1",
+        "--set",
+        "url=wss://ws.example.com",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls(k)[0]!.args[0] as Record<string, unknown>).url).toBe("wss://ws.example.com");
+  });
+
+  // upstream submit()'s acceptList (not its stricter wss?:// input
+  // pattern) is the gate: ws:foo parses with host "foo" and the ws
+  // library dials it like ws://foo, so storing it is not a dead check
+  test("add --type websocket-upgrade accepts a scheme-relative url like ws:foo", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "websocket-upgrade",
+        "--name",
+        "ws1",
+        "--url",
+        "ws:ws.example.com",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls(k)[0]!.args[0] as Record<string, unknown>).url).toBe("ws:ws.example.com");
+  });
+
+  test("add --type websocket-upgrade refuses a ws url without a host", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "websocket-upgrade", "--name", "ws1", "--url", "wss://"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("ws:// or wss://");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  // websocket-upgrade.js strips whitespace then splits on commas — an
+  // empty token makes new WebSocket throw at every check
+  test("add --set wsSubprotocol with an empty entry exits 2", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "websocket-upgrade",
+        "--name",
+        "ws1",
+        "--url",
+        "wss://ws.example.com",
+        "--set",
+        "wsSubprotocol=soap,,mqtt",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("wsSubprotocol");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  // the ws client also throws SyntaxError on a duplicated subprotocol
+  test("add --set wsSubprotocol with a duplicate entry exits 2", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "websocket-upgrade",
+        "--name",
+        "ws1",
+        "--url",
+        "wss://ws.example.com",
+        "--set",
+        "wsSubprotocol=soap, soap",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("wsSubprotocol");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --set wsSubprotocol accepts comma-separated names with spaces", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "websocket-upgrade",
+        "--name",
+        "ws1",
+        "--url",
+        "wss://ws.example.com",
+        "--set",
+        "wsSubprotocol=soap, graphql-ws",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls(k)[0]!.args[0] as Record<string, unknown>).wsSubprotocol).toBe(
+      "soap, graphql-ws",
+    );
+  });
+
+  test("add --set wsSubprotocol stores it", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "websocket-upgrade",
+        "--name",
+        "ws1",
+        "--url",
+        "wss://ws.example.com",
+        "--set",
+        "wsSubprotocol=soap,chat",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect((addCalls(k)[0]!.args[0] as Record<string, unknown>).wsSubprotocol).toBe("soap,chat");
+  });
+
+  test("add --set wsSubprotocol=5 exits 2 (non-string)", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "websocket-upgrade",
+        "--name",
+        "ws1",
+        "--url",
+        "wss://ws.example.com",
+        "--set",
+        "wsSubprotocol=5",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("wsSubprotocol must be a string");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --set wsIgnoreSecWebsocketAcceptHeader=true stores the boolean", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "websocket-upgrade",
+        "--name",
+        "ws1",
+        "--url",
+        "wss://ws.example.com",
+        "--set",
+        "wsIgnoreSecWebsocketAcceptHeader=true",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(
+      (addCalls(k)[0]!.args[0] as Record<string, unknown>).wsIgnoreSecWebsocketAcceptHeader,
+    ).toBe(true);
+  });
+
+  test("add --set wsIgnoreSecWebsocketAcceptHeader=yes exits 2 (non-boolean)", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "websocket-upgrade",
+        "--name",
+        "ws1",
+        "--url",
+        "wss://ws.example.com",
+        "--set",
+        "wsIgnoreSecWebsocketAcceptHeader=yes",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("wsIgnoreSecWebsocketAcceptHeader must be a boolean");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  // websocket-upgrade.js and its ws_* columns first ship in 2.1.0 — on 1.x
+  // and 2.0.x an add would store a row whose checks all throw "Unknown
+  // Monitor Type", so the type names its real minimum.
+  test("add --type websocket-upgrade exits 2 on a 1.x server naming 2.1.0", async () => {
+    const k = await useFake();
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "websocket-upgrade",
+        "--name",
+        "ws1",
+        "--url",
+        "wss://ws.example.com",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(
+      'type "websocket-upgrade" needs Uptime Kuma >= 2.1.0; the server reports 1.23.17',
+    );
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --type websocket-upgrade exits 2 on 2.0.x naming 2.1.0", async () => {
+    const k = await useFake({ profile: "2.x", info: { version: "2.0.2" } });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "websocket-upgrade",
+        "--name",
+        "ws1",
+        "--url",
+        "wss://ws.example.com",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(
+      'type "websocket-upgrade" needs Uptime Kuma >= 2.1.0; the server reports 2.0.2',
+    );
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --type websocket-upgrade runs at the 2.1.0 boundary", async () => {
+    const k = await useFake({ profile: "2.x", info: { version: "2.1.0" } });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "websocket-upgrade",
+        "--name",
+        "ws1",
+        "--url",
+        "wss://ws.example.com",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(addCalls(k)).toHaveLength(1);
+  });
+
+  // the watcher's swap only reaches an empty url or the counterpart's
+  // placeholder; a real https url stays and the scheme refusal reports it
+  // instead of storing a monitor that can never connect
+  test("edit --set type=websocket-upgrade keeps a real https url and exits 2", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [http(7, "h")] });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=websocket-upgrade"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("ws:// or wss://");
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set type=websocket-upgrade --set url=wss:// swaps the http status default", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [http(7, "h")] });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "type=websocket-upgrade",
+        "--set",
+        "url=wss://wsserver.example.com",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const m = stored(k, "h");
+    expect(m.type).toBe("websocket-upgrade");
+    expect(m.url).toBe("wss://wsserver.example.com");
+    expect(m.accepted_statuscodes).toEqual(["1000"]);
+  });
+
+  // the placeholder "https://" swaps to "wss://", which is not a usable url
+  // — the picker relies on the user's typed url winning the same moment
+  test("edit --set type=websocket-upgrade on a placeholder url still needs --set url", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [http(7, "h", { url: "https://" })],
+    });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=websocket-upgrade"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("ws:// or wss://");
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set type=websocket-upgrade keeps a custom status list", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [http(7, "h", { accepted_statuscodes: ["200-299", "500"] })],
+    });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "type=websocket-upgrade",
+        "--set",
+        "url=wss://wsserver.example.com",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "h").accepted_statuscodes).toEqual(["200-299", "500"]);
+  });
+
+  // upstream's "empty" is a truthiness check — a stored [] is a set list
+  // and stays, matching the watcher's literal behavior
+  test("edit --set type=websocket-upgrade keeps a stored empty status list", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [http(7, "h", { accepted_statuscodes: [] })],
+    });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "type=websocket-upgrade",
+        "--set",
+        "url=wss://wsserver.example.com",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "h").accepted_statuscodes).toEqual([]);
+  });
+
+  test("edit --set accepted_statuscodes wins over the ws swap", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [http(7, "h")] });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "type=websocket-upgrade",
+        "--set",
+        "url=wss://wsserver.example.com",
+        "--set",
+        'accepted_statuscodes=["1006"]',
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "h").accepted_statuscodes).toEqual(["1006"]);
+  });
+
+  // leaving websocket-upgrade with an explicit url, the status default
+  // swaps back to the http family's
+  test("edit --set type=http --set url restores the http status default", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [ws(7, "w")] });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=http", "--set", "url=https://www.example.com"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const m = stored(k, "w");
+    expect(m.type).toBe("http");
+    expect(m.url).toBe("https://www.example.com");
+    expect(m.accepted_statuscodes).toEqual(["200-299"]);
+  });
+
+  // a stored placeholder swaps to "https://", which submit()'s gate then
+  // refuses — upstream's identical outcome, since new URL("https://")
+  // throws in its submit too
+  test("edit --set type=http on a placeholder wss:// url still needs --set url", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [ws(7, "w", { url: "wss://" })],
+    });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "type=http"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("http:// or https://");
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set type=http keeps a custom ws status list", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [ws(7, "w", { accepted_statuscodes: ["1000", "1006"] })],
+    });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=http", "--set", "url=https://www.example.com"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "w").accepted_statuscodes).toEqual(["1000", "1006"]);
+  });
+
+  // 1.23's type watcher has no websocket-upgrade branch — nothing swaps
+  test("edit --set type=websocket-upgrade exits 2 on a 1.x server before any swap", async () => {
+    const k = await useFake({ monitors: [http(7, "h")] });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "type=websocket-upgrade",
+        "--set",
+        "url=wss://wsserver.example.com",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(
+      'type "websocket-upgrade" needs Uptime Kuma >= 2.1.0; the server reports 1.23.17',
+    );
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set type=websocket-upgrade exits 2 on 2.0.x naming 2.1.0", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      info: { version: "2.0.2" },
+      monitors: [http(7, "h")],
+    });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "type=websocket-upgrade",
+        "--set",
+        "url=wss://wsserver.example.com",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(
+      'type "websocket-upgrade" needs Uptime Kuma >= 2.1.0; the server reports 2.0.2',
+    );
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set wsSubprotocol and wsIgnoreSecWebsocketAcceptHeader store on the ws row", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [ws(7, "w")] });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "wsSubprotocol=soap",
+        "--set",
+        "wsIgnoreSecWebsocketAcceptHeader=true",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const m = stored(k, "w");
+    expect(m.wsSubprotocol).toBe("soap");
+    expect(m.wsIgnoreSecWebsocketAcceptHeader).toBe(true);
+  });
+
+  // the http-direction swap turns an unset url into "https://", which
+  // submit()'s acceptList then refuses — the same refusal a base edit
+  // gave the url-less monitor, not a stored dead placeholder
+  test("edit --set type=http on a url-less monitor exits 2 like base", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [{ ...http(7, "p"), type: "push", url: null, accepted_statuscodes: null }],
+    });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "type=http"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("http:// or https://");
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  // a real wss:// url is not the placeholder, so it stays — and the http
+  // family's acceptList refuses it exactly like submit() would
+  test("edit --set type=http refuses a stored wss:// url", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [ws(7, "w")] });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "type=http"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("http:// or https://");
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  // json-query shares the url field and the http acceptList; upstream's
+  // watcher just has no swap branch for it
+  test("edit --set type=json-query refuses a stored wss:// url", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [ws(7, "w", { jsonPath: "$.ok", expectedValue: "ok" })],
+    });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "type=json-query"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("http:// or https://");
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  // real-browser's acceptList entry is null — any parseable scheme — so
+  // upstream's submit accepts a wss:// url there even though playwright
+  // could never navigate to it; the CLI mirrors the gate, not the outcome
+  test("edit --set type=real-browser keeps a stored wss:// url", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [ws(7, "w")] });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "type=real-browser"], creds(k.url));
+    expect(r.code).toBe(0);
+    expect(stored(k, "w").url).toBe("wss://w.example.com");
+  });
+
+  // the acceptList also guards a plain url edit on a ws monitor — a
+  // stored https:// url could never connect
+  test("edit --set url=https:// on a ws monitor exits 2 without a type change", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [ws(7, "w")] });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "url=https://w.example.com"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("ws:// or wss://");
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set type=websocket-upgrade swaps a stored null status list", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [http(7, "h", { accepted_statuscodes: null })],
+    });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "type=websocket-upgrade",
+        "--set",
+        "url=wss://wsserver.example.com",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "h").accepted_statuscodes).toEqual(["1000"]);
+  });
+});
+
 describe("monitor timing on Kuma 2.x", () => {
   test("edit of a 2.x ping to a short interval keeps its timeout (no 80% cap)", async () => {
     const k = await useFake({
