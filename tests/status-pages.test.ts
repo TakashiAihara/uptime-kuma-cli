@@ -637,7 +637,12 @@ describe("status-pages", () => {
         const r = await run(sb, ["status-pages", "incident-history", "status"], creds(kuma.url));
         expect(r.code).toBe(0);
         expect(callsOf("getIncidentHistory")).toHaveLength(3);
-        expect(r.stderr).not.toContain("may be incomplete");
+        // the count matches the total, but hasMore was still true when the
+        // cursor stalled — a server that cannot continue its own walk can
+        // miscount too, so the stall still warns
+        expect(r.stderr).toContain(
+          "warning: incident history may be incomplete: stopped early at 3 of 3 incidents",
+        );
         expect(r.json().incidents).toHaveLength(3);
       });
 

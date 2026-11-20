@@ -183,12 +183,15 @@ async function incidentHistory(
     cursor = next;
   }
   // more rows than the reported total is not a shortfall — an incident
-  // posted between page fetches explains it — so only a deficit warns
+  // posted between page fetches explains it — so only a deficit warns; a
+  // count that matches the total while the cursor stalled still warns,
+  // since a server that cannot continue its own walk can miscount too
   const short = incidents.length < total;
-  if (!found && short) {
-    console.error(
-      `warning: incident history may be incomplete: got ${incidents.length} of ${total} incidents`,
-    );
+  if (!found && (short || truncated)) {
+    const detail = short
+      ? `got ${incidents.length} of ${total} incidents`
+      : `stopped early at ${incidents.length} of ${total} incidents`;
+    console.error(`warning: incident history may be incomplete: ${detail}`);
   }
   // a findId hit ends the walk on purpose; anything else is complete only when
   // it ran to hasMore false and fetched every row the total reports
