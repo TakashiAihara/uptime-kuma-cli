@@ -187,36 +187,168 @@ describe("maintenance on Kuma 2.x", () => {
       expect(k.calls).toHaveLength(0);
     });
 
-    test.each(["0 9 * * 5#3", "0 9 * * 5#L", "0 9 * * MON#2", "0 9 * * 5L"])(
-      "cron accepts the croner 8 day-of-week form %p",
-      async (cron) => {
-        const k = await useFake();
-        const f = writeJson("cron8.json", { cron });
-        const r = await run(
-          sb,
-          ["maintenance", "add", "--title", "w", "--strategy", "cron", "--config-file", f],
-          creds(k.url),
-        );
-        expect(r.code).toBe(0);
-        expect(sentAdd(k).cron).toBe(cron);
-      },
-    );
+    test.each([
+      "0 9 * * 5#3",
+      "0 9 * * 5#L",
+      "0 9 * * MON#2",
+      "0 9 * * 5L",
+      "0 9 * * 5-7#3",
+      "0 9 * * 5/2#3",
+      "0 9 * * 5#",
+      "0 9 * * ?#3",
+      "0 9 * * ?L",
+      "0 9 * * ?/5#3",
+      "0 9 20-33/7 * *",
+      "0 9 * * 2-8/7",
+      "0 9 31/5 * *",
+      "0 9 * 12/3 *",
+      "0 9 L * *",
+      "0 9 L, * *",
+      "0 9 * * ?/5",
+      "0 9 ?/5 * *",
+      "0 9 * ?/5 *",
+      "0 9 ?-31 * *",
+      "0 9 1-? * *",
+      "0 9 * * ?-7",
+      "0 9 * * ?-6",
+      "0 9 * * /5,6",
+      "0 9 * * 60/5,6",
+      "0 9 32/5,1 * *",
+      "0 0 29 2 *",
+      "0 0 31 2 1",
+      "0 0 31 4,7 *",
+      "0 0 31 * *",
+      "0 0 5 * 31/6",
+      "0 0 32/5 * 1",
+      "0 0 28 ? *",
+      "0 0 ? 1 *",
+      "0 0 ? 1,4 *",
+      "0 0 ? ? *",
+      "0 0 ? ?,4 *",
+      "0 0 ?/18 * *",
+      "0 0 ?/18 * */5",
+      "0 0 ?/18 * 1",
+      "0 0 5,?/18 * *",
+      "0 0 * ?/5 *",
+      "0 0 5 ?/5 *",
+      "0 0 * 1-?/2 *",
+      "0 0 * ?-12/3 *",
+      "0 0 ?-31/10 7,6 *",
+      "0 0 *,1-?/8 * *",
+      "0 0 11-23/7 12 0-?/2",
+      "0 0 5 * ?-6/7,1-1",
+      "0 0 1-28* 2 *",
+      "0 0 29-31* 2 *",
+      "0 0 28*-30 2 *",
+      "0 0 5*3 2 *",
+      "0 0 5/2*3 2 *",
+      "0 0 */5* 2 *",
+      "0 0 ?* * *",
+      "0 0 * ?* *",
+      "0 0 * * ?*",
+      "?* 0 0 * * *",
+      "0-?* 9 * * *",
+      "?/5* 0 0 * * *",
+      "0 0 */?* * *",
+      "0 0 1-5*? * *",
+      "0 0 ?*1 * *",
+      "0 0 5*? 2 *",
+      "0 0 ?-31* * *",
+      "0 0 ?/5* * *",
+      "?0/5,0 9 * * *",
+      "0 0 15 * ?0/5",
+      "0 0 * * ?0/5,1",
+      "0 0 * * ?/7",
+      "0 0 ?/5 * ?0/5",
+      "0 0 ?0/5 * 1",
+      "0 0 ?,L * *",
+      "0 0 ?0/5,L * *",
+      "0 0 ?,L * ?0/5",
+    ])("cron accepts %p on a 2.x server", async (cron) => {
+      const k = await useFake();
+      const f = writeJson("cron8.json", { cron });
+      const r = await run(
+        sb,
+        ["maintenance", "add", "--title", "w", "--strategy", "cron", "--config-file", f],
+        creds(k.url),
+      );
+      expect(r.code).toBe(0);
+      expect(sentAdd(k).cron).toBe(cron);
+    });
 
-    test.each(["0 9 * * * * *", "0 9 * * L", "0 9 * * FOO"])(
-      "cron still rejects %p before connecting",
-      async (cron) => {
-        const k = await useFake();
-        const f = writeJson("badcron.json", { cron });
-        const r = await run(
-          sb,
-          ["maintenance", "add", "--title", "w", "--strategy", "cron", "--config-file", f],
-          creds(k.url),
-        );
-        expect(r.code).toBe(2);
-        expect(r.stderr).toContain("5 or 6 whitespace-separated cron fields");
-        expect(k.calls).toHaveLength(0);
-      },
-    );
+    test.each([
+      "0 9 * * */8",
+      "0 9 0/5 * *",
+      "0 9 * 0/3 *",
+      "0 9 * * 7/2",
+      "0 9 ,5 * *",
+      "0 9 0/5,1 * *",
+      "0 0 1 * L",
+      "0 0 31 2/12 *",
+      "0 0 0/30 2 *",
+      "0 9 * * ?/8",
+    ])("a croner 6-only form %p exits 2 once the 2.x version is known", async (cron) => {
+      const k = await useFake();
+      const f = writeJson("cron6.json", { cron });
+      const r = await run(
+        sb,
+        ["maintenance", "add", "--title", "w", "--strategy", "cron", "--config-file", f],
+        creds(k.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("in-range values and steps");
+      expect(k.calls.map((c) => c.event)).toContain("login");
+      expect(callsOf(k, "addMaintenance")).toHaveLength(0);
+    });
+
+    test.each([
+      "0 9 * * * * *",
+      "0 9 * * L",
+      "0 9 * * FOO",
+      "0 9 * 13 *",
+      "0 9 * * /5",
+      "0 9 * /5 *",
+      "0 9 /5 * *",
+      "0 0 * * 60/5",
+      "0 0 31 2 *",
+      "0 0 30 2 *",
+      "0 0 31 4,6,9,11 *",
+      "0 0 30-31/2 2 *",
+      "0 0 31/5 4 *",
+      "0 0 31 ? *",
+      "0 0 ? 2 *",
+      "0 0 ?,31 2 *",
+      "0 0 ?-31 2 *",
+      "0 0 31 ?,4 *",
+      "0 0 ?/31 2 *",
+      "0 0 ?/5 2 *",
+      "0 0 31/? 2,? *",
+      "0 0 ?-31* 2 *",
+      "0 0 1-28/2*3 2 *",
+      "0 0 1-2/3* 2 *",
+      "0 0 *1-5 2 *",
+      "0 0 30-31* 2 *",
+      "0 0 31* 2 *",
+      "?0/5 9 * * *",
+      "?0/5 9 15 * *",
+      "0 0 * * ?0/5",
+      "0 0 * * ?0/5,9/2",
+      "0 0 60/5 * ?0/5",
+      "0 0 * ?0/5 *",
+      "0 0 ?0/5 * *",
+      "0 0 ?5-,L * *",
+    ])("cron still rejects %p before connecting", async (cron) => {
+      const k = await useFake();
+      const f = writeJson("badcron.json", { cron });
+      const r = await run(
+        sb,
+        ["maintenance", "add", "--title", "w", "--strategy", "cron", "--config-file", f],
+        creds(k.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("5 or 6 whitespace-separated cron fields");
+      expect(k.calls).toHaveLength(0);
+    });
   });
 
   describe("edit", () => {
@@ -308,6 +440,28 @@ describe("maintenance on Kuma 2.x", () => {
       );
       expect(r.code).toBe(0);
       expect(sentEdit(k).cron).toBe("0 9 * * 5#3");
+    });
+
+    test("--set cron with an out-of-range value exits 2 without sending editMaintenance", async () => {
+      const k = await useFake({
+        maintenances: [
+          {
+            id: 1,
+            title: "cron win",
+            strategy: "cron",
+            cron: "0 4 * * *",
+            duration: 3600,
+          },
+        ],
+      });
+      const r = await run(
+        sb,
+        ["maintenance", "edit", "1", "--set", "cron=0 9 * * */8"],
+        creds(k.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("in-range values and steps");
+      expect(callsOf(k, "editMaintenance")).toHaveLength(0);
     });
 
     test("switching single to cron keeps the stored end date", async () => {
