@@ -50,13 +50,19 @@ base="https://github.com/${REPO}/releases/download/${VERSION}"
 # The scratch dir is inside the install dir: the binary is run from here before it replaces
 # anything, so it must not depend on /tmp being mounted executable, and mv stays a rename.
 mkdir -p "$INSTALL_DIR"
-tmp="$(mktemp -d "${INSTALL_DIR}/.uptime-kuma-cli.XXXXXX")"
-trap 'rm -rf "$tmp"' EXIT
+
+# Traps go in before mktemp: a signal that lands while the work dir exists but the TERM
+# trap is not yet set kills by the default action, which never reaches EXIT and leaves the
+# dir behind. tmp is empty until the mktemp substitution completes, so an early trap
+# finds nothing to remove.
+tmp=
+trap '[ -z "$tmp" ] || rm -rf "$tmp"' EXIT
 # dash does not run the EXIT trap on a signal, so go through exit to leave no leftovers
 # in the PATH dir
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
+tmp="$(mktemp -d "${INSTALL_DIR}/.uptime-kuma-cli.XXXXXX")"
 
 echo "uptime-kuma-cli: fetching ${asset} (${VERSION})"
 curl -fsSL "${base}/${asset}" -o "${tmp}/uptime-kuma-cli" || die "download failed: ${base}/${asset}"

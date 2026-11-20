@@ -6,6 +6,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -194,8 +195,23 @@ describe("install.sh", () => {
     async () => {
       const dash = Bun.which("dash");
       if (!dash) throw new Error("dash is needed for this test");
-      startServer({ "v1.0.0": release("#!/bin/sh\nsleep 2\n") });
+      const realMktemp = Bun.which("mktemp");
+      if (!realMktemp) throw new Error("mktemp is needed for this test");
+      startServer({ "v1.0.0": release(WORKING) });
       shimCurl();
+      // A mktemp that exits only when the test releases it keeps the shell inside
+      // tmp=$(...) with the dir already visible, so the TERM lands in the window that
+      // used to need scheduler luck. dash defers the trap to the end of the command,
+      // so the fixed script still exits 143 and cleans up. The hold loop is bounded:
+      // on a regression the parent dies at once and the orphaned shim must still
+      // exit on its own after sb.cleanup() removes the sandbox
+      const hold = join(sb.dir, "hold-mktemp");
+      rmSync(join(bin, "mktemp"));
+      writeTool(
+        "mktemp",
+        `${realMktemp} "$@" || exit\ni=0\nwhile [ ! -f "${hold}" ] && [ "$i" -lt 400 ]; do\n  i=$((i + 1))\n  sleep 0.05\ndone`,
+      );
+
       const proc = Bun.spawn([dash, INSTALL_SH], {
         cwd: sb.dir,
         env: { PATH: bin, HOME: sb.home, UPTIME_KUMA_CLI_INSTALL_DIR: installDir },
@@ -203,10 +219,16 @@ describe("install.sh", () => {
         stdout: "ignore",
         stderr: "ignore",
       });
-      for (let i = 0; i < 100 && leftovers().length === 0; i++) await Bun.sleep(20);
-      expect(leftovers().length).toBe(1);
+      try {
+        for (let i = 0; i < 100 && leftovers().length === 0; i++) await Bun.sleep(20);
+        expect(leftovers().length).toBe(1);
 
-      proc.kill("SIGTERM");
+        // The shim still holds the substitution open, so the signal provably arrives
+        // while the dir exists
+        proc.kill("SIGTERM");
+      } finally {
+        writeFileSync(hold, "");
+      }
 
       expect(await proc.exited).toBe(143);
       expect(leftovers()).toEqual([]);
