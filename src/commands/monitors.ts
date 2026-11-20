@@ -58,7 +58,7 @@ const MONITOR_TYPES = [
 // Like a 2.x-only field, one of these can only be refused after connect() on
 // a 1.x server — 1.23's `add` would store the row and every check would throw
 // "Unknown Monitor Type" — so the pre-connect choices list takes the union.
-const MONITOR_2X_TYPES = ["manual", "ntp"] as const;
+const MONITOR_2X_TYPES = ["manual", "ntp", "smtp"] as const;
 
 // The five database types of EditMonitor.vue all show a required
 // databaseConnectionString. The UI's type watcher prefills it with a template
@@ -107,12 +107,23 @@ const TYPE_FLAGS: { flag: string; opt: string; types: readonly string[] }[] = [
   {
     flag: "--hostname",
     opt: "hostname",
-    types: ["port", "ping", "dns", "steam", "gamedig", "mqtt", "radius", "tailscale-ping", "ntp"],
+    types: [
+      "port",
+      "ping",
+      "dns",
+      "steam",
+      "gamedig",
+      "mqtt",
+      "radius",
+      "tailscale-ping",
+      "ntp",
+      "smtp",
+    ],
   },
   {
     flag: "--port",
     opt: "port",
-    types: ["port", "dns", "steam", "gamedig", "mqtt", "radius", "ntp"],
+    types: ["port", "dns", "steam", "gamedig", "mqtt", "radius", "ntp", "smtp"],
   },
   { flag: "--keyword", opt: "keyword", types: ["keyword", "grpc-keyword"] },
   { flag: "--invert-keyword", opt: "invertKeyword", types: ["keyword", "grpc-keyword"] },
@@ -200,6 +211,28 @@ const KUMA2_TIMEOUT_DEFAULTS: Record<string, number> = { ping: 10, "kafka-produc
 // "NTP servers may rate-limit frequent queries; default to 5 minutes");
 // every other type, and every type on 1.23, defaults to 60.
 const KUMA2_INTERVAL_DEFAULTS: Record<string, number> = { ntp: 300 };
+
+// The port a type's own default is on an edit type change — ntp's comes
+// from the picker's watcher like the add's; smtp's watcher leaves the
+// required input blank, but its check() runs `port || 25`. An empty port
+// or another type's well-known default is replaced by it; a port the
+// edit sets wins.
+const TYPE_CHANGE_PORT_DEFAULTS: Record<string, number> = { ntp: 123, smtp: 25 };
+
+// The ports that read as "another type's default" to the watcher:
+// 22 / 53 / 123 / 1812 are its own list (sftp / dns / ntp / radius), and
+// the map's values join them — the CLI stores those defaults where the
+// picker leaves the field blank. The stored port alone cannot tell a
+// type's own default from a user's pick, so a 25 kept on a type other
+// than smtp is replaced the same way — the watcher's trade-off, taken
+// one value further for the port only the CLI writes.
+const TYPE_CHANGE_KNOWN_PORTS = new Set([
+  22,
+  53,
+  123,
+  1812,
+  ...Object.values(TYPE_CHANGE_PORT_DEFAULTS),
+]);
 
 const PUSH_TOKEN_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -739,6 +772,14 @@ const HATCH_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unknow
   ntpStratumThreshold: (v, k) => hatchNumber(v, k, parseNtpStratumThreshold),
   ntpTimeOffsetThreshold: (v, k) => hatchNumber(v, k, parsePositiveInteger),
   ntpRootDispersionThreshold: (v, k) => hatchNumber(v, k, parsePositiveInteger),
+  // The select's three choices; null is the column's default — unset, which
+  // the check runs as plain SMTP that still uses STARTTLS when offered.
+  smtpSecurity: (v, k) => {
+    if (v !== null && v !== "secure" && v !== "starttls" && v !== "nostarttls") {
+      fail(2, `${k} must be one of secure, starttls, nostarttls, or null`);
+    }
+    return v;
+  },
 };
 
 // Runs before connecting so a bad hatch value exits 2 with nothing sent.
@@ -865,7 +906,8 @@ function validateFinalMonitor(
     type === "tailscale-ping" ||
     type === "mqtt" ||
     type === "radius" ||
-    type === "ntp"
+    type === "ntp" ||
+    type === "smtp"
   ) {
     needString("hostname");
   }
@@ -875,7 +917,8 @@ function validateFinalMonitor(
       type === "gamedig" ||
       type === "mqtt" ||
       type === "radius" ||
-      type === "ntp") &&
+      type === "ntp" ||
+      type === "smtp") &&
     inScope("port")
   ) {
     const port = monitor.port;
@@ -1238,7 +1281,8 @@ export function registerMonitors(program: Command): void {
         type === "dns" ||
         type === "tailscale-ping" ||
         type === "radius" ||
-        type === "ntp"
+        type === "ntp" ||
+        type === "smtp"
       ) {
         if (!opts.hostname) fail(2, `--type ${type} requires --hostname`);
       }
@@ -1362,8 +1406,9 @@ export function registerMonitors(program: Command): void {
       const proxyIdOption =
         opts.proxyId === undefined ? undefined : parseId(opts.proxyId, "--proxy-id");
       // dns, radius and ntp get their well-known ports from the UI's type
-      // watcher (53 / 1812 / 123); the other port types require --port
-      // (checked above).
+      // watcher (53 / 1812 / 123); smtp's watcher leaves the required input
+      // blank, but the check runs `port || 25`, so 25 is its own default.
+      // The other port types require --port (checked above).
       let port: number | undefined;
       if (type === "dns") {
         port = opts.port === undefined ? 53 : parsePort(opts.port, "--port");
@@ -1371,6 +1416,8 @@ export function registerMonitors(program: Command): void {
         port = opts.port === undefined ? 1812 : parsePort(opts.port, "--port");
       } else if (type === "ntp") {
         port = opts.port === undefined ? 123 : parsePort(opts.port, "--port");
+      } else if (type === "smtp") {
+        port = opts.port === undefined ? 25 : parsePort(opts.port, "--port");
       } else if (type === "port" || type === "steam" || type === "gamedig" || type === "mqtt") {
         port = parsePort(opts.port, "--port");
       }
@@ -1774,28 +1821,33 @@ export function registerMonitors(program: Command): void {
       ) {
         monitor.httpBodyEncoding = null;
       }
-      // The UI's type watcher picks interval 300 on a type change to ntp
-      // ("NTP servers may rate-limit frequent queries"). Its port branch
-      // means to replace another type's default port but compares the
-      // string forms, so a numeric stored port slips through there — the
-      // CLI covers the intent instead: an empty port or one of
-      // 22 / 53 / 123 / 1812 goes to 123. Values this edit sets win.
+      // The picker's type watcher applies its per-type picks on a change:
+      // interval for the types KUMA2_INTERVAL_DEFAULTS lists (only ntp
+      // picks 300 — "NTP servers may rate-limit frequent queries") and
+      // port for TYPE_CHANGE_PORT_DEFAULTS. Its port branch means to
+      // replace another type's default port but compares the string forms,
+      // so a numeric stored port slips through there — the CLI covers the
+      // intent instead: an empty port or a TYPE_CHANGE_KNOWN_PORTS one
+      // goes to the new type's own default. Values this edit sets win.
       // The defaulted interval is a timing change this edit makes, so it
       // re-derives the timeout's 80% cap like a touched interval would —
       // otherwise a stored timeout of e.g. 2000s would survive beside the
       // new 300s interval.
       let intervalDefaulted = false;
-      if (typeChanged && type === "ntp") {
-        if (!touched.has("interval")) {
-          intervalDefaulted = monitor.interval !== 300;
-          monitor.interval = 300;
+      if (typeChanged) {
+        const intervalDefault = KUMA2_INTERVAL_DEFAULTS[type];
+        if (intervalDefault !== undefined && !touched.has("interval")) {
+          intervalDefaulted = monitor.interval !== intervalDefault;
+          monitor.interval = intervalDefault;
         }
+        const portDefault = TYPE_CHANGE_PORT_DEFAULTS[type];
         const port = monitor.port;
         if (
+          portDefault !== undefined &&
           !touched.has("port") &&
-          (!port || port === 22 || port === 53 || port === 123 || port === 1812)
+          (!port || (typeof port === "number" && TYPE_CHANGE_KNOWN_PORTS.has(port)))
         ) {
-          monitor.port = 123;
+          monitor.port = portDefault;
         }
       }
       // The UI's interval watcher moves retryInterval only while the two

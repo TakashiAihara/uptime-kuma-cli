@@ -651,4 +651,58 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
     const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
     expect(del.code).toBe(0);
   }, 300_000);
+
+  test("smtp: 2.x stores smtpSecurity and a down beat arrives; 1.x refuses the type", async () => {
+    const r = await cliRun(sb, [
+      "monitors",
+      "add",
+      "--type",
+      "smtp",
+      "--name",
+      "it-smtp",
+      "--hostname",
+      "127.0.0.1",
+      "--set",
+      "smtpSecurity=nostarttls",
+      "--interval",
+      "20",
+      "--timeout",
+      "5",
+    ]);
+    if (!on2x) {
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain('type "smtp" needs Uptime Kuma 2.x');
+      return;
+    }
+    expect(r.code).toBe(0);
+    const id = r.json().id;
+
+    // no --port: the check's `port || 25` is the stored default
+    const g = await cliRun(sb, ["monitors", "get", String(id)]);
+    expect(g.json()).toMatchObject({
+      type: "smtp",
+      hostname: "127.0.0.1",
+      port: 25,
+      smtpSecurity: "nostarttls",
+    });
+
+    // nothing listens on the container's loopback port 25 — the connection
+    // is refused and the down beat proves the monitor runs
+    let down = false;
+    for (let i = 0; i < 12 && !down; i++) {
+      await new Promise((res) => setTimeout(res, 5_000));
+      const b = await cliRun(sb, ["beats", String(id), "--hours", "1"]);
+      expect(b.code).toBe(0);
+      down = b.json().some((beat: any) => beat.status === 0);
+    }
+    expect(down).toBe(true);
+
+    // toJSON emits smtpSecurity, so an unrelated edit leaves it alone
+    const e = await cliRun(sb, ["monitors", "edit", String(id), "--set", "description=it"]);
+    expect(e.code).toBe(0);
+    expect(e.json()).toMatchObject({ description: "it", smtpSecurity: "nostarttls" });
+
+    const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
+    expect(del.code).toBe(0);
+  }, 300_000);
 });
