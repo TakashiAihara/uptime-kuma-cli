@@ -537,6 +537,26 @@ describe("status-pages", () => {
         expect(calls[1]!.args[1]).toBe("2024-01-03T00:00:00.000Z");
       });
 
+      test("warns when rows sharing the boundary created_date stay unfetched", async () => {
+        // the server pages on created_date < cursor, so a row timestamped
+        // equal to the last row of a page can never be returned; the CLI
+        // reports the shortfall instead of printing a quietly cut history
+        kuma.state.incidents = Array.from({ length: 11 }, (_, i) => ({
+          id: i + 1,
+          statusPageId: 7,
+          title: `i${i + 1}`,
+          createdDate: "2024-01-01T00:00:00.000Z",
+        }));
+        const r = await run(sb, ["status-pages", "incident-history", "status"], creds(kuma.url));
+        expect(r.code).toBe(0);
+        const out = r.json();
+        expect(out.total).toBe(11);
+        expect(out.incidents).toHaveLength(10);
+        expect(r.stderr).toContain(
+          "warning: incident history may be incomplete: got 10 of 11 incidents",
+        );
+      });
+
       test("an unknown slug exits 1 without calling getIncidentHistory", async () => {
         const r = await run(sb, ["status-pages", "incident-history", "ghost"], creds(kuma.url));
         expect(r.code).toBe(1);

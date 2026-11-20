@@ -110,7 +110,10 @@ function requireIncidentEvents(s: KumaSession, command: string): void {
 // getIncidentHistory pages INCIDENT_PAGE_SIZE (10) incidents per call,
 // created_date DESC; the CLI follows nextCursor to the end so the printed
 // array is the whole history. A cursor that does not move means a
-// misbehaving server — stop rather than loop requests forever.
+// misbehaving server — stop rather than loop requests forever. Rows sharing
+// the boundary's created_date are unreachable through the server's cursor
+// (created_date < last), so a collected count below the reported total is
+// warned on rather than printed as a quietly complete history.
 async function incidentHistory(
   s: KumaSession,
   slug: string,
@@ -127,6 +130,11 @@ async function incidentHistory(
     const next = res?.nextCursor;
     if (res?.hasMore !== true || typeof next !== "string" || next === cursor) break;
     cursor = next;
+  }
+  if (typeof total === "number" && incidents.length !== total) {
+    console.error(
+      `warning: incident history may be incomplete: got ${incidents.length} of ${total} incidents`,
+    );
   }
   return { total, incidents };
 }
