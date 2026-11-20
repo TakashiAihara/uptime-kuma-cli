@@ -261,6 +261,9 @@ describe("maintenance on Kuma 2.x", () => {
       "0 0 * * ?/7",
       "0 0 ?/5 * ?0/5",
       "0 0 ?0/5 * 1",
+      "0 0 ?,L * *",
+      "0 0 ?0/5,L * *",
+      "0 0 ?,L * ?0/5",
     ])("cron accepts %p on a 2.x server", async (cron) => {
       const k = await useFake();
       const f = writeJson("cron8.json", { cron });
@@ -333,6 +336,7 @@ describe("maintenance on Kuma 2.x", () => {
       "0 0 60/5 * ?0/5",
       "0 0 * ?0/5 *",
       "0 0 ?0/5 * *",
+      "0 0 ?5-,L * *",
     ])("cron still rejects %p before connecting", async (cron) => {
       const k = await useFake();
       const f = writeJson("badcron.json", { cron });

@@ -206,14 +206,19 @@ const CRON_PART_LIMITS = [
 // their own, while a dead "?" in day-of-month, month or day-of-week goes
 // to the per-today checks below like any other dead entry. Day-of-week's
 // real top is 6 (getDay), though 7 stays a legal bound in the pattern.
-function questionOk(part: string, partIndex: number, version: CronMajor): boolean {
+function questionOk(
+  part: string,
+  partIndex: number,
+  version: CronMajor,
+  lastDay: boolean,
+): boolean {
   if (!part.includes("?")) return true;
   const { min, max } = CRON_PART_LIMITS[partIndex]!;
   const entries = part.split(",");
   for (let c = min; c <= (partIndex === 5 ? 6 : max); c++) {
     let live = false;
     for (const entry of entries) {
-      const verdict = cronEntryOk(entry.replace("?", String(c)), partIndex, version, false);
+      const verdict = cronEntryOk(entry.replace("?", String(c)), partIndex, version, lastDay);
       if (verdict === "bad") return false;
       live ||= verdict === "live";
     }
@@ -264,7 +269,7 @@ function cronParts(
   for (const [i, part] of raw.entries()) {
     if (part.includes("?")) {
       if (part.indexOf("?", part.indexOf("?") + 1) !== -1) return null;
-      if (!questionOk(part, i, version)) return null;
+      if (!questionOk(part, i, version, i === 3 && lastDay)) return null;
       q.set(i, part);
     }
     parts.push(part.replace("?", String(CRON_PART_LIMITS[i]!.min)));
