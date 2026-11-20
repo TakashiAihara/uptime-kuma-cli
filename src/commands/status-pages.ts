@@ -120,18 +120,26 @@ async function incidentHistory(
   s: KumaSession,
   slug: string,
   findId?: number,
-): Promise<{ total: unknown; incidents: Record<string, unknown>[]; complete: boolean }> {
+): Promise<{ total: number; incidents: Record<string, unknown>[]; complete: boolean }> {
   const incidents: Record<string, unknown>[] = [];
-  let total: unknown;
+  let total = 0;
   let cursor: string | null = null;
   let found = false;
   let truncated = false;
   for (;;) {
     const res = await s.request("getIncidentHistory", [slug, cursor]);
     const page = res?.incidents;
-    if (!Array.isArray(page)) fail(70, "unexpected getIncidentHistory response");
+    // total drives the completeness check and the printed output, so a
+    // non-number one is as malformed as a non-array or non-object row
+    if (
+      !Array.isArray(page) ||
+      typeof res?.total !== "number" ||
+      page.some((i) => i === null || typeof i !== "object" || Array.isArray(i))
+    ) {
+      fail(70, "unexpected getIncidentHistory response");
+    }
     incidents.push(...(page as Record<string, unknown>[]));
-    total = res?.total;
+    total = res.total;
     // incident-edit looks one row up through the same pages; stop early once
     // it is seen rather than walking the rest of the history
     if (findId !== undefined && incidents.some((i) => i.id === findId)) {
@@ -151,7 +159,7 @@ async function incidentHistory(
     }
     cursor = next;
   }
-  const short = typeof total === "number" && incidents.length !== total;
+  const short = incidents.length !== total;
   if (!found && short) {
     console.error(
       `warning: incident history may be incomplete: got ${incidents.length} of ${total} incidents`,
@@ -758,25 +766,38 @@ export function registerStatusPages(program: Command): void {
         // an id absent from a complete history does not exist; one missing
         // from a cut one may sit beyond the cursor's created_date boundary
         if (!fetched.complete) {
-          const count =
-            typeof fetched.total === "number"
-              ? ` (${fetched.incidents.length} of ${fetched.total} fetched)`
-              : "";
-          fail(1, `incident ${incidentId} may exist: the fetched history is incomplete${count}`);
+          fail(
+            1,
+            `incident ${incidentId} may exist: the fetched history is incomplete (${fetched.incidents.length} of ${fetched.total} fetched)`,
+          );
         }
         fail(1, `incident ${incidentId} not found`);
       }
       const title = opts.title ?? existing.title;
       const content = opts.content ?? existing.content;
       const style = opts.style ?? existing.style;
+      // a malformed stored row surfaces as the flag's own "must not be empty"
+      // when the flag is omitted — distinguish the protocol violation (70)
+      // from an empty user flag (2)
       if (typeof title !== "string" || title.trim() === "") {
-        fail(2, "incident title must not be empty");
+        fail(
+          opts.title === undefined ? 70 : 2,
+          opts.title === undefined
+            ? "unexpected getIncidentHistory response"
+            : "incident title must not be empty",
+        );
       }
       if (typeof content !== "string" || content.trim() === "") {
-        fail(2, "incident content must not be empty");
+        fail(
+          opts.content === undefined ? 70 : 2,
+          opts.content === undefined
+            ? "unexpected getIncidentHistory response"
+            : "incident content must not be empty",
+        );
       }
       // a sent pin follows the server's own rule (pin !== false -> pinned);
-      // an unstored or absent one pins like the UI's form default does
+      // an unstored or absent one pins like the UI's form default does, and a
+      // non-string stored style falls back to "warning" like validateIncident
       const pin = opts.pin === true ? true : opts.unpin === true ? false : existing.pin !== false;
       const res = await s.request("editIncident", [
         slug,
@@ -794,10 +815,10 @@ export function registerStatusPages(program: Command): void {
     .command("incident-resolve <slug> <id>")
     .description("Resolve an incident of a status page")
     .action(async (slug, rawId) => {
+      const incidentId = parseId(rawId, "incident id");
       const s = await connect(["statusPageList"]);
       requireIncidentEvents(s, "incident-resolve");
       if (!statusPageBySlug(s, slug)) fail(1, `status page ${slug} not found`);
-      const incidentId = parseId(rawId, "incident id");
       const res = await s.request("resolveIncident", [slug, incidentId]);
       const incident = res?.incident;
       if (incident === null || typeof incident !== "object" || Array.isArray(incident)) {

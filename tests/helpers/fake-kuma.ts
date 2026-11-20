@@ -233,6 +233,8 @@ export type FakeState = {
   certInfoDelay: Record<number, number>;
   // ms to wait before a monitor's domainInfo emit (2.x), past the certInfo
   domainInfoDelay: Record<number, number>;
+  // ms to wait before a monitor's uptime "1y" emit (2.x), past the 720
+  uptime1yDelay: Record<number, number>;
   // a second stats round, resendStatsAfterMs after the first, with per-monitor
   // overrides — proves the CLI keeps the first values
   resendStatsAfterMs: number;
@@ -577,6 +579,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     earlyAvgPing: [],
     certInfoDelay: {},
     domainInfoDelay: {},
+    uptime1yDelay: {},
     resendStatsAfterMs: 0,
     resendStats: {},
     silentStats: [],
@@ -1053,8 +1056,11 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
             if (!skip.includes("uptime24")) socket.emit("uptime", sid, 24, v.uptime24h);
             if (!skip.includes("uptime720")) socket.emit("uptime", sid, 720, v.uptime30d);
             // 2.x sendStats adds the string period "1y" right after 720
-            if (profile2x && !skip.includes("uptime1y"))
+            if (profile2x && !skip.includes("uptime1y")) {
+              const u1yDelay = state.uptime1yDelay[m.id] ?? 0;
+              if (u1yDelay > 0) await sleep(u1yDelay);
               socket.emit("uptime", sid, "1y", v.uptime1y);
+            }
             if (v.certInfo !== undefined) {
               const certDelay = state.certInfoDelay[m.id] ?? 0;
               if (certDelay > 0) await sleep(certDelay);
@@ -1177,6 +1183,11 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     // (monitorID, deleteChildren, callback), where deleteChildren instead
     // removes the whole subtree through deleteMonitorRecursively
     handle("deleteMonitor", (id: number, deleteChildren?: boolean) => {
+      // 1.x's handler is deleteMonitor(monitorID, callback): a boolean second
+      // argument lands in the callback slot and the invoke throws TypeError
+      if (state.profile === "1.23" && deleteChildren !== undefined) {
+        throw new TypeError("callback is not a function");
+      }
       const mid = Number(id);
       const target = state.monitors.find((m) => m.id === mid);
       if (target?.type === "group" && state.profile === "2.x" && deleteChildren === true) {

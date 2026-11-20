@@ -583,6 +583,50 @@ describe("status-pages", () => {
         expect(r.code).toBe(70);
         expect(r.stderr).toContain("unexpected getIncidentHistory response");
       });
+
+      test("a repeated nextCursor stops the walk instead of looping", async () => {
+        // a server answering the same page forever would otherwise be
+        // re-requested without end — the equal cursor ends the walk and the
+        // count check reports the shortfall
+        kuma.state.incidentHistoryResult = {
+          ok: true,
+          incidents: [{ id: 1, title: "i1" }],
+          total: 5,
+          hasMore: true,
+          nextCursor: "2024-01-01T00:00:00.000Z",
+        };
+        const r = await run(sb, ["status-pages", "incident-history", "status"], creds(kuma.url));
+        expect(r.code).toBe(0);
+        expect(callsOf("getIncidentHistory")).toHaveLength(2);
+        // the repeated page's row is real data, so it counts twice — the
+        // warning still reports the walk could not finish the history
+        expect(r.stderr).toContain(
+          "warning: incident history may be incomplete: got 2 of 5 incidents",
+        );
+      });
+
+      test("a non-number total exits 70", async () => {
+        kuma.state.incidentHistoryResult = { ok: true, incidents: [], total: "many" };
+        const r = await run(sb, ["status-pages", "incident-history", "status"], creds(kuma.url));
+        expect(r.code).toBe(70);
+        expect(r.stderr).toContain("unexpected getIncidentHistory response");
+      });
+
+      test("a non-object incident row exits 70", async () => {
+        kuma.state.incidentHistoryResult = { ok: true, incidents: [7], total: 1 };
+        const r = await run(sb, ["status-pages", "incident-history", "status"], creds(kuma.url));
+        expect(r.code).toBe(70);
+        expect(r.stderr).toContain("unexpected getIncidentHistory response");
+      });
+
+      test("exits 2 on a 2.0.x server, where the event does not exist yet", async () => {
+        kuma.state.info = { ...kuma.state.info, version: "2.0.2" };
+        const r = await run(sb, ["status-pages", "incident-history", "status"], creds(kuma.url));
+        expect(r.code).toBe(2);
+        expect(r.stderr).toContain("incident-history needs Uptime Kuma >= 2.1.0");
+        expect(r.stderr).toContain("2.0.2");
+        expect(callsOf("getIncidentHistory")).toHaveLength(0);
+      });
     });
   });
 
@@ -713,6 +757,41 @@ describe("status-pages", () => {
         expect(callsOf("editIncident")).toHaveLength(0);
       });
 
+      test("an id unfound on a repeated-cursor walk is reported maybe-existing", async () => {
+        // a repeated cursor ends the walk even when the collected count still
+        // matches the total (the repeated row counts twice) — only the
+        // truncated flag marks that walk incomplete
+        kuma.state.incidentHistoryResult = {
+          ok: true,
+          incidents: [{ id: 1, title: "i1" }],
+          total: 2,
+          hasMore: true,
+          nextCursor: "2024-01-01T00:00:00.000Z",
+        };
+        const r = await run(
+          sb,
+          ["status-pages", "incident-edit", "status", "9", "--title", "t"],
+          creds(kuma.url),
+        );
+        expect(r.code).toBe(1);
+        expect(r.stderr).toContain("incident 9 may exist");
+        expect(callsOf("editIncident")).toHaveLength(0);
+      });
+
+      test("a stored incident missing its title exits 70, not a usage error", async () => {
+        kuma.state.incidents = [
+          { id: 5, statusPageId: 7, content: "x", style: "info", pin: false },
+        ];
+        const r = await run(
+          sb,
+          ["status-pages", "incident-edit", "status", "5", "--pin"],
+          creds(kuma.url),
+        );
+        expect(r.code).toBe(70);
+        expect(r.stderr).toContain("unexpected getIncidentHistory response");
+        expect(callsOf("editIncident")).toHaveLength(0);
+      });
+
       test("an edit keeps a resolved incident inactive", async () => {
         // upstream editIncident writes only title/content/style/pin and
         // lastUpdatedDate — active is untouched, so a resolved incident
@@ -811,6 +890,18 @@ describe("status-pages", () => {
         expect(callsOf("resolveIncident")[0]!.args).toEqual(["status", 5]);
         expect(r.json()).toMatchObject({ id: 5, active: false, pin: false });
         expect(kuma.state.incidents[0]).toMatchObject({ active: false, pin: false });
+      });
+
+      test("an invalid incident id exits 2 before connecting", async () => {
+        const r = await run(
+          sb,
+          ["status-pages", "incident-resolve", "status", "abc"],
+          creds(kuma.url),
+        );
+        expect(r.code).toBe(2);
+        expect(r.stderr).toContain("incident id must be a positive integer id");
+        expect(callsOf("resolveIncident")).toHaveLength(0);
+        expect(callsOf("login")).toHaveLength(0);
       });
 
       test("an unknown incident id exits 1 with Kuma's message", async () => {

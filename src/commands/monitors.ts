@@ -1381,7 +1381,12 @@ function domainInfoFields(info: MonitorStats["domainInfo"]): {
   domainDaysRemaining: number | null;
 } {
   if (info === undefined) return { domainExpiresAt: null, domainDaysRemaining: null };
-  const date = new Date(info.expiryDate);
+  // the wire value is a socket.io-serialized ISO 8601 date; a "YYYY-MM-DD
+  // HH:mm:ss" DATETIME would parse as local time and shift the instant, so
+  // anything not ISO-shaped reads as malformed like a garbage string
+  const date = /^\d{4}-\d{2}-\d{2}(T|$)/.test(info.expiryDate)
+    ? new Date(info.expiryDate)
+    : new Date(Number.NaN);
   return {
     domainExpiresAt: Number.isNaN(date.getTime()) ? null : date.toISOString(),
     domainDaysRemaining: info.daysRemaining,

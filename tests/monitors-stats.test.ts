@@ -400,5 +400,27 @@ describe("monitors stats", () => {
       expect("uptime1y" in row).toBe(false);
       expect(row.uptime24h).toBe(1);
     });
+
+    test('a "1y" past its monitor\'s 500 ms burst reads as absent', async () => {
+      kuma.state.stats[1] = { uptime1y: 0.95 };
+      kuma.state.uptime1yDelay = { 1: 600 };
+      const r = await run(sb, ["monitors", "stats", "1"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      const row = r.json();
+      expect("uptime1y" in row).toBe(false);
+      expect(row.uptime24h).toBe(1);
+    });
+
+    test("a non-ISO domain expiry reports domainExpiresAt null", async () => {
+      // the wire carries a serialized Date (ISO); a "YYYY-MM-DD HH:mm:ss"
+      // DATETIME parsed as local time would shift the instant, so it reads
+      // as malformed instead
+      kuma.state.stats[1] = {
+        domainInfo: { daysRemaining: 5, expiry: "2026-01-02 03:04:05" },
+      };
+      const r = await run(sb, ["monitors", "stats", "1"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      expect(r.json()).toMatchObject({ domainExpiresAt: null, domainDaysRemaining: 5 });
+    });
   });
 });
