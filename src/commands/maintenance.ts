@@ -196,24 +196,25 @@ const CRON_PART_LIMITS = [
 ] as const;
 
 // croner substitutes "?" with the field's current value at run time, so a
-// compound entry is only checkable where every possible value gives the
-// same verdict: a whole "?" entry; a step value ("5/?") on day-of-month or
+// compound entry is only checkable where no possible value makes the field
+// unusable: a whole "?" entry; a step value ("5/?") on day-of-month or
 // month only, where the current value can never be 0 so the step stays in
-// 1..size; a step start ("?/5") where croner 8 always lands in-range —
-// croner 6 iterates from it raw, so on day-of-month or month a 31st or a
-// December "?" would start past the bitmap and the field goes all-zero;
+// 1..size; a step start ("?/5") — croner 8 always lands in-range and on
+// croner 6 a 31st or December "?" in day-of-month or month merely goes
+// dead, which the per-today checks below judge like any other dead entry;
 // a day-of-week "?L" or "?#n" (the rest side always parses); and a range
-// bound pinned to the field's end ("min-?" or "?-max"), since the current
-// value never crosses it — day-of-week's real top is 6 (getDay), though 7
-// stays a legal bound. Anywhere else "?" flips the verdict with the clock.
+// bound pinned to the field's end ("min-?" or "?-max", with or without a
+// step), since the current value never crosses it — day-of-week's real
+// top is 6 (getDay), though 7 stays a legal bound. Anywhere else "?" flips
+// the verdict with the clock.
 function questionOk(entry: string, partIndex: number, version: CronMajor): boolean {
   if (!entry.includes("?")) return true;
   const { min, max } = CRON_PART_LIMITS[partIndex]!;
   let rest = entry;
   if (version === "8" && partIndex === 5) rest = entry.split("#")[0]!;
-  const lowerQ = /^(\d+)-\?$/.exec(rest);
+  const lowerQ = /^(\d+)-\?(?:\/\d+)?$/.exec(rest);
   if (lowerQ !== null) return Number(lowerQ[1]) === min;
-  const upperQ = /^\?-(\d+)$/.exec(rest);
+  const upperQ = /^\?-(\d+)(?:\/\d+)?$/.exec(rest);
   if (upperQ !== null) {
     const bound = Number(upperQ[1]);
     return bound <= max && bound >= (partIndex === 5 ? 6 : max);
@@ -221,7 +222,7 @@ function questionOk(entry: string, partIndex: number, version: CronMajor): boole
   return (
     rest === "?" ||
     rest === "?L" ||
-    (/^\?\/\d+$/.test(rest) && (version === "8" || (partIndex !== 3 && partIndex !== 4))) ||
+    /^\?\/\d+$/.test(rest) ||
     ((partIndex === 3 || partIndex === 4) && rest.endsWith("/?"))
   );
 }
@@ -434,23 +435,31 @@ function isCronExpression(value: string, version: CronMajor | "either"): boolean
   const dowDead = dead.has(5);
   const domStar = shape.parts[3] === "*";
   const dowStar = shape.parts[5] === "*";
+  // a "?" in a date field re-substitutes the field's current value on every
+  // parse, so the per-today hits are what the schedule really contains
+  const hits = (i: number, c: number | null): number[] => {
+    const raw = c === null ? shape.parts[i]! : shape.q.get(i)!;
+    const values = new Set<number>();
+    for (const entry of raw.split(",")) {
+      const sub = c === null ? entry : entry.replace("?", String(c));
+      for (const v of entryValues(sub, i, version)) values.add(v);
+    }
+    return [...values];
+  };
+  // a "?" month that goes empty on some current month (a croner-6 "?/N"
+  // past the bitmap in December) would hang nextRun() outright
+  if (shape.q.has(4)) {
+    for (let m0 = 1; m0 <= 12; m0++) {
+      if (hits(4, m0).length === 0) return false;
+    }
+  }
   // "*" hands the date decision to the other field; a restricted live one
   // joins it through OR matching, so a dead date field is only fatal when
   // the other side is dead or unrestricted
   if ((domDead && (dowDead || dowStar)) || (dowDead && (domDead || domStar))) return false;
   if (!shape.lastDay && !domStar && (dowStar || dowDead)) {
-    // a "?" in a date field re-substitutes the field's current value on every
-    // parse, so every possible today must still leave a real date — and both
-    // fields take the same today, so impossible today-pairs do not apply
-    const hits = (i: number, c: number | null): number[] => {
-      const raw = c === null ? shape.parts[i]! : shape.q.get(i)!;
-      const values = new Set<number>();
-      for (const entry of raw.split(",")) {
-        const sub = c === null ? entry : entry.replace("?", String(c));
-        for (const v of entryValues(sub, i, version)) values.add(v);
-      }
-      return [...values];
-    };
+    // every possible today must still leave a real date — and both fields
+    // take the same today, so impossible today-pairs do not apply
     const domHits = hits(3, null);
     const monthHits = hits(4, null);
     const fits = (d: number | null, m: number | null): boolean =>
