@@ -272,6 +272,10 @@ export class KumaSession {
     return parseMajorVersion(this.serverVersion);
   }
 
+  get minorVersion(): number {
+    return parseMinorVersion(this.serverVersion);
+  }
+
   // ok:false is Kuma answering no (exit 1); a missing callback is a timeout (exit 2).
   // timeoutMs overrides the session default for requests like shrinkDatabase
   // whose server-side work can outlast it.
@@ -468,6 +472,14 @@ function namedRowId(rows: { id: number; name: string }[], raw: string, noun: str
 export function parseMajorVersion(version: string | undefined): number {
   const match = version === undefined ? null : /^(\d+)\.\d+\.\d+/.exec(version);
   return match === null ? 1 : Number(match[1]);
+}
+
+// Same shape as the major: the minor only reaches a comparison after a major
+// >= the gate's minimum, which means the version parsed — an unparseable or
+// missing value can fall back to 0 because the major check refuses first.
+export function parseMinorVersion(version: string | undefined): number {
+  const match = version === undefined ? null : /^\d+\.(\d+)\.\d+/.exec(version);
+  return match === null ? 0 : Number(match[1]);
 }
 
 // monitorList, notificationList, proxyList and dockerHostList are pushed in

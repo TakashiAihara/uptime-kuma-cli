@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { connect, disconnect, parseMajorVersion } from "../src/kuma";
+import { connect, disconnect, parseMajorVersion, parseMinorVersion } from "../src/kuma";
 import { type FakeKuma, startFakeKuma } from "./helpers/fake-kuma";
 import { creds, type Sandbox, sandbox } from "./helpers/run";
 
@@ -60,6 +60,24 @@ describe("parseMajorVersion", () => {
   ];
   test.each(cases)("%p -> %p", (version, expected) => {
     expect(parseMajorVersion(version)).toBe(expected);
+  });
+});
+
+describe("parseMinorVersion", () => {
+  const cases: [string | undefined, number][] = [
+    ["1.23.17", 23],
+    ["2.5.11", 5],
+    ["2.0.0-beta.2", 0],
+    ["3.0.0-beta.0", 0],
+    ["10.1.0", 1],
+    [undefined, 0],
+    ["", 0],
+    ["abc", 0],
+    ["2.5", 0],
+    ["x2.5.11", 0],
+  ];
+  test.each(cases)("%p -> %p", (version, expected) => {
+    expect(parseMinorVersion(version)).toBe(expected);
   });
 });
 
