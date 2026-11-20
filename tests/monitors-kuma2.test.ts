@@ -3484,6 +3484,15 @@ describe("oracledb monitors", () => {
     expect(addCalls(k)).toHaveLength(1);
   });
 
+  test("add with an empty basic_auth_pass exits 2 and sends no add", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const f = oraFile({ basic_auth_pass: "" });
+    const r = await run(sb, oraArgs(f), creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("basic_auth_pass");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
   test("edit --set type=oracledb without the fields exits 2", async () => {
     const k = await useFake({ profile: "2.x", monitors: [http(7, "h")] });
     const r = await run(sb, ["monitors", "edit", "7", "--set", "type=oracledb"], creds(k.url));
@@ -3522,6 +3531,25 @@ describe("oracledb monitors", () => {
     expect(r.code).toBe(0);
     expect(stored(k, "ora1").basic_auth_pass).toBe("ora-pw");
     expect(stored(k, "ora1").basic_auth_user).toBe("scott");
+  });
+
+  // a stored value the edit does not touch is never re-judged — a raw
+  // socket client could store the row without credentials and a plain
+  // edit still passes, like every other required field
+  test("edit on a stored oracledb missing credentials does not re-judge it", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [
+        http(7, "ora1", {
+          type: "oracledb",
+          url: null,
+          databaseConnectionString: "dbhost.example.com:1521/FREEPDB1",
+          basic_auth_user: "scott",
+        }),
+      ],
+    });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "description=x"], creds(k.url));
+    expect(r.code).toBe(0);
   });
 
   // the picker's watcher resets conditions on every type change — a carried

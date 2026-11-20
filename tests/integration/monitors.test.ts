@@ -1050,15 +1050,18 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
     });
 
     // nothing answers on port 1 — the driver fails to connect and the
-    // down beat proves the monitor runs
-    let down = false;
-    for (let i = 0; i < 12 && !down; i++) {
+    // down beat proves the monitor runs; the beat message must come from
+    // the driver's connect attempt, not a TypeError from the .trim() on
+    // the credential fields (an unread field would beat down the same way)
+    let downMsg = "";
+    for (let i = 0; i < 12 && !downMsg; i++) {
       await new Promise((res) => setTimeout(res, 5_000));
       const b = await cliRun(sb, ["beats", String(id), "--hours", "1"]);
       expect(b.code).toBe(0);
-      down = b.json().some((beat: any) => beat.status === 0);
+      downMsg = b.json().find((beat: any) => beat.status === 0)?.msg ?? "";
     }
-    expect(down).toBe(true);
+    expect(downMsg).toContain("Database connection/query failed");
+    expect(downMsg).not.toContain("trim");
 
     const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
     expect(del.code).toBe(0);
