@@ -588,10 +588,24 @@ describe("status-pages", () => {
 
   describe("incident-edit", () => {
     test("exits 2 on Kuma 1.23, where the event does not exist", async () => {
-      const r = await run(sb, ["status-pages", "incident-edit", "status", "1"], creds(kuma.url));
+      const r = await run(
+        sb,
+        ["status-pages", "incident-edit", "status", "1", "--title", "x"],
+        creds(kuma.url),
+      );
       expect(r.code).toBe(2);
       expect(r.stderr).toContain("incident-edit needs Uptime Kuma >= 2.1.0");
       expect(callsOf("editIncident")).toHaveLength(0);
+    });
+
+    test("with no change flag exits 2 before connecting", async () => {
+      const r = await run(sb, ["status-pages", "incident-edit", "status", "1"], creds(kuma.url));
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain(
+        "incident-edit requires at least one of --title, --content, --style, --pin or --unpin",
+      );
+      expect(callsOf("editIncident")).toHaveLength(0);
+      expect(callsOf("getIncidentHistory")).toHaveLength(0);
     });
 
     describe("on Kuma 2.x", () => {
@@ -666,10 +680,39 @@ describe("status-pages", () => {
       });
 
       test("an unknown incident id exits 1 without calling editIncident", async () => {
-        const r = await run(sb, ["status-pages", "incident-edit", "status", "99"], creds(kuma.url));
+        const r = await run(
+          sb,
+          ["status-pages", "incident-edit", "status", "99", "--title", "x"],
+          creds(kuma.url),
+        );
         expect(r.code).toBe(1);
         expect(r.stderr).toContain("incident 99 not found");
         expect(callsOf("editIncident")).toHaveLength(0);
+      });
+
+      test("an edit keeps a resolved incident inactive", async () => {
+        // upstream editIncident writes only title/content/style/pin and
+        // lastUpdatedDate — active is untouched, so a resolved incident
+        // stays resolved after a title change
+        kuma.state.incidents = [
+          {
+            id: 6,
+            statusPageId: 7,
+            title: "Done",
+            content: "x",
+            style: "info",
+            pin: false,
+            active: false,
+          },
+        ];
+        const r = await run(
+          sb,
+          ["status-pages", "incident-edit", "status", "6", "--title", "Done again"],
+          creds(kuma.url),
+        );
+        expect(r.code).toBe(0);
+        expect(kuma.state.incidents[0]!.active).toBe(false);
+        expect(r.json().active).toBe(false);
       });
 
       test("an empty --title exits 2 without calling editIncident", async () => {
@@ -706,7 +749,11 @@ describe("status-pages", () => {
 
       test("editIncident ok:true without an incident exits 70", async () => {
         kuma.state.editIncidentResult = { ok: true };
-        const r = await run(sb, ["status-pages", "incident-edit", "status", "5"], creds(kuma.url));
+        const r = await run(
+          sb,
+          ["status-pages", "incident-edit", "status", "5", "--title", "x"],
+          creds(kuma.url),
+        );
         expect(r.code).toBe(70);
         expect(r.stderr).toContain("unexpected editIncident response");
       });

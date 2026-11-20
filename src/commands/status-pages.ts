@@ -113,20 +113,30 @@ function requireIncidentEvents(s: KumaSession, command: string): void {
 // misbehaving server — stop rather than loop requests forever. Rows sharing
 // the boundary's created_date are unreachable through the server's cursor
 // (created_date < last), so a collected count below the reported total is
-// warned on rather than printed as a quietly complete history.
+// warned on rather than printed as a quietly complete history. findId stops
+// the walk as soon as that row is seen (the incident-edit lookup), which is
+// an intended truncation and skips the shortfall warning.
 async function incidentHistory(
   s: KumaSession,
   slug: string,
+  findId?: number,
 ): Promise<{ total: unknown; incidents: Record<string, unknown>[] }> {
   const incidents: Record<string, unknown>[] = [];
   let total: unknown;
   let cursor: string | null = null;
+  let found = false;
   for (;;) {
     const res = await s.request("getIncidentHistory", [slug, cursor]);
     const page = res?.incidents;
     if (!Array.isArray(page)) fail(70, "unexpected getIncidentHistory response");
     incidents.push(...(page as Record<string, unknown>[]));
     total = res?.total;
+    // incident-edit looks one row up through the same pages; stop early once
+    // it is seen rather than walking the rest of the history
+    if (findId !== undefined && incidents.some((i) => i.id === findId)) {
+      found = true;
+      break;
+    }
     const next = res?.nextCursor;
     if (res?.hasMore !== true) break;
     // hasMore promises a continuable cursor — a missing or non-string one is
@@ -137,7 +147,7 @@ async function incidentHistory(
     if (next === cursor) break;
     cursor = next;
   }
-  if (typeof total === "number" && incidents.length !== total) {
+  if (!found && typeof total === "number" && incidents.length !== total) {
     console.error(
       `warning: incident history may be incomplete: got ${incidents.length} of ${total} incidents`,
     );
@@ -713,17 +723,31 @@ export function registerStatusPages(program: Command): void {
     .option("--pin", "pin the incident")
     .option("--unpin", "unpin the incident")
     .action(async (slug, rawId, opts) => {
-      const s = await connect(["statusPageList"]);
-      requireIncidentEvents(s, "incident-edit");
-      if (!statusPageBySlug(s, slug)) fail(1, `status page ${slug} not found`);
+      const incidentId = parseId(rawId, "incident id");
       if (opts.pin === true && opts.unpin === true) {
         fail(2, "--pin and --unpin cannot be combined");
       }
-      const incidentId = parseId(rawId, "incident id");
+      if (
+        opts.title === undefined &&
+        opts.content === undefined &&
+        opts.style === undefined &&
+        opts.pin !== true &&
+        opts.unpin !== true
+      ) {
+        fail(
+          2,
+          "incident-edit requires at least one of --title, --content, --style, --pin or --unpin",
+        );
+      }
+      const s = await connect(["statusPageList"]);
+      requireIncidentEvents(s, "incident-edit");
+      if (!statusPageBySlug(s, slug)) fail(1, `status page ${slug} not found`);
       // editIncident overwrites every field unconditionally like the UI's
       // pre-filled form, so the stored incident is fetched and the flags
       // merge over it — an omitted flag keeps its stored value
-      const existing = (await incidentHistory(s, slug)).incidents.find((i) => i.id === incidentId);
+      const existing = (await incidentHistory(s, slug, incidentId)).incidents.find(
+        (i) => i.id === incidentId,
+      );
       if (existing === undefined) fail(1, `incident ${incidentId} not found`);
       const title = opts.title ?? existing.title;
       const content = opts.content ?? existing.content;
