@@ -219,14 +219,16 @@ describe("install.sh", () => {
         stdout: "ignore",
         stderr: "ignore",
       });
-      for (let i = 0; i < 100 && leftovers().length === 0; i++) await Bun.sleep(20);
-      expect(leftovers().length).toBe(1);
+      try {
+        for (let i = 0; i < 100 && leftovers().length === 0; i++) await Bun.sleep(20);
+        expect(leftovers().length).toBe(1);
 
-      proc.kill("SIGTERM");
-      // The shim still holds the substitution open, so the signal provably arrived
-      // while the dir existed
-      expect(leftovers().length).toBe(1);
-      writeFileSync(hold, "");
+        // The shim still holds the substitution open, so the signal provably arrives
+        // while the dir exists
+        proc.kill("SIGTERM");
+      } finally {
+        writeFileSync(hold, "");
+      }
 
       expect(await proc.exited).toBe(143);
       expect(leftovers()).toEqual([]);

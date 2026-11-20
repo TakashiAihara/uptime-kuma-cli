@@ -53,7 +53,8 @@ mkdir -p "$INSTALL_DIR"
 
 # Traps go in before mktemp: a signal that lands while the work dir exists but the TERM
 # trap is not yet set kills by the default action, which never reaches EXIT and leaves the
-# dir behind. tmp stays empty until the dir exists, so an early trap finds nothing to remove.
+# dir behind. tmp is empty until the mktemp substitution completes, so an early trap
+# finds nothing to remove.
 tmp=
 trap '[ -z "$tmp" ] || rm -rf "$tmp"' EXIT
 # dash does not run the EXIT trap on a signal, so go through exit to leave no leftovers
