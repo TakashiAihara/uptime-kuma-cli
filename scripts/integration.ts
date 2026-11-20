@@ -86,14 +86,19 @@ async function compose(args: string[], timeoutMs: number): Promise<number> {
   });
   composeProc = proc;
   try {
-    return await Promise.race([
-      proc.exited,
-      sleep(timeoutMs).then(async () => {
-        killChild(proc);
-        await awaitChildren([proc]);
-        return -1;
-      }),
-    ]);
+    // cleared when the child exits first: a pending timer would still fire
+    // killChild on a pid the OS may have recycled to another process
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killChild(proc);
+      // escalates to SIGKILL after the grace if the child ignores the TERM,
+      // which is what lets proc.exited settle below
+      void awaitChildren([proc]);
+    }, timeoutMs);
+    const code = await proc.exited;
+    clearTimeout(timer);
+    return timedOut ? -1 : code;
   } finally {
     if (composeProc === proc) composeProc = undefined;
   }
@@ -202,19 +207,19 @@ async function runTests(kumaVersion: string): Promise<number> {
   });
   testProc = proc;
   groupKillPids.add(proc.pid);
-  // the flag, not the raced value, marks a timeout: killChild's SIGTERM
-  // settles proc.exited before the timeout branch can finish, so code would
-  // read 143 with the "exceeded" message never printed
+  // the flag, not the exit code, marks a timeout: killChild's SIGTERM
+  // settles proc.exited with 143, which a raced sentinel would have
+  // reported without the "exceeded" message. The timer is cleared when the
+  // child exits first — a pending one would fire killChild on a pid the OS
+  // may have recycled to another process by then
   let timedOut = false;
-  const code = await Promise.race([
-    proc.exited,
-    sleep(TEST_LIMIT_MS).then(async () => {
-      timedOut = true;
-      killChild(proc);
-      await awaitChildren([proc]);
-      return -1;
-    }),
-  ]);
+  const timer = setTimeout(() => {
+    timedOut = true;
+    killChild(proc);
+    void awaitChildren([proc]);
+  }, TEST_LIMIT_MS);
+  const code = await proc.exited;
+  clearTimeout(timer);
   testProc = undefined;
   if (timedOut) {
     console.error(`test run exceeded ${TEST_LIMIT_MS / 60_000} minutes`);

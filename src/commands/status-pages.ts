@@ -125,6 +125,7 @@ async function incidentHistory(
 ): Promise<{ total: number; incidents: Record<string, unknown>[]; complete: boolean }> {
   const incidents: Record<string, unknown>[] = [];
   const seenCursors = new Set<string>();
+  const seenIds = new Set<number>();
   let total = 0;
   let cursor: string | null = null;
   let found = false;
@@ -151,15 +152,15 @@ async function incidentHistory(
       fail(70, "unexpected getIncidentHistory response");
     }
     const next = res?.nextCursor;
-    // a revisited cursor means the request was replayed — the page's rows
-    // duplicate an earlier answer's, so collecting them would fake the
-    // count. Stop before the push so the shortfall check below reports
-    // what the walk actually gathered
-    if (res?.hasMore === true && typeof next === "string" && seenCursors.has(next)) {
-      truncated = true;
-      break;
+    // ids are unique across the history, so rows a replayed page sends again
+    // add nothing — dedupe keeps rows a cycling server still delivered while
+    // the shortfall count stays honest
+    for (const row of page as Record<string, unknown>[]) {
+      const id = row.id as number;
+      if (seenIds.has(id)) continue;
+      seenIds.add(id);
+      incidents.push(row);
     }
-    incidents.push(...(page as Record<string, unknown>[]));
     total = res.total;
     // incident-edit looks one row up through the same pages; stop early once
     // it is seen rather than walking the rest of the history
@@ -171,6 +172,13 @@ async function incidentHistory(
     // hasMore promises a continuable cursor — a missing or non-string one is
     // a malformed page like a non-array incidents
     if (typeof next !== "string") fail(70, "unexpected getIncidentHistory response");
+    // a revisited cursor means the request was replayed — following it again
+    // would loop, so the walk stops and the shortfall check reports what it
+    // actually gathered
+    if (seenCursors.has(next)) {
+      truncated = true;
+      break;
+    }
     seenCursors.add(next);
     cursor = next;
   }

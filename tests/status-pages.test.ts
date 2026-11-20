@@ -608,7 +608,9 @@ describe("status-pages", () => {
 
       test("a cursor cycle stops the walk instead of looping", async () => {
         // A -> B -> A: only the immediate-repeat check would not catch this,
-        // so the visited set bounds the walk
+        // so the visited set bounds the walk. The third page's rows are new
+        // ids though — only the repeated cursor ends the walk, they are
+        // still collected
         kuma.state.incidentHistoryResults = [
           {
             ok: true,
@@ -635,10 +637,8 @@ describe("status-pages", () => {
         const r = await run(sb, ["status-pages", "incident-history", "status"], creds(kuma.url));
         expect(r.code).toBe(0);
         expect(callsOf("getIncidentHistory")).toHaveLength(3);
-        expect(r.stderr).toContain(
-          "warning: incident history may be incomplete: got 2 of 3 incidents",
-        );
-        expect(r.json().incidents).toHaveLength(2);
+        expect(r.stderr).not.toContain("may be incomplete");
+        expect(r.json().incidents).toHaveLength(3);
       });
 
       test("a history row with a non-numeric id exits 70", async () => {

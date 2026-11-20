@@ -445,18 +445,30 @@ export class KumaSession {
       const cert = rec?.certInfo;
       return cert !== undefined && inBurst(rec?.uptime.get(720), cert.at) ? cert.json : undefined;
     };
+    // On 2.1+ the certInfo→domainInfo gap is two awaited reads — a few ms —
+    // so a landed certInfo still holds the wait this tail grace for the
+    // trailing emit, but no longer: a monitor without a resolvable domain
+    // expiry never emits domainInfo and must not pay the whole bound for an
+    // event that cannot come
+    const DOMAIN_TAIL_MS = 200;
     const certDone = (id: number): boolean => {
       const rec = this.statsEvents.get(id);
       const uptime30d = rec?.uptime.get(720);
       if (uptime30d === undefined) return false;
       if (Date.now() >= uptime30d.at + 500) return true;
-      // sendStats ends with sendDomainInfo and awaits a monitor read plus the
-      // domain_expiry lookup between the certInfo and domainInfo emits, so on
-      // 2.1+ a landed certInfo cannot end the wait — only the burst's last
-      // event can. Before 2.1 certInfo is the last emit and breaks early.
+      // sendStats ends with sendDomainInfo, so on 2.1+ the wait ends on the
+      // burst's last event — a landed domainInfo — or the certInfo's tail
+      // grace, not on the certInfo itself. Before 2.1 certInfo is the last
+      // emit and breaks early.
       if (meetsMinVersion(this, [2, 1, 0])) {
         const dom = rec?.domainInfo;
-        return dom !== undefined && inBurst(uptime30d, dom.at);
+        if (dom !== undefined) return inBurst(uptime30d, dom.at);
+        const cert = rec?.certInfo;
+        return (
+          cert !== undefined &&
+          inBurst(uptime30d, cert.at) &&
+          Date.now() >= cert.at + DOMAIN_TAIL_MS
+        );
       }
       return certInTime(id) !== undefined;
     };

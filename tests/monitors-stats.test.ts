@@ -392,6 +392,30 @@ describe("monitors stats", () => {
       expect("domainDaysRemaining" in row).toBe(false);
     });
 
+    test("a monitor whose certInfo landed waits only the domain tail", async () => {
+      // monitor 1 has a cert but no domain_expiry row: on 2.1+ a landed
+      // certInfo cannot end the wait outright — a trailing domainInfo can
+      // still be in flight — but it holds only the tail grace, not the bound
+      // monitor 2 pays for an absent cert. The fastest of three runs each
+      // drops one-off startup or load delays.
+      kuma.state.stats[1] = { certInfo: CERT_1 };
+      const fastest = async (id: string): Promise<number> => {
+        let best = Number.POSITIVE_INFINITY;
+        for (let i = 0; i < 3; i++) {
+          const t = Date.now();
+          const r = await run(sb, ["monitors", "stats", id], creds(kuma.url));
+          expect(r.code).toBe(0);
+          best = Math.min(best, Date.now() - t);
+        }
+        return best;
+      };
+      const withCertMs = await fastest("1");
+      const withoutCertMs = await fastest("2");
+      // waiting the whole bound anyway would add ~500 ms; the tail leaves
+      // ~300 of that unspent
+      expect(withoutCertMs - withCertMs).toBeGreaterThan(150);
+    }, 30_000);
+
     test("a server that skips the uptime 1y push leaves the key absent", async () => {
       kuma.state.skipStatEvents = { 1: ["uptime1y"] };
       const r = await run(sb, ["monitors", "stats", "1"], creds(kuma.url));
