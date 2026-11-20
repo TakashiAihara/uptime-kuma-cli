@@ -123,6 +123,21 @@ describe("credentials and url", () => {
     expect(r.stderr + r.stdout).not.toContain("wrong-pw-abc");
   });
 
+  // the 2.x server answers the i18n key authIncorrectCreds for the same
+  // failure; the CLI maps the known keys back to the 1.x texts
+  test("a wrong password on a 2.x server prints the same English as 1.x", async () => {
+    const k2 = await startFakeKuma({ profile: "2.x" });
+    try {
+      const r = await run(sb, list, { ...creds(k2.url), UPTIME_KUMA_PASSWORD: "wrong-pw-abc" });
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("Incorrect username or password.");
+      expect(r.stderr).not.toContain("authIncorrectCreds");
+      expect(r.stderr + r.stdout).not.toContain("wrong-pw-abc");
+    } finally {
+      await k2.close();
+    }
+  });
+
   const loginTokens = () =>
     kuma.calls
       .filter((c) => c.event === "login")
@@ -305,6 +320,22 @@ describe("credentials and url", () => {
     const r = await run(sb, list, { ...creds(kuma.url), UPTIME_KUMA_TOTP: stale });
     expect(r.code).toBe(2);
     expect(r.stderr).toContain("Invalid Token!");
+  });
+
+  // same failure on 2.x answers the i18n key authInvalidToken; the final
+  // failure still prints the 1.x text after the mapping
+  test("a token outside the window on a 2.x server also prints Invalid Token!", async () => {
+    const k2 = await startFakeKuma({ profile: "2.x" });
+    try {
+      k2.state.twoFA = true;
+      const stale = totpToken(FAKE_TOTP_SECRET, 0);
+      const r = await run(sb, list, { ...creds(k2.url), UPTIME_KUMA_TOTP: stale });
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("Invalid Token!");
+      expect(r.stderr).not.toContain("authInvalidToken");
+    } finally {
+      await k2.close();
+    }
   });
 
   test("a token from the previous 30-second window is still accepted", async () => {

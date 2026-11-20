@@ -608,9 +608,13 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
   const tagsOf = (m: Monitor): MonitorTagRow[] =>
     Array.isArray(m.tags) ? (m.tags as MonitorTagRow[]) : [];
 
-  // Monitor.getTags orders the join by tag.name
+  // Monitor.getTags orders the join by tag.name on 1.23; 2.x's batched
+  // query has no ORDER BY, so the seeded order survives and the CLI's own
+  // sort is what puts the output right
   const monitorTags = (m: Monitor): MonitorTagRow[] =>
-    [...tagsOf(m)].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    profile2x
+      ? [...tagsOf(m)]
+      : [...tagsOf(m)].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
   // Monitor.toJSON emits neither manual_status (2.5.11 editMonitor reads it
   // from the payload anyway) nor snmpV3Username (2.5.11 monitor.js toJSON
@@ -927,7 +931,10 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
 
     handle("login", (data: { username: string; token?: string; password: string }) => {
       if (data.username !== state.username || data.password !== state.password)
-        return { ok: false, msg: "Incorrect username or password." };
+        // Kuma 1.x says English, 2.x the i18n key authIncorrectCreds
+        return profile2x
+          ? { ok: false, msg: "authIncorrectCreds", msgi18n: true }
+          : { ok: false, msg: "Incorrect username or password." };
       if (state.twoFA) {
         const token = data.token;
         if (!token) return { tokenRequired: true };

@@ -1322,9 +1322,18 @@ type MonitorTagRow = {
   name?: unknown;
 };
 
+// 1.23's join ORDER BYs tag.name; 2.x's batched query has no ORDER BY, so
+// the sort moves client-side. The code-unit comparison matches sqlite's
+// default BINARY collation the 1.x ORDER BY ran under, so the printed
+// order is the same on both versions.
 function monitorTags(monitor: Record<string, unknown>): MonitorTagRow[] {
   const tags = monitor.tags;
-  return Array.isArray(tags) ? (tags as MonitorTagRow[]) : [];
+  const rows = Array.isArray(tags) ? (tags as MonitorTagRow[]) : [];
+  return [...rows].sort((a, b) => {
+    const x = String(a.name ?? "");
+    const y = String(b.name ?? "");
+    return x < y ? -1 : x > y ? 1 : 0;
+  });
 }
 
 const tagJson = (t: MonitorTagRow) => ({

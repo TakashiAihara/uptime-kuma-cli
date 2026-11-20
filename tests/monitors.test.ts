@@ -5991,6 +5991,40 @@ describe("monitor tags", () => {
       ]);
     });
 
+    // 2.x's batched join has no ORDER BY — the fake forwards the seeded
+    // (unsorted) order, so name order in the output comes from the CLI
+    test("on 2.x get and list sort the tags the server sends unordered", async () => {
+      const k2 = await startFakeKuma({
+        profile: "2.x",
+        monitors: [
+          http(9, "trade1 push", {
+            type: "push",
+            url: null,
+            tags: [
+              mt(3, 9, 5, "prod", "prod"),
+              mt(4, 9, 5, "old", "prod"),
+              mt(5, 9, 7, "eu", "edge"),
+            ],
+          }),
+        ],
+      });
+      try {
+        const expected = [
+          { tagId: 7, name: "edge", value: "eu" },
+          { tagId: 5, name: "prod", value: "prod" },
+          { tagId: 5, name: "prod", value: "old" },
+        ];
+        const g = await run(sb, ["monitors", "get", "9"], creds(k2.url));
+        expect(g.code).toBe(0);
+        expect(g.json().tags).toEqual(expected);
+        const l = await run(sb, ["monitors", "list"], creds(k2.url));
+        expect(l.code).toBe(0);
+        expect(l.json()[0].tags).toEqual(expected);
+      } finally {
+        await k2.close();
+      }
+    });
+
     test("get on a monitor without tags prints an empty array", async () => {
       const r = await run(sb, ["monitors", "get", "2"], creds(kuma.url));
       expect(r.code).toBe(0);
