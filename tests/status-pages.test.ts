@@ -485,6 +485,265 @@ describe("status-pages", () => {
     });
   });
 
+  describe("incident-history", () => {
+    test("exits 2 on Kuma 1.23, where the event does not exist", async () => {
+      const r = await run(sb, ["status-pages", "incident-history", "status"], creds(kuma.url));
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("incident-history needs Uptime Kuma >= 2.1.0");
+      expect(callsOf("getIncidentHistory")).toHaveLength(0);
+    });
+
+    describe("on Kuma 2.x", () => {
+      beforeEach(async () => {
+        await kuma.close();
+        kuma = await startFakeKuma({
+          profile: "2.x",
+          statusPages: [structuredClone(STATUS), structuredClone(OPS)],
+        });
+      });
+
+      test("prints the page's incidents newest first with the total", async () => {
+        kuma.state.incidents = [
+          { id: 1, statusPageId: 7, title: "Old", createdDate: "2024-01-01T00:00:00.000Z" },
+          { id: 2, statusPageId: 7, title: "New", createdDate: "2024-01-02T00:00:00.000Z" },
+          { id: 3, statusPageId: 9, title: "Other page", createdDate: "2024-01-03T00:00:00.000Z" },
+        ];
+        const r = await run(sb, ["status-pages", "incident-history", "status"], creds(kuma.url));
+        expect(r.code).toBe(0);
+        const out = r.json();
+        expect(out.slug).toBe("status");
+        expect(out.total).toBe(2);
+        expect((out.incidents as { id: number }[]).map((i) => i.id)).toEqual([2, 1]);
+        expect(callsOf("getIncidentHistory")[0]!.args).toEqual(["status", null]);
+      });
+
+      test("follows nextCursor until hasMore is false", async () => {
+        kuma.state.incidents = Array.from({ length: 12 }, (_, i) => ({
+          id: i + 1,
+          statusPageId: 7,
+          title: `i${i + 1}`,
+          createdDate: `2024-01-${String(i + 1).padStart(2, "0")}T00:00:00.000Z`,
+        }));
+        const r = await run(sb, ["status-pages", "incident-history", "status"], creds(kuma.url));
+        expect(r.code).toBe(0);
+        const out = r.json();
+        expect(out.total).toBe(12);
+        expect((out.incidents as { id: number }[]).map((i) => i.id)).toEqual([
+          12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1,
+        ]);
+        const calls = callsOf("getIncidentHistory");
+        expect(calls).toHaveLength(2);
+        // the second call's cursor is the first page's last created_date
+        expect(calls[1]!.args[1]).toBe("2024-01-03T00:00:00.000Z");
+      });
+
+      test("an unknown slug exits 1 without calling getIncidentHistory", async () => {
+        const r = await run(sb, ["status-pages", "incident-history", "ghost"], creds(kuma.url));
+        expect(r.code).toBe(1);
+        expect(r.stderr).toContain("status page ghost not found");
+        expect(callsOf("getIncidentHistory")).toHaveLength(0);
+      });
+
+      test("a non-array incidents page exits 70", async () => {
+        kuma.state.incidentHistoryResult = { ok: true, incidents: "oops" };
+        const r = await run(sb, ["status-pages", "incident-history", "status"], creds(kuma.url));
+        expect(r.code).toBe(70);
+        expect(r.stderr).toContain("unexpected getIncidentHistory response");
+      });
+    });
+  });
+
+  describe("incident-edit", () => {
+    test("exits 2 on Kuma 1.23, where the event does not exist", async () => {
+      const r = await run(sb, ["status-pages", "incident-edit", "status", "1"], creds(kuma.url));
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("incident-edit needs Uptime Kuma >= 2.1.0");
+      expect(callsOf("editIncident")).toHaveLength(0);
+    });
+
+    describe("on Kuma 2.x", () => {
+      beforeEach(async () => {
+        await kuma.close();
+        kuma = await startFakeKuma({
+          profile: "2.x",
+          statusPages: [structuredClone(STATUS), structuredClone(OPS)],
+          incidents: [
+            {
+              id: 5,
+              statusPageId: 7,
+              title: "Old title",
+              content: "Old body",
+              style: "info",
+              pin: false,
+            },
+          ],
+        });
+      });
+
+      test("merges the flags over the stored incident and prints the saved one", async () => {
+        const r = await run(
+          sb,
+          ["status-pages", "incident-edit", "status", "5", "--title", "New title"],
+          creds(kuma.url),
+        );
+        expect(r.code).toBe(0);
+        // editIncident overwrites every field, so omitted flags keep the
+        // stored values, stored pin=false included
+        expect(callsOf("editIncident")[0]!.args).toEqual([
+          "status",
+          5,
+          { title: "New title", content: "Old body", style: "info", pin: false },
+        ]);
+        expect(r.json()).toMatchObject({
+          id: 5,
+          title: "New title",
+          content: "Old body",
+          style: "info",
+          pin: false,
+        });
+      });
+
+      test("--pin and --unpin set the stored pin explicitly", async () => {
+        const pin = await run(
+          sb,
+          ["status-pages", "incident-edit", "status", "5", "--pin"],
+          creds(kuma.url),
+        );
+        expect(pin.code).toBe(0);
+        expect((callsOf("editIncident")[0]!.args[2] as { pin: boolean }).pin).toBe(true);
+
+        const unpin = await run(
+          sb,
+          ["status-pages", "incident-edit", "status", "5", "--unpin"],
+          creds(kuma.url),
+        );
+        expect(unpin.code).toBe(0);
+        expect((callsOf("editIncident")[1]!.args[2] as { pin: boolean }).pin).toBe(false);
+      });
+
+      test("--pin and --unpin together exit 2", async () => {
+        const r = await run(
+          sb,
+          ["status-pages", "incident-edit", "status", "5", "--pin", "--unpin"],
+          creds(kuma.url),
+        );
+        expect(r.code).toBe(2);
+        expect(r.stderr).toContain("--pin and --unpin cannot be combined");
+        expect(callsOf("editIncident")).toHaveLength(0);
+      });
+
+      test("an unknown incident id exits 1 without calling editIncident", async () => {
+        const r = await run(sb, ["status-pages", "incident-edit", "status", "99"], creds(kuma.url));
+        expect(r.code).toBe(1);
+        expect(r.stderr).toContain("incident 99 not found");
+        expect(callsOf("editIncident")).toHaveLength(0);
+      });
+
+      test("an empty --title exits 2 without calling editIncident", async () => {
+        const r = await run(
+          sb,
+          ["status-pages", "incident-edit", "status", "5", "--title", ""],
+          creds(kuma.url),
+        );
+        expect(r.code).toBe(2);
+        expect(r.stderr).toContain("incident title must not be empty");
+        expect(callsOf("editIncident")).toHaveLength(0);
+      });
+
+      test("an invalid incident id exits 2", async () => {
+        const r = await run(
+          sb,
+          ["status-pages", "incident-edit", "status", "abc"],
+          creds(kuma.url),
+        );
+        expect(r.code).toBe(2);
+        expect(r.stderr).toContain("incident id must be a positive integer id");
+      });
+
+      test("an unknown slug exits 1 without calling getIncidentHistory", async () => {
+        const r = await run(
+          sb,
+          ["status-pages", "incident-edit", "ghost", "5", "--title", "t"],
+          creds(kuma.url),
+        );
+        expect(r.code).toBe(1);
+        expect(r.stderr).toContain("status page ghost not found");
+        expect(callsOf("editIncident")).toHaveLength(0);
+      });
+
+      test("editIncident ok:true without an incident exits 70", async () => {
+        kuma.state.editIncidentResult = { ok: true };
+        const r = await run(sb, ["status-pages", "incident-edit", "status", "5"], creds(kuma.url));
+        expect(r.code).toBe(70);
+        expect(r.stderr).toContain("unexpected editIncident response");
+      });
+    });
+  });
+
+  describe("incident-resolve", () => {
+    test("exits 2 on Kuma 1.23, where the event does not exist", async () => {
+      const r = await run(sb, ["status-pages", "incident-resolve", "status", "1"], creds(kuma.url));
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("incident-resolve needs Uptime Kuma >= 2.1.0");
+      expect(callsOf("resolveIncident")).toHaveLength(0);
+    });
+
+    describe("on Kuma 2.x", () => {
+      beforeEach(async () => {
+        await kuma.close();
+        kuma = await startFakeKuma({
+          profile: "2.x",
+          statusPages: [structuredClone(STATUS), structuredClone(OPS)],
+          incidents: [{ id: 5, statusPageId: 7, title: "Open", pin: true, active: true }],
+        });
+      });
+
+      test("resolves the incident and prints it inactive and unpinned", async () => {
+        const r = await run(
+          sb,
+          ["status-pages", "incident-resolve", "status", "5"],
+          creds(kuma.url),
+        );
+        expect(r.code).toBe(0);
+        expect(callsOf("resolveIncident")[0]!.args).toEqual(["status", 5]);
+        expect(r.json()).toMatchObject({ id: 5, active: false, pin: false });
+        expect(kuma.state.incidents[0]).toMatchObject({ active: false, pin: false });
+      });
+
+      test("an unknown incident id exits 1 with Kuma's message", async () => {
+        const r = await run(
+          sb,
+          ["status-pages", "incident-resolve", "status", "99"],
+          creds(kuma.url),
+        );
+        expect(r.code).toBe(1);
+        expect(r.stderr).toContain("Incident not found or access denied");
+      });
+
+      test("an unknown slug exits 1 without calling resolveIncident", async () => {
+        const r = await run(
+          sb,
+          ["status-pages", "incident-resolve", "ghost", "5"],
+          creds(kuma.url),
+        );
+        expect(r.code).toBe(1);
+        expect(r.stderr).toContain("status page ghost not found");
+        expect(callsOf("resolveIncident")).toHaveLength(0);
+      });
+
+      test("resolveIncident ok:true without an incident exits 70", async () => {
+        kuma.state.resolveIncidentResult = { ok: true };
+        const r = await run(
+          sb,
+          ["status-pages", "incident-resolve", "status", "5"],
+          creds(kuma.url),
+        );
+        expect(r.code).toBe(70);
+        expect(r.stderr).toContain("unexpected resolveIncident response");
+      });
+    });
+  });
+
   describe("save", () => {
     const MONITORS = [
       { id: 5, name: "web", type: "http", url: "https://example.com" },

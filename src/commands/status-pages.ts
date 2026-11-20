@@ -2,12 +2,20 @@ import { Option, type Command } from "commander";
 import {
   CliError,
   fail,
+  parseId,
   printJson,
   readJsonFile,
   redactUrl as redactMonitorUrl,
   socketTimeoutMs,
 } from "../lib.ts";
-import { connect, type KumaSession, type StatusPageRow } from "../kuma.ts";
+import {
+  connect,
+  meetsMinVersion,
+  refuseKumaVersion,
+  type KumaSession,
+  type MinVersion,
+  type StatusPageRow,
+} from "../kuma.ts";
 
 // The six styles the StatusPage.vue incident picker offers; createIncident
 // starts a new incident at "primary".
@@ -87,6 +95,40 @@ const byTitle = (a: StatusPageRow, b: StatusPageRow): number =>
 
 function statusPageBySlug(s: KumaSession, slug: string): StatusPageRow | undefined {
   return s.statusPages().find((p) => p.slug === slug);
+}
+
+// getIncidentHistory / editIncident / resolveIncident first ship in Kuma
+// 2.1.0 — on an older server the events have no listener and an emit would
+// sit out the request timeout, so the commands refuse once the version is
+// known. deleteIncident, added in the same upstream commit, is not exposed.
+const INCIDENT_MIN: MinVersion = [2, 1, 0];
+
+function requireIncidentEvents(s: KumaSession, command: string): void {
+  if (!meetsMinVersion(s, INCIDENT_MIN)) refuseKumaVersion(s, command, INCIDENT_MIN);
+}
+
+// getIncidentHistory pages INCIDENT_PAGE_SIZE (10) incidents per call,
+// created_date DESC; the CLI follows nextCursor to the end so the printed
+// array is the whole history. A cursor that does not move means a
+// misbehaving server — stop rather than loop requests forever.
+async function incidentHistory(
+  s: KumaSession,
+  slug: string,
+): Promise<{ total: unknown; incidents: Record<string, unknown>[] }> {
+  const incidents: Record<string, unknown>[] = [];
+  let total: unknown;
+  let cursor: string | null = null;
+  for (;;) {
+    const res = await s.request("getIncidentHistory", [slug, cursor]);
+    const page = res?.incidents;
+    if (!Array.isArray(page)) fail(70, "unexpected getIncidentHistory response");
+    incidents.push(...(page as Record<string, unknown>[]));
+    total = res?.total;
+    const next = res?.nextCursor;
+    if (res?.hasMore !== true || typeof next !== "string" || next === cursor) break;
+    cursor = next;
+  }
+  return { total, incidents };
 }
 
 function parseAddSlug(value: string): string {
@@ -633,6 +675,78 @@ export function registerStatusPages(program: Command): void {
       }
       if (incident === null || typeof incident !== "object" || Array.isArray(incident)) {
         fail(70, "unexpected postIncident response");
+      }
+      printJson(incident);
+    });
+
+  statusPages
+    .command("incident-history <slug>")
+    .description("List the incident history of a status page")
+    .action(async (slug) => {
+      const s = await connect(["statusPageList"]);
+      requireIncidentEvents(s, "incident-history");
+      if (!statusPageBySlug(s, slug)) fail(1, `status page ${slug} not found`);
+      const { total, incidents } = await incidentHistory(s, slug);
+      printJson({ slug, total, incidents });
+    });
+
+  statusPages
+    .command("incident-edit <slug> <id>")
+    .description("Edit an incident of a status page")
+    .option("--title <title>", "incident title")
+    .option("--content <content>", "incident content")
+    .addOption(new Option("--style <style>", "incident style").choices([...INCIDENT_STYLES]))
+    .option("--pin", "pin the incident")
+    .option("--unpin", "unpin the incident")
+    .action(async (slug, rawId, opts) => {
+      const s = await connect(["statusPageList"]);
+      requireIncidentEvents(s, "incident-edit");
+      if (!statusPageBySlug(s, slug)) fail(1, `status page ${slug} not found`);
+      if (opts.pin === true && opts.unpin === true) {
+        fail(2, "--pin and --unpin cannot be combined");
+      }
+      const incidentId = parseId(rawId, "incident id");
+      // editIncident overwrites every field unconditionally like the UI's
+      // pre-filled form, so the stored incident is fetched and the flags
+      // merge over it — an omitted flag keeps its stored value
+      const existing = (await incidentHistory(s, slug)).incidents.find((i) => i.id === incidentId);
+      if (existing === undefined) fail(1, `incident ${incidentId} not found`);
+      const title = opts.title ?? existing.title;
+      const content = opts.content ?? existing.content;
+      const style = opts.style ?? existing.style;
+      if (typeof title !== "string" || title.trim() === "") {
+        fail(2, "incident title must not be empty");
+      }
+      if (typeof content !== "string" || content.trim() === "") {
+        fail(2, "incident content must not be empty");
+      }
+      // a sent pin follows the server's own rule (pin !== false -> pinned);
+      // an unstored or absent one pins like the UI's form default does
+      const pin = opts.pin === true ? true : opts.unpin === true ? false : existing.pin !== false;
+      const res = await s.request("editIncident", [
+        slug,
+        incidentId,
+        { title, content, style: typeof style === "string" ? style : "warning", pin },
+      ]);
+      const incident = res?.incident;
+      if (incident === null || typeof incident !== "object" || Array.isArray(incident)) {
+        fail(70, "unexpected editIncident response");
+      }
+      printJson(incident);
+    });
+
+  statusPages
+    .command("incident-resolve <slug> <id>")
+    .description("Resolve an incident of a status page")
+    .action(async (slug, rawId) => {
+      const s = await connect(["statusPageList"]);
+      requireIncidentEvents(s, "incident-resolve");
+      if (!statusPageBySlug(s, slug)) fail(1, `status page ${slug} not found`);
+      const incidentId = parseId(rawId, "incident id");
+      const res = await s.request("resolveIncident", [slug, incidentId]);
+      const incident = res?.incident;
+      if (incident === null || typeof incident !== "object" || Array.isArray(incident)) {
+        fail(70, "unexpected resolveIncident response");
       }
       printJson(incident);
     });

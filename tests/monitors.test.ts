@@ -5530,6 +5530,56 @@ describe("monitors delete", () => {
     expect(r.stderr).toContain("cannot delete");
     expect(kuma.state.monitors.map((m) => m.id).sort((a, b) => a - b)).toEqual([2, 7, 9]);
   });
+
+  test("--children exits 2 on 1.23 without sending deleteMonitor", async () => {
+    const r = await run(sb, ["monitors", "delete", "7", "--yes", "--children"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--children needs Uptime Kuma >= 2.1.0");
+    expect(kuma.calls.find((c) => c.event === "deleteMonitor")).toBeUndefined();
+    expect(kuma.state.monitors.map((m) => m.id).sort((a, b) => a - b)).toEqual([2, 7, 9]);
+  });
+
+  describe("on Kuma 2.x", () => {
+    beforeEach(async () => {
+      await kuma.close();
+      kuma = await startFakeKuma({
+        profile: "2.x",
+        monitors: [
+          group(1, "root"),
+          http(2, "child", { parent: 1 }),
+          { ...group(3, "nested"), parent: 1 },
+          http(4, "grandchild", { parent: 3 }),
+          http(5, "other"),
+        ],
+      });
+    });
+
+    test("--children sends deleteChildren true and removes the whole subtree", async () => {
+      const r = await run(sb, ["monitors", "delete", "1", "--yes", "--children"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      expect(r.json()).toEqual({ id: 1, deleted: true });
+      expect(kuma.calls.find((c) => c.event === "deleteMonitor")!.args).toEqual([1, true]);
+      expect(kuma.state.monitors.map((m) => m.id)).toEqual([5]);
+    });
+
+    test("deleting a group without --children unlinks its children", async () => {
+      const r = await run(sb, ["monitors", "delete", "1", "--yes"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      // the id alone hits 2.x's shim, keeping the unlink behaviour
+      expect(kuma.calls.find((c) => c.event === "deleteMonitor")!.args).toEqual([1]);
+      expect(kuma.state.monitors.find((m) => m.id === 2)!.parent).toBeNull();
+      expect(kuma.state.monitors.map((m) => m.id).sort((a, b) => a - b)).toEqual([2, 3, 4, 5]);
+    });
+
+    test("--children exits 2 on 2.0.x, where deleteChildren does not exist yet", async () => {
+      kuma.state.info = { ...kuma.state.info, version: "2.0.2" };
+      const r = await run(sb, ["monitors", "delete", "1", "--yes", "--children"], creds(kuma.url));
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("--children needs Uptime Kuma >= 2.1.0");
+      expect(r.stderr).toContain("2.0.2");
+      expect(kuma.calls.find((c) => c.event === "deleteMonitor")).toBeUndefined();
+    });
+  });
 });
 
 describe("monitors clear-beats", () => {

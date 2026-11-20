@@ -2,7 +2,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { sandbox, type Sandbox } from "../helpers/run";
-import { cliRun, on2x, withKuma } from "./helpers";
+import { cliRun, on2x, on21, withKuma } from "./helpers";
 
 // Runs only when scripts/integration.ts provides UPTIME_KUMA_IT_*; a plain
 // `bun test` skips the whole file.
@@ -11,6 +11,7 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("status-pages (real Kuma)", () 
   // unique per run so a kept container does not hit the slug UNIQUE index
   const slug = `it-sp-${Date.now().toString(36)}`;
   const title = "it status page";
+  let incidentId = 0;
 
   beforeEach(() => {
     sb = sandbox();
@@ -120,6 +121,70 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("status-pages (real Kuma)", () 
     expect(g.code).toBe(0);
     expect(g.json().incident).toBeNull();
   }, 120_000);
+
+  // getIncidentHistory / editIncident / resolveIncident first ship in 2.1.0
+  test.skipIf(!on21)(
+    "incident-history lists the posted incident",
+    async () => {
+      const r = await cliRun(sb, ["status-pages", "incident-history", slug]);
+      expect(r.code).toBe(0);
+      const j = r.json();
+      expect(j.slug).toBe(slug);
+      expect(j.total).toBeGreaterThanOrEqual(1);
+      const found = (j.incidents as { id: number; title: string }[]).find(
+        (i) => i.title === "it incident",
+      );
+      expect(found).toBeDefined();
+      incidentId = found!.id;
+    },
+    120_000,
+  );
+
+  test.skipIf(!on21)(
+    "incident-edit renames it keeping the stored fields",
+    async () => {
+      const r = await cliRun(sb, [
+        "status-pages",
+        "incident-edit",
+        slug,
+        String(incidentId),
+        "--title",
+        "it incident edited",
+      ]);
+      expect(r.code).toBe(0);
+      expect(r.json()).toMatchObject({
+        id: incidentId,
+        title: "it incident edited",
+        content: "it content",
+        style: "warning",
+      });
+    },
+    120_000,
+  );
+
+  test.skipIf(!on21)(
+    "incident-resolve marks it inactive and unpinned",
+    async () => {
+      const r = await cliRun(sb, ["status-pages", "incident-resolve", slug, String(incidentId)]);
+      expect(r.code).toBe(0);
+      expect(r.json()).toMatchObject({ id: incidentId, active: false, pin: false });
+      const h = await cliRun(sb, ["status-pages", "incident-history", slug]);
+      expect(h.code).toBe(0);
+      const row = (h.json().incidents as { id: number }[]).find((i) => i.id === incidentId);
+      expect(row).toMatchObject({ active: false });
+    },
+    120_000,
+  );
+
+  test.skipIf(on21)(
+    "incident-history refuses on a pre-2.1 server",
+    async () => {
+      const r = await cliRun(sb, ["status-pages", "incident-history", slug]);
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("incident-history needs Uptime Kuma >= 2.1.0");
+    },
+    120_000,
+  );
 
   test("delete the status page", async () => {
     const r = await cliRun(sb, ["status-pages", "delete", slug, "--yes"]);

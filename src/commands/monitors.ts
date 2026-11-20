@@ -19,10 +19,14 @@ import {
 } from "../lib.ts";
 import {
   connect,
+  meetsMinVersion,
   MONITOR_ADD_FIELDS,
   MONITOR_2X_FIELDS,
+  refuseKumaVersion,
   type KumaSession,
+  type MinVersion,
   type Monitor,
+  type MonitorStats,
 } from "../kuma.ts";
 
 // Order follows the type picker of EditMonitor.vue in Kuma 1.23.17. The picker
@@ -74,11 +78,6 @@ const MONITOR_2X_TYPES = [
 // type gate exists to prevent. A type absent from the map shipped with
 // 2.0.0 (manual in beta.4, smtp in beta.3, snmp in beta.0) and needs only
 // major 2.
-
-// The first release a gated thing needs, as [major, minor, patch] — most
-// entries land on x.y.0, but ssh/sftp's fields first shipped in a patch
-// release (2.5.4), so patch must compare too.
-type MinVersion = readonly [number, number, number];
 
 const KUMA2_0: MinVersion = [2, 0, 0];
 
@@ -521,25 +520,6 @@ function checkEditFields(fields: Record<string, unknown>, source: string): void 
       fail(2, `${source} key "${key}" is not a monitor field`);
     }
   }
-}
-
-function meetsMinVersion(s: KumaSession, [maj, min, pat]: MinVersion): boolean {
-  return (
-    s.majorVersion > maj ||
-    (s.majorVersion === maj &&
-      (s.minorVersion > min || (s.minorVersion === min && s.patchVersion >= pat)))
-  );
-}
-
-function refuseKumaVersion(s: KumaSession, what: string, [maj, min, pat]: MinVersion): never {
-  const needs =
-    maj === 2 && min === 0 && pat === 0 ? "Uptime Kuma 2.x" : `Uptime Kuma >= ${maj}.${min}.${pat}`;
-  return fail(
-    2,
-    s.serverVersion === undefined
-      ? `${what} needs ${needs}; the server sent no version, so 1.x was assumed`
-      : `${what} needs ${needs}; the server reports ${s.serverVersion}`,
-  );
 }
 
 // A 2.x-only field can only be refused once the version is known: on 1.23
@@ -1394,6 +1374,25 @@ function certInfoFields(infoJson: string | undefined): {
   };
 }
 
+// domainInfo's expiryDate is the domain_expiry.expiry as an ISO string on
+// the wire; an unparsable one reports null like a malformed certInfo
+function domainInfoFields(info: MonitorStats["domainInfo"]): {
+  domainExpiresAt: string | null;
+  domainDaysRemaining: number | null;
+} {
+  if (info === undefined) return { domainExpiresAt: null, domainDaysRemaining: null };
+  const date = new Date(info.expiryDate);
+  return {
+    domainExpiresAt: Number.isNaN(date.getTime()) ? null : date.toISOString(),
+    domainDaysRemaining: info.daysRemaining,
+  };
+}
+
+// deleteMonitor's deleteChildren parameter first ships in 2.1.0 — older
+// servers take (id, callback), where a boolean second argument would be
+// called as the callback and crash the handler
+const DELETE_CHILDREN_MIN: MinVersion = [2, 1, 0];
+
 export function registerMonitors(program: Command): void {
   const monitors = program.command("monitors").description("Manage monitors");
 
@@ -1449,14 +1448,24 @@ export function registerMonitors(program: Command): void {
         // monitorStats returns every requested id or fails itself
         const st = stats.get(m.id)!;
         const cert = certInfoFields(st.certInfo);
+        const domain = domainInfoFields(st.domainInfo);
         return {
           id: m.id,
           name: m.name,
           uptime24h: st.uptime24h,
           uptime30d: st.uptime30d,
+          // the 2.x-only keys are absent rather than null when the server
+          // never sent them: a 1.x output keeps its shape
+          ...(st.uptime1y !== undefined ? { uptime1y: st.uptime1y } : {}),
           avgPing: st.avgPing,
           certExpiresAt: cert.certExpiresAt,
           certDaysRemaining: cert.certDaysRemaining,
+          ...(st.domainInfo !== undefined
+            ? {
+                domainExpiresAt: domain.domainExpiresAt,
+                domainDaysRemaining: domain.domainDaysRemaining,
+              }
+            : {}),
         };
       });
       printJson(id === undefined ? rows : rows[0]);
@@ -2348,13 +2357,19 @@ export function registerMonitors(program: Command): void {
     .command("delete <id|name>")
     .description("Delete a monitor")
     .option("--yes", "confirm deletion")
+    .option("--children", "delete a group's children too instead of unlinking them")
     .action(async (rawId, opts) => {
       if (!opts.yes) fail(2, `would delete monitor ${rawId}; pass --yes to delete`);
       const s = await connect();
+      if (opts.children === true && !meetsMinVersion(s, DELETE_CHILDREN_MIN)) {
+        refuseKumaVersion(s, "--children", DELETE_CHILDREN_MIN);
+      }
       const id = s.resolveMonitorId(rawId);
       // Kuma 1.23 answers ok even for an unknown id, so the pushed list is the only check
       if (!s.monitorById(id)) fail(1, `monitor ${id} not found`);
-      await s.request("deleteMonitor", [id]);
+      // the deleteChildren shim on 2.x treats a function second argument as
+      // the callback, so sending the id alone keeps the unlink behaviour
+      await s.request("deleteMonitor", opts.children === true ? [id, true] : [id]);
       printJson({ id, deleted: true });
     });
 

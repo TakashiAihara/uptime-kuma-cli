@@ -300,4 +300,87 @@ describe("monitors stats", () => {
       certDaysRemaining: 47,
     });
   });
+
+  describe("on Kuma 2.x", () => {
+    beforeEach(async () => {
+      await kuma.close();
+      kuma = await startFakeKuma({
+        profile: "2.x",
+        monitors: [mon(1, "alpha"), mon(2, "beta")],
+        beats: { 1: [beat(1, 5, 1)] },
+        stats: {
+          1: {
+            uptime1y: 0.95,
+            domainInfo: { daysRemaining: 90, expiry: "2026-01-02T03:04:05.000Z" },
+          },
+        },
+      });
+    });
+
+    test("rows carry uptime1y and the domain expiry fields when the events arrive", async () => {
+      const r = await run(sb, ["monitors", "stats"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      expect(r.json()).toEqual([
+        {
+          id: 1,
+          name: "alpha",
+          uptime24h: 1,
+          uptime30d: 1,
+          uptime1y: 0.95,
+          avgPing: 12,
+          certExpiresAt: null,
+          certDaysRemaining: null,
+          domainExpiresAt: "2026-01-02T03:04:05.000Z",
+          domainDaysRemaining: 90,
+        },
+        // beta has no domain_expiry row, so 2.x sends uptime "1y" but no
+        // domainInfo: uptime1y stays, the domain keys are absent
+        {
+          id: 2,
+          name: "beta",
+          uptime24h: 0,
+          uptime30d: 0,
+          uptime1y: 0,
+          avgPing: null,
+          certExpiresAt: null,
+          certDaysRemaining: null,
+        },
+      ]);
+    });
+
+    test("a monitor without domainInfo omits the domain keys", async () => {
+      const r = await run(sb, ["monitors", "stats", "2"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      const row = r.json();
+      expect("domainExpiresAt" in row).toBe(false);
+      expect("domainDaysRemaining" in row).toBe(false);
+    });
+
+    test("an unparsable domain expiry reports domainExpiresAt null", async () => {
+      kuma.state.stats[1] = {
+        domainInfo: { daysRemaining: -1, expiry: "unknown" },
+      };
+      const r = await run(sb, ["monitors", "stats", "1"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      expect(r.json()).toMatchObject({ domainExpiresAt: null, domainDaysRemaining: -1 });
+    });
+
+    test("a domainInfo past its monitor's 500 ms burst reads as absent", async () => {
+      kuma.state.domainInfoDelay = { 1: 600 };
+      const r = await run(sb, ["monitors", "stats", "1"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      const row = r.json();
+      expect("domainExpiresAt" in row).toBe(false);
+      expect("domainDaysRemaining" in row).toBe(false);
+    });
+
+    test("a server that skips the uptime 1y push leaves the key absent", async () => {
+      kuma.state.skipStatEvents = { 1: ["uptime1y"] };
+      const r = await run(sb, ["monitors", "stats", "1"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      const row = r.json();
+      expect("uptime1y" in row).toBe(false);
+      expect(row.uptime24h).toBe(1);
+    });
+  });
 });

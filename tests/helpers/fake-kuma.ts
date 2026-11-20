@@ -125,12 +125,16 @@ export type ApiKeyRow = {
 // Per-monitor stats values for the post-login stats pushes; a field left
 // out is derived like Kuma computes it (avgPing and the uptimes from the
 // beats), and certInfo exists only when set here — it is sent verbatim, so
-// a malformed string reaches the CLI unchanged.
+// a malformed string reaches the CLI unchanged. uptime1y and domainInfo are
+// the 2.x-only pushes; domainInfo has no derived value either — sendDomainInfo
+// emits only when the domain_expiry row carries a resolved expiry.
 export type StatsValues = {
   avgPing?: number | null;
   uptime24h?: number;
   uptime30d?: number;
   certInfo?: string;
+  uptime1y?: number;
+  domainInfo?: { daysRemaining: number; expiry: string };
 };
 
 type ResolvedStats = {
@@ -138,6 +142,8 @@ type ResolvedStats = {
   uptime24h: number;
   uptime30d: number;
   certInfo: string | undefined;
+  uptime1y: number;
+  domainInfo: { daysRemaining: number; expiry: string } | undefined;
 };
 
 export type FakeState = {
@@ -175,6 +181,11 @@ export type FakeState = {
   apiRequests: string[];
   // postIncident answer override; null uses the stored-incident answer
   postIncidentResult: Record<string, unknown> | null;
+  // verbatim getIncidentHistory / editIncident / resolveIncident answers when
+  // set (2.x-only events); lets tests feed malformed shapes
+  incidentHistoryResult: Record<string, unknown> | null;
+  editIncidentResult: Record<string, unknown> | null;
+  resolveIncidentResult: Record<string, unknown> | null;
   // rows pushed as maintenanceList after login and returned by getMaintenance
   maintenances: MaintenanceRow[];
   // maintenance_id -> attached monitor ids / status page ids (the
@@ -220,6 +231,8 @@ export type FakeState = {
   // ms to wait before a monitor's certInfo emit; in the post-login walk it
   // still precedes the next monitor's stats like the awaited sendCertInfo
   certInfoDelay: Record<number, number>;
+  // ms to wait before a monitor's domainInfo emit (2.x), past the certInfo
+  domainInfoDelay: Record<number, number>;
   // a second stats round, resendStatsAfterMs after the first, with per-monitor
   // overrides — proves the CLI keeps the first values
   resendStatsAfterMs: number;
@@ -521,6 +534,9 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     statusPageApiMalformedAfter: 0,
     apiRequests: [],
     postIncidentResult: null,
+    incidentHistoryResult: null,
+    editIncidentResult: null,
+    resolveIncidentResult: null,
     maintenances: [],
     maintenanceMonitors: {},
     maintenanceStatusPages: {},
@@ -560,6 +576,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     skipStatEvents: {},
     earlyAvgPing: [],
     certInfoDelay: {},
+    domainInfoDelay: {},
     resendStatsAfterMs: 0,
     resendStats: {},
     silentStats: [],
@@ -840,7 +857,8 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
   // null avgPing stays null (?? would fall back to the derived value)
   const pick = <T>(v: T | undefined, fallback: T): T => (v === undefined ? fallback : v);
 
-  // certInfo has no derived value: it exists only when the fixture sets it
+  // certInfo and domainInfo have no derived value: they exist only when the
+  // fixture sets them
   const statValues = (m: Monitor): ResolvedStats => {
     const o = state.stats[m.id];
     return {
@@ -848,6 +866,8 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
       uptime24h: pick(o?.uptime24h, uptimeOf(m.id, 24)),
       uptime30d: pick(o?.uptime30d, uptimeOf(m.id, 720)),
       certInfo: o?.certInfo,
+      uptime1y: pick(o?.uptime1y, uptimeOf(m.id, 8760)),
+      domainInfo: o?.domainInfo,
     };
   };
 
@@ -859,6 +879,8 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
       uptime24h: pick(o?.uptime24h, base.uptime24h),
       uptime30d: pick(o?.uptime30d, base.uptime30d),
       certInfo: pick(o?.certInfo, base.certInfo),
+      uptime1y: pick(o?.uptime1y, base.uptime1y),
+      domainInfo: pick(o?.domainInfo, base.domainInfo),
     };
   };
 
@@ -1030,10 +1052,20 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
             if (!skip.includes("avgPing")) socket.emit("avgPing", sid, v.avgPing);
             if (!skip.includes("uptime24")) socket.emit("uptime", sid, 24, v.uptime24h);
             if (!skip.includes("uptime720")) socket.emit("uptime", sid, 720, v.uptime30d);
+            // 2.x sendStats adds the string period "1y" right after 720
+            if (profile2x && !skip.includes("uptime1y"))
+              socket.emit("uptime", sid, "1y", v.uptime1y);
             if (v.certInfo !== undefined) {
               const certDelay = state.certInfoDelay[m.id] ?? 0;
               if (certDelay > 0) await sleep(certDelay);
               socket.emit("certInfo", sid, v.certInfo);
+            }
+            // 2.x sendDomainInfo runs last in sendStats and only emits when
+            // the domain_expiry row carries an expiry
+            if (profile2x && v.domainInfo !== undefined && !skip.includes("domainInfo")) {
+              const domDelay = state.domainInfoDelay[m.id] ?? 0;
+              if (domDelay > 0) await sleep(domDelay);
+              socket.emit("domainInfo", sid, v.domainInfo.daysRemaining, v.domainInfo.expiry);
             }
           }
         };
@@ -1139,9 +1171,40 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     handle("pauseMonitor", setActive(false));
     handle("resumeMonitor", setActive(true));
 
-    // Kuma 1.23 does not check that the id exists: the DELETE affects 0 rows and still answers ok
-    handle("deleteMonitor", (id: number) => {
-      state.monitors = state.monitors.filter((m) => m.id !== Number(id));
+    // Kuma 1.23 does not check that the id exists: the DELETE affects 0 rows
+    // and still answers ok. A group delete unlinks its children on both
+    // versions (1.23 ON DELETE SET NULL, 2.x unlinkAllChildren); 2.x takes
+    // (monitorID, deleteChildren, callback), where deleteChildren instead
+    // removes the whole subtree through deleteMonitorRecursively
+    handle("deleteMonitor", (id: number, deleteChildren?: boolean) => {
+      const mid = Number(id);
+      const target = state.monitors.find((m) => m.id === mid);
+      if (target?.type === "group" && state.profile === "2.x" && deleteChildren === true) {
+        // the group plus every descendant; the seen-set keeps a cyclic
+        // parent chain from looping
+        const descendants = new Set<number>();
+        let frontier = [mid];
+        while (frontier.length > 0) {
+          const next = state.monitors.filter(
+            (m) =>
+              typeof m.parent === "number" &&
+              frontier.includes(m.parent) &&
+              !descendants.has(m.id) &&
+              m.id !== mid,
+          );
+          if (next.length === 0) break;
+          for (const m of next) descendants.add(m.id);
+          frontier = next.map((m) => m.id);
+        }
+        state.monitors = state.monitors.filter((m) => m.id !== mid && !descendants.has(m.id));
+      } else {
+        if (target?.type === "group") {
+          for (const m of state.monitors) {
+            if (m.parent === mid) m.parent = null;
+          }
+        }
+        state.monitors = state.monitors.filter((m) => m.id !== mid);
+      }
       // deleteMonitor calls apicache.clear() so cached public pages drop the monitor
       apiCache.clear();
       socket.emit("monitorList", monitorList());
@@ -1747,6 +1810,89 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
       }
       return { ok: true };
     });
+
+    // getIncidentHistory / editIncident / resolveIncident (and deleteIncident,
+    // not modeled) first ship in 2.1.0 — a 1.23 socket has no listener
+    if (profile2x) {
+      // StatusPage.getIncidentHistory: created_date DESC pages of
+      // INCIDENT_PAGE_SIZE (10); the cursor is the last row's created_date
+      handle("getIncidentHistory", (slug: string, cursor: string | null) => {
+        if (state.incidentHistoryResult !== null) return state.incidentHistoryResult;
+        const page = state.statusPages.find((p) => p.slug === slug);
+        if (page === undefined) throw new Error("slug is not found");
+        const sorted = state.incidents
+          .filter((i) => i.statusPageId === page.id)
+          .sort((a, b) => (b.createdDate ?? "").localeCompare(a.createdDate ?? ""));
+        const after =
+          cursor === null || cursor === undefined
+            ? sorted
+            : sorted.filter((i) => (i.createdDate ?? "") < cursor);
+        const rows = after.slice(0, 10);
+        const last = rows[rows.length - 1];
+        const remaining = last === undefined ? 0 : after.length - rows.length;
+        return {
+          ok: true,
+          incidents: rows.map(incidentJSON),
+          total: sorted.length,
+          nextCursor: remaining > 0 && last !== undefined ? last.createdDate : null,
+          hasMore: remaining > 0,
+        };
+      });
+
+      // validateIncident requires non-empty title/content; an unknown style
+      // falls back to warning, and pin defaults true when the key is absent
+      handle(
+        "editIncident",
+        (slug: string, incidentID: number, incident: Record<string, unknown>) => {
+          if (state.editIncidentResult !== null) return state.editIncidentResult;
+          const page = state.statusPages.find((p) => p.slug === slug);
+          if (page === undefined) {
+            return { ok: false, msg: "slug is not found", msgi18n: true };
+          }
+          const row = state.incidents.find(
+            (i) => i.id === Number(incidentID) && i.statusPageId === page.id,
+          );
+          if (row === undefined) {
+            return { ok: false, msg: "Incident not found or access denied", msgi18n: true };
+          }
+          if (typeof incident?.title !== "string" || incident.title.trim() === "") {
+            return { ok: false, msg: "Please input title", msgi18n: true };
+          }
+          if (typeof incident?.content !== "string" || incident.content.trim() === "") {
+            return { ok: false, msg: "Please input content", msgi18n: true };
+          }
+          row.title = incident.title;
+          row.content = incident.content;
+          row.style = ["info", "warning", "danger", "primary", "light", "dark"].includes(
+            incident.style as string,
+          )
+            ? (incident.style as string)
+            : "warning";
+          row.pin = incident.pin !== false;
+          row.lastUpdatedDate = now();
+          return { ok: true, msg: "Saved.", msgi18n: true, incident: incidentJSON(row) };
+        },
+      );
+
+      // resolve() marks the incident inactive and unpinned
+      handle("resolveIncident", (slug: string, incidentID: number) => {
+        if (state.resolveIncidentResult !== null) return state.resolveIncidentResult;
+        const page = state.statusPages.find((p) => p.slug === slug);
+        if (page === undefined) {
+          return { ok: false, msg: "slug is not found", msgi18n: true };
+        }
+        const row = state.incidents.find(
+          (i) => i.id === Number(incidentID) && i.statusPageId === page.id,
+        );
+        if (row === undefined) {
+          return { ok: false, msg: "Incident not found or access denied", msgi18n: true };
+        }
+        row.active = false;
+        row.pin = false;
+        row.lastUpdatedDate = now();
+        return { ok: true, msg: "Resolved", msgi18n: true, incident: incidentJSON(row) };
+      });
+    }
 
     // saveStatusPage of Kuma 1.23.17: finds the page by the first slug arg,
     // overwrites every config column it reads (a missing key becomes null),
