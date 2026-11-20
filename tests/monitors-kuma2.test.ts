@@ -1524,6 +1524,88 @@ describe("smtp monitors", () => {
     });
   });
 
+  // a stored 25 is the smtp default the CLI wrote, not a custom port —
+  // it reads as "another type's default" to the watcher like upstream's
+  // own picks do, so the new type's default replaces it
+  test("edit --set type=ntp turns the stored smtp port 25 into ntp's 123", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [
+        {
+          ...http(7, "s"),
+          type: "smtp",
+          url: null,
+          hostname: "mail.example.com",
+          port: 25,
+          smtpSecurity: "secure",
+        },
+      ],
+    });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=ntp", "--set", "hostname=ntp.example.com"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "s")).toMatchObject({
+      type: "ntp",
+      hostname: "ntp.example.com",
+      port: 123,
+      interval: 300,
+    });
+  });
+
+  // ntp's 123 is a well-known default the watcher replaces, and smtp has
+  // no interval pick of its own, so the 300 ntp chose is left alone
+  test("edit --set type=smtp turns the stored ntp port 123 into 25 but keeps interval 300", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [
+        {
+          ...http(7, "n"),
+          type: "ntp",
+          url: null,
+          hostname: "ntp.example.com",
+          port: 123,
+          interval: 300,
+        },
+      ],
+    });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=smtp", "--set", "hostname=mail.example.com"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "n")).toMatchObject({
+      type: "smtp",
+      hostname: "mail.example.com",
+      port: 25,
+      interval: 300,
+    });
+  });
+
+  // a type with no port pick of its own leaves the stored port alone —
+  // without the guard the branch would write the map's undefined over 53
+  test("edit --set type=ping keeps a dns monitor's port 53", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [
+        {
+          ...http(7, "h"),
+          type: "dns",
+          url: null,
+          hostname: "dns.example.com",
+          port: 53,
+          dns_resolve_type: "A",
+        },
+      ],
+    });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "type=ping"], creds(k.url));
+    expect(r.code).toBe(0);
+    expect(stored(k, "h").port).toBe(53);
+  });
+
   test("edit --set type=smtp exits 2 on a 1.x server before editMonitor", async () => {
     const k = await useFake({ monitors: [http(7, "h")] });
     const r = await run(sb, ["monitors", "edit", "7", "--set", "type=smtp"], creds(k.url));

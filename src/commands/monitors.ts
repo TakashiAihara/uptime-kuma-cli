@@ -215,9 +215,22 @@ const KUMA2_INTERVAL_DEFAULTS: Record<string, number> = { ntp: 300 };
 // The port a type's own default is on an edit type change — ntp's comes
 // from the picker's watcher like the add's; smtp's watcher leaves the
 // required input blank, but its check() runs `port || 25`. An empty port
-// or another type's well-known default (22 / 53 / 123 / 1812) is replaced
-// by it; a port the edit sets wins.
+// or another type's well-known default is replaced by it; a port the
+// edit sets wins.
 const TYPE_CHANGE_PORT_DEFAULTS: Record<string, number> = { ntp: 123, smtp: 25 };
+
+// The ports that read as "another type's default" to the watcher:
+// 22 / 53 / 123 / 1812 are its own list (sftp / dns / ntp / radius), and
+// the map's values join them — the CLI stores those defaults where the
+// picker leaves the field blank, so a stored 25 is an smtp default, not
+// a custom port, when the monitor becomes another type.
+const TYPE_CHANGE_KNOWN_PORTS = new Set([
+  22,
+  53,
+  123,
+  1812,
+  ...Object.values(TYPE_CHANGE_PORT_DEFAULTS),
+]);
 
 const PUSH_TOKEN_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -1830,7 +1843,7 @@ export function registerMonitors(program: Command): void {
         if (
           portDefault !== undefined &&
           !touched.has("port") &&
-          (!port || port === 22 || port === 53 || port === 123 || port === 1812)
+          (!port || (typeof port === "number" && TYPE_CHANGE_KNOWN_PORTS.has(port)))
         ) {
           monitor.port = portDefault;
         }
