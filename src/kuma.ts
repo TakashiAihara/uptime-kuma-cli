@@ -3,6 +3,7 @@ import {
   CliError,
   fail,
   isIdLiteral,
+  redactUrl,
   resolveCredentials,
   resolveTotp,
   sleep,
@@ -483,6 +484,7 @@ export async function connect(
 ): Promise<KumaSession> {
   const timeoutMs = socketTimeoutMs();
   const { url, username, password } = await resolveCredentials();
+  const shownUrl = String(redactUrl(url));
   const socket = io(url, {
     transports: ["websocket"],
     reconnection: false,
@@ -499,7 +501,7 @@ export async function connect(
   });
   void disconnected.catch(() => {});
   socket.on("disconnect", () => {
-    rejectDisconnected(new CliError(2, `socket disconnected from ${url}`));
+    rejectDisconnected(new CliError(2, `socket disconnected from ${shownUrl}`));
   });
 
   const pushed: {
@@ -620,7 +622,7 @@ export async function connect(
 
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => {
-      reject(new CliError(2, `timed out connecting to ${url}`));
+      reject(new CliError(2, `timed out connecting to ${shownUrl}`));
     }, timeoutMs);
     socket.once("connect", () => {
       clearTimeout(timer);
@@ -628,7 +630,7 @@ export async function connect(
     });
     socket.once("connect_error", (err: Error) => {
       clearTimeout(timer);
-      reject(new CliError(2, `failed to connect to ${url}: ${err.message}`));
+      reject(new CliError(2, `failed to connect to ${shownUrl}: ${err.message}`));
     });
   });
 
@@ -639,7 +641,7 @@ export async function connect(
   const preLoginDeadline = Date.now() + timeoutMs;
   while (!infoSeen) {
     if (Date.now() >= preLoginDeadline) {
-      fail(2, `timed out waiting for the server info from ${url}`);
+      fail(2, `timed out waiting for the server info from ${shownUrl}`);
     }
     await Promise.race([sleep(10), disconnected]);
   }

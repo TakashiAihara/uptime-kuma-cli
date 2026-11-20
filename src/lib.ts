@@ -483,6 +483,26 @@ export async function resolveTotp(): Promise<TotpResolution> {
   fail(2, "login requires a 2FA token; set UPTIME_KUMA_TOTP, totp_command or totp_secret_command");
 }
 
+// A URL (a monitor's, or the configured Kuma url behind a basic-auth proxy) may carry credentials as user[:pass]@; keep the URL readable and hide the password
+export function redactUrl(value: unknown): unknown {
+  if (typeof value !== "string" || value === "") return value;
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    // unparseable: the userinfo boundary is unknown, so hide the whole value
+    return value.includes("@") ? "***" : value;
+  }
+  // an opaque-path parse like "u:p@host:port" has no host, so the userinfo
+  // boundary is unknowable — hide the whole value like the catch branch
+  if (parsed.host === "" && value.includes("@")) return "***";
+  if (parsed.username === "" && parsed.password === "") return value;
+  // either userinfo slot can hold a token, not just a name — hide all of it
+  parsed.username = "***";
+  parsed.password = "";
+  return parsed.toString();
+}
+
 export async function resolveCredentials(): Promise<{
   url: string;
   username: string;
@@ -495,7 +515,10 @@ export async function resolveCredentials(): Promise<{
   }
   const url = rawUrl.replace(/\/+$/, "");
   if (!url.startsWith("http://") && !url.startsWith("https://")) {
-    fail(2, `Uptime Kuma url must start with http:// or https://, got "${rawUrl}"`);
+    fail(
+      2,
+      `Uptime Kuma url must start with http:// or https://, got "${String(redactUrl(rawUrl))}"`,
+    );
   }
   const timeoutMs = commandTimeoutMs();
   const username = await resolveSecret(
