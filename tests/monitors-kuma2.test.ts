@@ -1128,6 +1128,22 @@ describe("ntp monitors", () => {
     });
   });
 
+  // an interval already at 300 is not a change this edit made, so the
+  // stored timeout pair is not re-judged either
+  test("edit --set type=ntp leaves the stored timeout when the interval was already 300", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [{ ...http(7, "h"), interval: 300, retryInterval: 300, timeout: 2000 }],
+    });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=ntp", "--set", "hostname=ntp.example.com"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "h")).toMatchObject({ type: "ntp", interval: 300, timeout: 2000 });
+  });
+
   test("edit --set type=ntp exits 2 on a 1.x server before editMonitor", async () => {
     const k = await useFake({ monitors: [http(7, "h")] });
     const r = await run(sb, ["monitors", "edit", "7", "--set", "type=ntp"], creds(k.url));
