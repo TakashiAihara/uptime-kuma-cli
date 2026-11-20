@@ -2915,6 +2915,30 @@ describe("websocket-upgrade monitors", () => {
     expect(stored(k, "h").accepted_statuscodes).toEqual(["200-299", "500"]);
   });
 
+  // upstream's "empty" is a truthiness check — a stored [] is a set list
+  // and stays, matching the watcher's literal behavior
+  test("edit --set type=websocket-upgrade keeps a stored empty status list", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [http(7, "h", { accepted_statuscodes: [] })],
+    });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "type=websocket-upgrade",
+        "--set",
+        "url=wss://wsserver.example.com",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "h").accepted_statuscodes).toEqual([]);
+  });
+
   test("edit --set accepted_statuscodes wins over the ws swap", async () => {
     const k = await useFake({ profile: "2.x", monitors: [http(7, "h")] });
     const r = await run(

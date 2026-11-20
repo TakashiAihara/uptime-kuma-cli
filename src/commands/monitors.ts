@@ -321,10 +321,12 @@ const TYPE_CHANGE_KNOWN_TIMEOUTS = new Set([...Object.values(KUMA2_TIMEOUT_DEFAU
 
 // The picker's type watcher swaps the url and accepted_statuscodes
 // placeholders when a monitor moves between http's family and
-// websocket-upgrade (2.5.11 EditMonitor.vue :3784-3814): an empty url or
-// the other family's placeholder becomes the new type's, and an empty
+// websocket-upgrade (2.5.11 EditMonitor.vue :3784-3814): an unset url or
+// the other family's placeholder becomes the new type's, and an unset
 // statuscode list or the other family's single default becomes the new
-// type's. Its statuscodes branch compares the stored entry to the default
+// type's. Upstream's "empty" is a truthiness check, so a stored []
+// counts as a set list and is kept — a monitor holding it is already
+// broken either way. Its statuscodes branch compares the stored entry to the default
 // *array*, which never matches — like the port branch's string-vs-number
 // comparison — so upstream only replaces a falsy list; the CLI covers the
 // intent and replaces the counterpart's default too. 1.23's watcher has
@@ -334,7 +336,7 @@ const HTTP_URL_DEFAULT = "https://";
 const WS_UPGRADE_STATUS_DEFAULT: readonly string[] = ["1000"];
 const HTTP_STATUS_DEFAULT: readonly string[] = ["200-299"];
 
-// True when the stored list is absent or still holds exactly the other
+// True when the stored list is unset or still holds exactly the other
 // family's picker default — the watcher's "replace the default" intent.
 function isDefaultStatusCodes(v: unknown, familyDefault: readonly string[]): boolean {
   return (
@@ -1042,9 +1044,11 @@ function validateFinalMonitor(
         // unparseable urls fail the same refusal below
       }
       if (protocol !== "ws:" && protocol !== "wss:") {
+        // redactUrl: a --config-file url may carry userinfo the flag
+        // paths already refused — it must not reach stderr
         fail(
           2,
-          `url must start with ws:// or wss:// for type websocket-upgrade, got "${monitor.url}"`,
+          `url must start with ws:// or wss:// for type websocket-upgrade, got "${String(redactUrl(monitor.url))}"`,
         );
       }
     }

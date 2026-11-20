@@ -980,8 +980,9 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
     expect(r.code).toBe(0);
     const id = r.json().id;
 
-    // the picker's picks are the stored defaults: close-code 1000 and the
-    // generic 48s timeout
+    // the picker's picks are the stored defaults: close-code 1000, and the
+    // generic 48s timeout capped to 80% of the 20s interval — the only way
+    // a beat still lands inside the polling window
     const g = await cliRun(sb, ["monitors", "get", String(id)]);
     expect(g.json()).toMatchObject({
       type: "websocket-upgrade",
@@ -989,7 +990,7 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
       accepted_statuscodes: ["1000"],
       wsSubprotocol: "soap",
       wsIgnoreSecWebsocketAcceptHeader: true,
-      timeout: 48,
+      timeout: 16,
     });
 
     // nothing answers on port 1 — the socket fails to connect and the down
