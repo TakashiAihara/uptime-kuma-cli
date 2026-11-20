@@ -1102,6 +1102,22 @@ function validateFinalMonitor(
       fail(2, 'snmpV3Username only applies to snmpVersion "3"; drop it or set the version to 3');
     }
   }
+  // A "3" stored outside snmp can only be the untouched carry of a row
+  // that really was v3 (a monitor edited away and back); a set that writes
+  // one onto a non-snmp monitor forges the exact state a later type=snmp
+  // edit must trust — the username that would prove it is invisible to
+  // toJSON — and the monitor it becomes would beat dead on "SNMPv3
+  // username is required" with no edit able to fix it.
+  if (
+    type !== "snmp" &&
+    monitor.snmpVersion === "3" &&
+    (edit === undefined || edit.touched.has("snmpVersion"))
+  ) {
+    fail(
+      2,
+      'snmpVersion "3" cannot be set on a non-snmp monitor: the row would look like a v3 monitor with no username — set the version on the snmp type, or add a new v3 monitor',
+    );
+  }
   // databaseConnectionString is a secret, so it can only arrive through
   // --config-file (--set refuses it) and there is no typed flag to check
   // early: the merged monitor is judged here.

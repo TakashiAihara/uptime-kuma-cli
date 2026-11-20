@@ -2426,6 +2426,41 @@ describe("snmp monitors", () => {
     });
   });
 
+  // a "3" written onto a non-snmp row forges the state a later type=snmp
+  // edit would trust — the username that would prove it real is invisible
+  // to toJSON — so both entry points refuse it; only the untouched carry
+  // of a real v3 row may store it (the round trip above)
+  test("edit --set snmpVersion=3 on an http monitor exits 2", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [http(7, "h")] });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "snmpVersion=3"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('snmpVersion "3" cannot be set on a non-snmp monitor');
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("add --type http --set snmpVersion=3 exits 2", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "h1",
+        "--url",
+        "https://example.com",
+        "--set",
+        "snmpVersion=3",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('snmpVersion "3" cannot be set on a non-snmp monitor');
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
   // the column exists for v3 only — a username beside another version can
   // never be reached, since no edit turns the monitor v3 later
   test.each(["1", "2c"])(
