@@ -1942,6 +1942,467 @@ describe("smtp monitors", () => {
   });
 });
 
+describe("snmp monitors", () => {
+  // the shared picker's required set for a v2c monitor: hostname, the OID
+  // to get, and the Json Query block's path and expected value
+  const snmpAdd = [
+    "monitors",
+    "add",
+    "--type",
+    "snmp",
+    "--name",
+    "s1",
+    "--hostname",
+    "rtr.example.com",
+    "--snmp-oid",
+    "1.3.6.1.4.1.9.6.1.101",
+    "--json-path",
+    "$",
+    "--expected-value",
+    "up",
+  ];
+
+  const snmpFixture = (id: number, name: string, extra: Record<string, unknown> = {}) => ({
+    ...http(id, name),
+    type: "snmp",
+    url: null,
+    hostname: "rtr.example.com",
+    port: 161,
+    timeout: 5,
+    snmpOid: "1.3.6.1.4.1.9.6.1.101",
+    snmpVersion: "2c",
+    jsonPath: "$",
+    expectedValue: "up",
+    jsonPathOperator: "==",
+    ...extra,
+  });
+
+  test("add --type snmp stores the picker's defaults on 2.x", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(sb, snmpAdd, creds(k.url));
+    expect(r.code).toBe(0);
+    const m = stored(k, "s1");
+    expect(m).toMatchObject({
+      type: "snmp",
+      hostname: "rtr.example.com",
+      port: 161,
+      timeout: 5,
+      snmpOid: "1.3.6.1.4.1.9.6.1.101",
+      snmpVersion: "2c",
+      jsonPath: "$",
+      expectedValue: "up",
+      jsonPathOperator: "==",
+    });
+    // no community given — the column stays null and net-snmp reads it as
+    // "public" (snmp.js passes radiusPassword to createSession)
+    expect(m).not.toHaveProperty("radiusPassword");
+    expect(m).not.toHaveProperty("snmpV3Username");
+  });
+
+  test("add --type snmp --port/--snmp-version override the defaults", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(sb, [...snmpAdd, "--port", "1161", "--snmp-version", "1"], creds(k.url));
+    expect(r.code).toBe(0);
+    expect(stored(k, "s1")).toMatchObject({ port: 1161, snmpVersion: "1" });
+  });
+
+  test("add --type snmp --json-path-operator stores it", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [...snmpAdd, "--json-path", "$.status", "--json-path-operator", "contains"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "s1")).toMatchObject({ jsonPathOperator: "contains" });
+  });
+
+  test("add --type snmp --config-file stores the community as radiusPassword", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const f = join(sb.dir, "snmp.json");
+    writeFileSync(f, JSON.stringify({ radiusPassword: "private" }));
+    const r = await run(sb, [...snmpAdd, "--config-file", f], creds(k.url));
+    expect(r.code).toBe(0);
+    expect(stored(k, "s1")).toMatchObject({ radiusPassword: "private" });
+  });
+
+  test.each([
+    ["--hostname", "--type snmp requires --hostname"],
+    ["--snmp-oid", "--type snmp requires --snmp-oid"],
+    ["--json-path", "--type snmp requires --json-path"],
+    ["--expected-value", "--type snmp requires --expected-value"],
+  ])("add --type snmp without %s exits 2 before connecting", async (missing, msg) => {
+    const k = await useFake({ profile: "2.x" });
+    const idx = snmpAdd.indexOf(missing);
+    const args = [...snmpAdd.slice(0, idx), ...snmpAdd.slice(idx + 2)];
+    const r = await run(sb, args, creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(msg);
+    expect(k.calls).toHaveLength(0);
+  });
+
+  test("add --type snmp --snmp-oid that is not an OID exits 2 before connecting", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const args = [...snmpAdd];
+    args[args.indexOf("--snmp-oid") + 1] = "not-an-oid";
+    const r = await run(sb, args, creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--snmp-oid must be an OID like 1.3.6.1.4.1.9.6.1.101");
+    expect(k.calls).toHaveLength(0);
+  });
+
+  test.each([
+    ["snmpVersion=9", "snmpVersion must be one of 1, 2c, 3"],
+    ["snmpOid=abc", "snmpOid must be an OID like 1.3.6.1.4.1.9.6.1.101"],
+    ["snmpV3Username=", "snmpV3Username must be a non-empty string"],
+  ])("add --type snmp --set %s exits 2 before connecting", async (set, msg) => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(sb, [...snmpAdd, "--set", set], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(msg);
+    expect(k.calls).toHaveLength(0);
+  });
+
+  // v3 needs a username, and it can only be given on add — without one the
+  // stored monitor would fail every beat and no edit could fix it
+  test("add --type snmp --snmp-version 3 without a username exits 2", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(sb, [...snmpAdd, "--snmp-version", "3"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("snmpV3Username must be a non-empty string");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --type snmp --snmp-version 3 --snmp-v3-username stores it on 2.x", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [...snmpAdd, "--snmp-version", "3", "--snmp-v3-username", "ops"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "s1")).toMatchObject({ snmpVersion: "3", snmpV3Username: "ops" });
+  });
+
+  // snmp_v3_username ships with snmp.js's v3 branch in 2.1.0 — on 2.0.x the
+  // add would die on the missing column, so the field is gated
+  test("add --type snmp --snmp-v3-username exits 2 on a 2.0.x server", async () => {
+    const k = await useFake({ profile: "2.x", info: { version: "2.0.2" } });
+    const r = await run(
+      sb,
+      [...snmpAdd, "--snmp-version", "3", "--snmp-v3-username", "ops"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(
+      '"snmpV3Username" needs Uptime Kuma >= 2.1.0; the server reports 2.0.2',
+    );
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --type snmp --snmp-v3-username is accepted at the 2.1.0 boundary", async () => {
+    const k = await useFake({ profile: "2.x", info: { version: "2.1.0" } });
+    const r = await run(
+      sb,
+      [...snmpAdd, "--snmp-version", "3", "--snmp-v3-username", "ops"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "s1")).toMatchObject({ snmpV3Username: "ops" });
+  });
+
+  test("add --type snmp exits 2 on a 1.x server after connect", async () => {
+    const k = await useFake();
+    const r = await run(sb, snmpAdd, creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('type "snmp" needs Uptime Kuma 2.x; the server reports 1.23.17');
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --type snmp names the assumed 1.x when no version arrives", async () => {
+    const k = await useFake({ info: null });
+    const r = await run(sb, snmpAdd, creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('type "snmp" needs Uptime Kuma 2.x; the server sent no version');
+  });
+
+  test("edit --set type=snmp fills the picker's defaults on 2.x", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [http(7, "h")] });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "type=snmp",
+        "--set",
+        "hostname=rtr.example.com",
+        "--set",
+        "snmpOid=1.3.6.1.4.1.9.6.1.101",
+        "--set",
+        "jsonPath=$",
+        "--set",
+        "expectedValue=up",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "h")).toMatchObject({
+      type: "snmp",
+      hostname: "rtr.example.com",
+      port: 161,
+      timeout: 5,
+      snmpVersion: "2c",
+      jsonPathOperator: "==",
+    });
+  });
+
+  // the watcher resets a stored generic-default timeout to the new type's
+  // pick — the http fixture's 48 becomes snmp's 5 like the port's 161
+  test("edit --set type=http on an snmp monitor resets its watcher values", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [snmpFixture(7, "s")] });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=http", "--set", "url=https://example.com"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "s")).toMatchObject({ type: "http", timeout: 48, port: 161 });
+  });
+
+  test("edit --set type=snmp keeps a custom timeout", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [{ ...http(7, "h"), timeout: 120 }],
+    });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "type=snmp",
+        "--set",
+        "hostname=rtr.example.com",
+        "--set",
+        "snmpOid=1.3.6.1.4.1.9.6.1.101",
+        "--set",
+        "jsonPath=$",
+        "--set",
+        "expectedValue=up",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "h")).toMatchObject({ type: "snmp", timeout: 120 });
+  });
+
+  test("edit --set type=snmp without an OID fails on the merged monitor", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [http(7, "h")] });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "type=snmp",
+        "--set",
+        "hostname=rtr.example.com",
+        "--set",
+        "jsonPath=$",
+        "--set",
+        "expectedValue=up",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("snmpOid must be a non-empty string");
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  // the watcher replaces another type's well-known port — dns's 53 — with
+  // the new type's own pick
+  test("edit --set type=snmp replaces a dns monitor's port 53 with 161", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [
+        {
+          ...http(7, "h"),
+          type: "dns",
+          url: null,
+          hostname: "dns.example.com",
+          port: 53,
+          dns_resolve_type: "A",
+        },
+      ],
+    });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "type=snmp",
+        "--set",
+        "snmpOid=1.3.6.1.4.1.9.6.1.101",
+        "--set",
+        "jsonPath=$",
+        "--set",
+        "expectedValue=up",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "h")).toMatchObject({
+      type: "snmp",
+      hostname: "dns.example.com",
+      port: 161,
+    });
+  });
+
+  test("edit --set type=snmp keeps a custom port", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [
+        { ...http(7, "h"), type: "port", url: null, hostname: "h.example.com", port: 8080 },
+      ],
+    });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "type=snmp",
+        "--set",
+        "snmpOid=1.3.6.1.4.1.9.6.1.101",
+        "--set",
+        "jsonPath=$",
+        "--set",
+        "expectedValue=up",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "h")).toMatchObject({ type: "snmp", port: 8080 });
+  });
+
+  // a stored 161 is the snmp default the CLI wrote, so it reads as "another
+  // type's default" to the watcher like upstream's own picks do
+  test("edit --set type=smtp turns the stored snmp port 161 into smtp's 25", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [snmpFixture(7, "s")] });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=smtp", "--set", "hostname=mail.example.com"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "s")).toMatchObject({ type: "smtp", port: 25 });
+  });
+
+  // no editMonitor reads snmpV3Username on any version — a set of it would
+  // silently do nothing, like `active`
+  test("edit --set snmpV3Username exits 2 before connecting", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [snmpFixture(7, "s")] });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "snmpV3Username=ops"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('cannot set "snmpV3Username"');
+    expect(r.stderr).toContain("editMonitor does not read it");
+    expect(k.calls).toHaveLength(0);
+  });
+
+  test("edit --config-file snmpV3Username exits 2 before connecting", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [snmpFixture(7, "s")] });
+    const f = join(sb.dir, "snmp.json");
+    writeFileSync(f, JSON.stringify({ snmpV3Username: "ops" }));
+    const r = await run(sb, ["monitors", "edit", "7", "--config-file", f], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('cannot set "snmpV3Username"');
+    expect(k.calls).toHaveLength(0);
+  });
+
+  // a v1/v2c monitor going v3 needs a username it can never get — the stored
+  // monitor would be dead and no edit could fix it
+  test("edit --set snmpVersion=3 on a v2c monitor exits 2", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [snmpFixture(7, "s")] });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "snmpVersion=3"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('cannot set snmpVersion "3" on a monitor that is not already v3');
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set snmpVersion=3 on a monitor already v3 is a no-op", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [snmpFixture(7, "s", { snmpVersion: "3", snmpV3Username: "ops" })],
+    });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "snmpVersion=3"], creds(k.url));
+    expect(r.code).toBe(0);
+    expect(stored(k, "s")).toMatchObject({ snmpVersion: "3" });
+  });
+
+  test("edit --set snmpVersion=2c on a v3 monitor stores the downgrade", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [snmpFixture(7, "s", { snmpVersion: "3", snmpV3Username: "ops" })],
+    });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "snmpVersion=2c"], creds(k.url));
+    expect(r.code).toBe(0);
+    expect(stored(k, "s")).toMatchObject({ snmpVersion: "2c" });
+  });
+
+  test("edit --set snmpVersion=bogus exits 2 before connecting", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [snmpFixture(7, "s")] });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "snmpVersion=bogus"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("snmpVersion must be one of 1, 2c, 3");
+    expect(k.calls).toHaveLength(0);
+  });
+
+  test("edit --set snmpOid on an snmp monitor stores it", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [snmpFixture(7, "s")] });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "snmpOid=1.3.6.1.2.1.1.1.0"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "s")).toMatchObject({ snmpOid: "1.3.6.1.2.1.1.1.0" });
+  });
+
+  test("edit --set snmpOid that splits the OID shape exits 2", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [snmpFixture(7, "s")] });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "snmpOid=abc"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("snmpOid must be an OID like");
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --json-path-operator on an snmp monitor stores it", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [snmpFixture(7, "s")] });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--json-path-operator", "contains"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "s")).toMatchObject({ jsonPathOperator: "contains" });
+  });
+
+  test("edit --set type=snmp exits 2 on a 1.x server before editMonitor", async () => {
+    const k = await useFake({ monitors: [http(7, "h")] });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "type=snmp"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('type "snmp" needs Uptime Kuma 2.x; the server reports 1.23.17');
+    expect(editCalls(k)).toHaveLength(0);
+  });
+});
+
 describe("monitor timing on Kuma 2.x", () => {
   test("edit of a 2.x ping to a short interval keeps its timeout (no 80% cap)", async () => {
     const k = await useFake({

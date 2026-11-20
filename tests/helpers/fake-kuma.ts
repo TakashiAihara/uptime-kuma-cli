@@ -404,11 +404,11 @@ const ADD_KEYS = new Set([
   "authWorkstation",
 ]);
 
-// The columns a 2.x `add` accepts: the 1.23 set plus the fields 2.5.11's
-// editMonitor reads (2.5.11/server/server.js editMonitor) — the same list as
-// MONITOR_2X_FIELDS in src/kuma.ts, kept as a literal copy for the same
-// reason. editMonitor copies a fixed field list and silently drops the rest,
-// which the fake approximates by storing the object whole.
+// The columns a 2.x `add` accepts: the 1.23 set plus the fields a 2.x `add`
+// persists or 2.5.11's editMonitor reads (2.5.11/server/server.js) — the
+// same list as MONITOR_2X_FIELDS in src/kuma.ts, kept as a literal copy for
+// the same reason. editMonitor copies a fixed field list and silently drops
+// the rest, which the fake approximates by storing the object whole.
 const ADD_KEYS_2X = new Set([
   ...ADD_KEYS,
   "bearer_token",
@@ -442,6 +442,7 @@ const ADD_KEYS_2X = new Set([
   "sftpPath",
   "smtpSecurity",
   "snmpOid",
+  "snmpV3Username",
   "snmpVersion",
   "sshAuthMethod",
   "sshPassphrase",

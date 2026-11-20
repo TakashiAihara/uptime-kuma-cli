@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { sandbox, type Sandbox } from "../helpers/run";
-import { cliRun, on2x, onNtp } from "./helpers";
+import { cliRun, on2x, onNtp, onSnmpV3 } from "./helpers";
 
 // Runs only when scripts/integration.ts provides UPTIME_KUMA_IT_*; a plain
 // `bun test` skips the whole file.
@@ -737,4 +737,149 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
     const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
     expect(del.code).toBe(0);
   }, 300_000);
+
+  test("snmp: 2.x stores the picker defaults and a down beat arrives; 1.x refuses the type", async () => {
+    const r = await cliRun(sb, [
+      "monitors",
+      "add",
+      "--type",
+      "snmp",
+      "--name",
+      "it-snmp",
+      "--hostname",
+      "127.0.0.1",
+      "--snmp-oid",
+      "1.3.6.1.2.1.1.1.0",
+      "--json-path",
+      "$",
+      "--expected-value",
+      "up",
+      "--interval",
+      "20",
+    ]);
+    if (!on2x) {
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain('type "snmp" needs Uptime Kuma 2.x');
+      return;
+    }
+    expect(r.code).toBe(0);
+    const id = r.json().id;
+
+    // no --port / --snmp-version: the watcher's picks are the stored defaults
+    const g = await cliRun(sb, ["monitors", "get", String(id)]);
+    expect(g.json()).toMatchObject({
+      type: "snmp",
+      hostname: "127.0.0.1",
+      port: 161,
+      timeout: 5,
+      snmpOid: "1.3.6.1.2.1.1.1.0",
+      snmpVersion: "2c",
+      jsonPath: "$",
+      expectedValue: "up",
+      jsonPathOperator: "==",
+    });
+
+    // nothing answers SNMP on the container's loopback — the session.get
+    // times out and the down beat proves the monitor runs
+    let down = false;
+    for (let i = 0; i < 12 && !down; i++) {
+      await new Promise((res) => setTimeout(res, 5_000));
+      const b = await cliRun(sb, ["beats", String(id), "--hours", "1"]);
+      expect(b.code).toBe(0);
+      down = b.json().some((beat: any) => beat.status === 0);
+    }
+    expect(down).toBe(true);
+
+    const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
+    expect(del.code).toBe(0);
+  }, 300_000);
+
+  // the snmp_v3_username column ships with snmp.js's v3 branch in 2.1.0: the
+  // field gate refuses the add below it, and editMonitor never reads the key
+  // on any release, so it can only be set on add
+  test("snmp v3: the username is add-only and gated at 2.1.0", async () => {
+    const v3args = [
+      "monitors",
+      "add",
+      "--type",
+      "snmp",
+      "--name",
+      "it-snmpv3",
+      "--hostname",
+      "127.0.0.1",
+      "--snmp-oid",
+      "1.3.6.1.2.1.1.1.0",
+      "--json-path",
+      "$",
+      "--expected-value",
+      "up",
+      "--snmp-version",
+      "3",
+      "--snmp-v3-username",
+      "ituser",
+      "--paused",
+    ];
+    const r = await cliRun(sb, v3args);
+    if (!on2x) {
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain('type "snmp" needs Uptime Kuma 2.x');
+      return;
+    }
+    if (!onSnmpV3) {
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain('"snmpV3Username" needs Uptime Kuma >= 2.1.0');
+      return;
+    }
+    expect(r.code).toBe(0);
+    const id = r.json().id;
+
+    const g = await cliRun(sb, ["monitors", "get", String(id)]);
+    expect(g.json()).toMatchObject({ type: "snmp", snmpVersion: "3", snmpV3Username: "ituser" });
+
+    // no release's editMonitor reads the column — a set of it exits 2
+    // instead of silently doing nothing, like `active`
+    const u = await cliRun(sb, ["monitors", "edit", String(id), "--set", "snmpV3Username=other"]);
+    expect(u.code).toBe(2);
+    expect(u.stderr).toContain('cannot set "snmpV3Username"');
+
+    // an unrelated edit keeps the stored username
+    const e = await cliRun(sb, ["monitors", "edit", String(id), "--set", "description=it"]);
+    expect(e.code).toBe(0);
+    const g2 = await cliRun(sb, ["monitors", "get", String(id)]);
+    expect(g2.json().snmpV3Username).toBe("ituser");
+
+    const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
+    expect(del.code).toBe(0);
+  }, 120_000);
+
+  test("snmp v3: a v2c monitor cannot become v3 on edit", async () => {
+    if (!onSnmpV3) return;
+    const a = await cliRun(sb, [
+      "monitors",
+      "add",
+      "--type",
+      "snmp",
+      "--name",
+      "it-snmpv2",
+      "--hostname",
+      "127.0.0.1",
+      "--snmp-oid",
+      "1.3.6.1.2.1.1.1.0",
+      "--json-path",
+      "$",
+      "--expected-value",
+      "up",
+      "--paused",
+    ]);
+    expect(a.code).toBe(0);
+    const id = a.json().id;
+
+    // the monitor would be dead without a username no edit could supply
+    const r = await cliRun(sb, ["monitors", "edit", String(id), "--set", "snmpVersion=3"]);
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('cannot set snmpVersion "3" on a monitor that is not already v3');
+
+    const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
+    expect(del.code).toBe(0);
+  }, 120_000);
 });

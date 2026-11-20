@@ -13,6 +13,13 @@ export const onNtp =
   parseMajorVersion(itVersion) > 2 ||
   (parseMajorVersion(itVersion) === 2 && parseMinorVersion(itVersion) >= 5);
 
+// snmp.js exists on every released 2.x, but its v3 branch and the
+// snmp_v3_username column first ship in 2.1.0 — a 2.0.x leg takes the
+// field-gate refusal for a v3 add.
+export const onSnmpV3 =
+  parseMajorVersion(itVersion) > 2 ||
+  (parseMajorVersion(itVersion) === 2 && parseMinorVersion(itVersion) >= 1);
+
 // Every CLI invocation logs in once (the integration admin has no 2FA) and
 // Kuma 1.23 allows 20 logins per minute for the whole instance, so
 // invocation starts are paced to stay under it.
