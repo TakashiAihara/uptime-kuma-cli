@@ -79,10 +79,6 @@ describe("monitors add on Kuma 2.x", () => {
       const m = stored(k, name);
       expect(m.conditions).toEqual([]);
       expect(m.rabbitmqNodes).toEqual([]);
-      // the UI's monitorDefaults carries the ntp thresholds for every type
-      expect(m.ntpStratumThreshold).toBe(5);
-      expect(m.ntpTimeOffsetThreshold).toBe(1000);
-      expect(m.ntpRootDispersionThreshold).toBe(500);
     }
   });
 
@@ -816,10 +812,6 @@ describe("ntp monitors", () => {
     expect(m.port).toBe(123);
     expect(m.interval).toBe(300);
     expect(m.retryInterval).toBe(300);
-    // and its monitorDefaults carries the thresholds
-    expect(m.ntpStratumThreshold).toBe(5);
-    expect(m.ntpTimeOffsetThreshold).toBe(1000);
-    expect(m.ntpRootDispersionThreshold).toBe(500);
   });
 
   test("add --type ntp --port and --interval override the defaults", async () => {
