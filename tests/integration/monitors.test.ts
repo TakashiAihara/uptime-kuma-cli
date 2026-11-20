@@ -562,7 +562,10 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
         expect(b.code).toBe(0);
         const beat = b
           .json()
-          .find((x: any) => x.time !== undefined && Date.parse(x.time) >= afterMs);
+          .find(
+            (x: any) =>
+              typeof x.time === "string" && Date.parse(`${x.time.replace(" ", "T")}Z`) >= afterMs,
+          );
         if (beat) return beat;
       }
       throw new Error("no fresh beat");
