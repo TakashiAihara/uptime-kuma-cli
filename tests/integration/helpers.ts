@@ -20,6 +20,12 @@ export const onSnmpV3 =
   parseMajorVersion(itVersion) > 2 ||
   (parseMajorVersion(itVersion) === 2 && parseMinorVersion(itVersion) >= 1);
 
+// websocket-upgrade.js and its ws_* columns first ship in 2.1.0 — 1.x and
+// 2.0.x legs take the type-gate refusal for any add or type change.
+export const onWsUpgrade =
+  parseMajorVersion(itVersion) > 2 ||
+  (parseMajorVersion(itVersion) === 2 && parseMinorVersion(itVersion) >= 1);
+
 // Every CLI invocation logs in once (the integration admin has no 2FA) and
 // Kuma 1.23 allows 20 logins per minute for the whole instance, so
 // invocation starts are paced to stay under it.

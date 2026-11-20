@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { sandbox, type Sandbox } from "../helpers/run";
-import { cliRun, on2x, onNtp, onSnmpV3 } from "./helpers";
+import { cliRun, on2x, onNtp, onSnmpV3, onWsUpgrade } from "./helpers";
 
 // Runs only when scripts/integration.ts provides UPTIME_KUMA_IT_*; a plain
 // `bun test` skips the whole file.
@@ -948,6 +948,60 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
     }
     expect(beat).toBeDefined();
     expect(beat.msg).not.toContain("SNMPv3 username is required");
+
+    const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
+    expect(del.code).toBe(0);
+  }, 300_000);
+
+  // websocket-upgrade.js and its ws_* columns first ship in 2.1.0 — the
+  // type gate names the real minimum on both older lines
+  test("websocket-upgrade: 2.1+ stores the ws fields and a down beat arrives; older servers refuse", async () => {
+    const r = await cliRun(sb, [
+      "monitors",
+      "add",
+      "--type",
+      "websocket-upgrade",
+      "--name",
+      "it-ws",
+      "--url",
+      "ws://127.0.0.1:1/socket",
+      "--set",
+      "wsSubprotocol=soap",
+      "--set",
+      "wsIgnoreSecWebsocketAcceptHeader=true",
+      "--interval",
+      "20",
+    ]);
+    if (!onWsUpgrade) {
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain('type "websocket-upgrade" needs Uptime Kuma >= 2.1.0');
+      return;
+    }
+    expect(r.code).toBe(0);
+    const id = r.json().id;
+
+    // the picker's picks are the stored defaults: close-code 1000 and the
+    // generic 48s timeout
+    const g = await cliRun(sb, ["monitors", "get", String(id)]);
+    expect(g.json()).toMatchObject({
+      type: "websocket-upgrade",
+      url: "ws://127.0.0.1:1/socket",
+      accepted_statuscodes: ["1000"],
+      wsSubprotocol: "soap",
+      wsIgnoreSecWebsocketAcceptHeader: true,
+      timeout: 48,
+    });
+
+    // nothing answers on port 1 — the socket fails to connect and the down
+    // beat proves the monitor runs
+    let down = false;
+    for (let i = 0; i < 12 && !down; i++) {
+      await new Promise((res) => setTimeout(res, 5_000));
+      const b = await cliRun(sb, ["beats", String(id), "--hours", "1"]);
+      expect(b.code).toBe(0);
+      down = b.json().some((beat: any) => beat.status === 0);
+    }
+    expect(down).toBe(true);
 
     const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
     expect(del.code).toBe(0);
