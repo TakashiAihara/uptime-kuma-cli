@@ -202,12 +202,14 @@ describe("install.sh", () => {
       // A mktemp that exits only when the test releases it keeps the shell inside
       // tmp=$(...) with the dir already visible, so the TERM lands in the window that
       // used to need scheduler luck. dash defers the trap to the end of the command,
-      // so the fixed script still exits 143 and cleans up.
+      // so the fixed script still exits 143 and cleans up. The hold loop is bounded:
+      // on a regression the parent dies at once and the orphaned shim must still
+      // exit on its own after sb.cleanup() removes the sandbox
       const hold = join(sb.dir, "hold-mktemp");
       rmSync(join(bin, "mktemp"));
       writeTool(
         "mktemp",
-        `${realMktemp} "$@" || exit\nwhile [ ! -f "${hold}" ]; do sleep 0.05; done`,
+        `${realMktemp} "$@" || exit\ni=0\nwhile [ ! -f "${hold}" ] && [ "$i" -lt 400 ]; do\n  i=$((i + 1))\n  sleep 0.05\ndone`,
       );
 
       const proc = Bun.spawn([dash, INSTALL_SH], {
