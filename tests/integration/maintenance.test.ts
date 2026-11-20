@@ -176,7 +176,7 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("maintenance (real Kuma)", () =
   );
 
   test.skipIf(!on2x)(
-    "2.x: a cron value croner rejects answers ok:false",
+    "2.x: a cron value croner rejects exits 2 before connecting",
     async () => {
       const f = join(sb.dir, "badnth.json");
       writeFileSync(f, JSON.stringify({ cron: "0 9 * * 5#9" }));
@@ -190,7 +190,8 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("maintenance (real Kuma)", () =
         "--config-file",
         f,
       ]);
-      expect(r.code).toBe(1);
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("in-range values and steps");
     },
     120_000,
   );

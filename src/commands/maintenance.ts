@@ -124,18 +124,17 @@ const isDayOfMonthList = (value: unknown): value is unknown[] =>
 // rejects a step over 31.
 const MAX_INTERVAL_DAY = 3650;
 
-// Shape check mirroring CronPattern.parse up to throwAtIllegalCharacters,
-// which is the same in croner 6.0.7 (Kuma 1.23) and 8.1.2 (Kuma 2.x) except
-// the day-of-week charset: a nickname expands first, the pattern splits on
-// whitespace into 5 or 6 parts (5 gets a leading seconds "0"), the first "L"
-// is stripped from day-of-month and day-of-week, month and day-of-week parts
-// of 3+ chars get the JAN-DEC / SUN-SAT names replaced, the first "?" of each
-// part becomes a number, and what remains may only contain [0-9*/,-] — plus
-// "#" and "L" in day-of-week on 2.x. Ranges and values are still croner's
-// job; Kuma 1.23.17 calls the async validateCron without await, so a bad
-// expression is stored anyway and the rejection goes unhandled — only the
-// shape is checked up front. On 2.x validateCron is synchronous, so a value
-// the shape check lets through is refused by the server instead.
+// Mirrors CronPattern.parse for croner 6.0.7 (Kuma 1.23) and 8.1.2 (Kuma
+// 2.x): the shape check up to throwAtIllegalCharacters, then partToArray's
+// numeric range and step checks. The majors differ in the day-of-week
+// charset (croner 8 also allows "#" and "L"), the day-of-week bitmap length
+// (8 on 6, 7 on 8), whether a day-of-week "L" is stripped or parsed, and
+// whether an empty comma entry or a day/month step start of 0 throws, so the
+// checks run per version. Kuma 1.23.17 calls the async validateCron without
+// await, so a bad expression is stored anyway and the rejection goes
+// unhandled — on 1.x only the CLI's check can refuse a bad pattern before it
+// is stored; on 2.x validateCron is synchronous, so the check also mirrors
+// what the server would refuse.
 const CRON_NICKNAMES = new Map([
   ["@yearly", "0 0 1 1 *"],
   ["@annually", "0 0 1 1 *"],
@@ -180,24 +179,84 @@ const alphaDays = (value: string): string =>
     .replace(/fri/gi, "5")
     .replace(/sat/gi, "6");
 
-function isCronExpression(value: string, kuma2: boolean): boolean {
+// croner 6.0.7 and 8.1.2
+type CronMajor = "6" | "8";
+
+// partToArray's per-field bounds: the config value range and the bitmap
+// length a step is capped by. day-of-week's bitmap is 8 on croner 6 (index 7
+// also means Sunday) and 7 on croner 8; the value range 0-7 is the same on
+// both, so only the step cap differs.
+const CRON_PART_LIMITS = [
+  { min: 0, max: 59, size: 60 }, // second
+  { min: 0, max: 59, size: 60 }, // minute
+  { min: 0, max: 23, size: 24 }, // hour
+  { min: 1, max: 31, size: 31 }, // day of month
+  { min: 1, max: 12, size: 12 }, // month
+  { min: 0, max: 7, size: 8 }, // day of week
+] as const;
+
+// croner substitutes "?" with the field's current value at run time, so a
+// part carrying one is only checkable when no possible current value makes
+// it unusable: substitute every value the clock can produce and run the
+// same per-entry verdict croner would. A "bad" entry on any current value
+// is refused outright — a form like "5-?" or "?-59" in seconds flips its
+// verdict with the clock, and so does a "?" inside a larger number, where
+// "?0/5" steps from 60 on most minutes. An all-dead field is refused only
+// where no rescue exists — seconds, minutes and hours gate the run on
+// their own, while a dead "?" in day-of-month, month or day-of-week goes
+// to the per-today checks below like any other dead entry. Day-of-week's
+// real top is 6 (getDay), though 7 stays a legal bound in the pattern.
+function questionOk(
+  part: string,
+  partIndex: number,
+  version: CronMajor,
+  lastDay: boolean,
+): boolean {
+  if (!part.includes("?")) return true;
+  const { min, max } = CRON_PART_LIMITS[partIndex]!;
+  const entries = part.split(",");
+  for (let c = min; c <= (partIndex === 5 ? 6 : max); c++) {
+    let live = false;
+    for (const entry of entries) {
+      const verdict = cronEntryOk(entry.replace("?", String(c)), partIndex, version, lastDay);
+      if (verdict === "bad") return false;
+      live ||= verdict === "live";
+    }
+    if (!live && partIndex !== 3 && partIndex !== 4 && partIndex !== 5) return false;
+  }
+  return true;
+}
+
+// parse's transforms up to throwAtIllegalCharacters: a nickname expands
+// first, the pattern splits on whitespace into 5 or 6 parts (5 gets a
+// leading seconds "0"), the first "L" is stripped from day-of-month, month
+// and day-of-week parts of 3+ chars get the JAN-DEC / SUN-SAT names
+// replaced, the first "?" of each part becomes a number, and what remains
+// may only contain [0-9*/,-] — plus "#" and "L" in day-of-week on croner 8.
+// Returns null where parse throws; an empty part is refused too since the
+// field stays all-zero and the window never runs (croner 8 throws anyway).
+// At most one "?" per part, as in croner.
+function cronParts(
+  value: string,
+  version: CronMajor,
+): { parts: string[]; lastDay: boolean; q: ReadonlyMap<number, string> } | null {
   let pattern = value;
   if (pattern.includes("@")) {
     pattern = (CRON_NICKNAMES.get(pattern.trim().toLowerCase()) ?? pattern).trim();
   }
   const fields = pattern.replace(/\s+/g, " ").split(" ");
-  if (fields.length !== 5 && fields.length !== 6) return false;
-  // an empty part or a bare day-of-week "L" would never schedule a run:
-  // croner 6.0.7 leaves the field all-zero so nextRun() is null, and
-  // croner 8.1.2 throws on both
-  if (fields.includes("")) return false;
+  if (fields.length !== 5 && fields.length !== 6) return null;
+  if (fields.includes("")) return null;
   const [second, minute, hour, day, month, dayOfWeek] = (
     fields.length === 5 ? ["0", ...fields] : fields
   ) as [string, string, string, string, string, string];
+  const lastDay = day.includes("L");
   const dom = day.replace("L", "");
-  const dow = dayOfWeek.replace("L", "");
-  if (dow === "") return false;
-  const parts = [
+  // croner 6 strips a day-of-week "L" and a bare one leaves a dead field —
+  // the joint dom/dow check below decides whether that is fatal; croner 8
+  // keeps it, where "5L" parses as 5 and a bare "L" throws on parseInt
+  const dow = version === "6" ? dayOfWeek.replace("L", "") : dayOfWeek;
+  const raw = [
     second,
     minute,
     hour,
@@ -205,10 +264,259 @@ function isCronExpression(value: string, kuma2: boolean): boolean {
     month.length >= 3 ? alphaMonths(month) : month,
     dow.length >= 3 ? alphaDays(dow) : dow,
   ];
-  // croner substitutes the first "?" of each part with a number; leftovers fail
-  return parts.every((part, i) =>
-    (i === 5 && kuma2 ? CRON_LEGAL_DOW_2X : CRON_LEGAL).test(part.replace("?", "0")),
+  const parts: string[] = [];
+  const q = new Map<number, string>();
+  for (const [i, part] of raw.entries()) {
+    if (part.includes("?")) {
+      if (part.indexOf("?", part.indexOf("?") + 1) !== -1) return null;
+      if (!questionOk(part, i, version, i === 3 && lastDay)) return null;
+      q.set(i, part);
+    }
+    parts.push(part.replace("?", String(CRON_PART_LIMITS[i]!.min)));
+  }
+  const ok = parts.every((part, i) =>
+    (i === 5 && version === "8" ? CRON_LEGAL_DOW_2X : CRON_LEGAL).test(part),
   );
+  return ok ? { parts, lastDay, q } : null;
+}
+
+// partToArray's reject rules for one comma-separated entry, applied per
+// croner major: "bad" is what croner throws on — an empty entry on 8
+// (unless the day-of-month part carried "L"), a step or range step over
+// the bitmap length, a step of 0, a range bound outside the value range
+// or a lower bound above the upper, and on 8 a step start under the
+// field minimum (setPart throws on the first hit); "dead" is legal but
+// contributes nothing — an empty entry on 6, or a step start that never
+// reaches the bitmap; "live" is everything else. croner 8's extractNth
+// allows "#" in day-of-week only, with an nth of 1-5 or "L".
+function cronEntryOk(
+  entry: string,
+  partIndex: number,
+  version: CronMajor,
+  lastDay: boolean,
+): "live" | "dead" | "bad" {
+  const { min, max, size } = CRON_PART_LIMITS[partIndex]!;
+  const fieldSize = partIndex === 5 && version === "8" ? 7 : size;
+  // an empty entry with the day-of-month "L" flag still schedules the last
+  // day of the month on both croners
+  if (entry === "") {
+    if (partIndex === 3 && lastDay) return "live";
+    return version === "6" ? "dead" : "bad";
+  }
+  if (entry === "*") return "live";
+
+  let rest = entry;
+  if (version === "8" && partIndex === 5 && rest.includes("#")) {
+    const seg = rest.split("#");
+    rest = seg[0]!;
+    // setNthWeekdayOfMonth takes "L" or a numeric 1-5 (so "05" counts); an
+    // empty nth falls back to the default "any occurrence" bitmask
+    const nth = seg[1]!;
+    if (nth !== "" && nth !== "L" && (!/^\d+$/.test(nth) || Number(nth) < 1 || Number(nth) > 5)) {
+      return "bad";
+    }
+  }
+  const num = (s: string): number => Number.parseInt(s, 10);
+  const inRange = (n: number) => n >= min && n <= max;
+
+  // partToArray picks the handler on the untouched conf — "-" inside a
+  // day-of-week "#" nth still routes into the range or stepping handler,
+  // where it breaks the rest-only parse the same way it breaks croner's
+  if (entry.includes("-") && entry.includes("/")) {
+    const m = /^(\d+)-(\d+)\/(\d+)$/.exec(rest);
+    if (m === null) return "bad";
+    const lower = num(m[1]!);
+    const upper = num(m[2]!);
+    const steps = num(m[3]!);
+    if (steps === 0 || steps > fieldSize || !inRange(lower) || lower > upper) return "bad";
+    // croner 8 only checks the values the steps land on — an upper bound
+    // past the end of the field is fine while no step reaches it; croner 6
+    // throws "Value out of range" on the bound itself
+    if (version === "8") {
+      return lower + Math.floor((upper - lower) / steps) * steps <= max ? "live" : "bad";
+    }
+    return inRange(upper) ? "live" : "bad";
+  }
+  if (entry.includes("-")) {
+    const seg = rest.split("-");
+    if (seg.length !== 2) return "bad";
+    const lower = num(seg[0]!);
+    const upper = num(seg[1]!);
+    return inRange(lower) && inRange(upper) && lower <= upper ? "live" : "bad";
+  }
+  if (entry.includes("/")) {
+    const seg = rest.split("/");
+    if (seg.length !== 2) return "bad";
+    const steps = num(seg[1]!);
+    if (Number.isNaN(steps) || steps === 0 || steps > fieldSize) return "bad";
+    if (seg[0] === "*") return "live";
+    // croner 6 iterates from the raw start, so any index below the bitmap
+    // length schedules and a start past it just goes dead; croner 8 offsets
+    // the start by the field's minimum — under it the first hit throws in
+    // setPart, past the bitmap it goes dead too
+    const start = num(seg[0]!);
+    if (version === "8") {
+      if (start < min) return "bad";
+      return start - min < fieldSize ? "live" : "dead";
+    }
+    return start >= 0 && start < fieldSize ? "live" : "dead";
+  }
+  return inRange(num(rest)) ? "live" : "bad";
+}
+
+const DAYS_IN_MONTH = [0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31] as const;
+
+// the values one entry lands on, for the day-of-month × month feasibility
+// check — parsed with the same rules that judge it in cronEntryOk, where a
+// bound's trailing characters are ignored the way both croners' parseInt
+// ignores them ("1-28*" enumerates 1-28), and anything outside [0-9*/,-]
+// shape never reaches here
+function entryValues(entry: string, partIndex: number, version: CronMajor): Set<number> {
+  const { min, max, size } = CRON_PART_LIMITS[partIndex]!;
+  const hits = new Set<number>();
+  if (entry === "*") {
+    for (let v = min; v <= max; v++) hits.add(v);
+    return hits;
+  }
+  const num = (s: string): number => Number.parseInt(s, 10);
+
+  if (entry.includes("-") && entry.includes("/")) {
+    const m = /^(\d+)-(\d+)\/(\d+)$/.exec(entry);
+    if (m === null) return hits;
+    for (let v = num(m[1]!); v <= num(m[2]!); v += num(m[3]!)) hits.add(v);
+    return hits;
+  }
+  if (entry.includes("-")) {
+    const seg = entry.split("-");
+    if (seg.length !== 2) return hits;
+    const lower = num(seg[0]!);
+    const upper = num(seg[1]!);
+    if (Number.isNaN(lower) || Number.isNaN(upper) || lower > upper) return hits;
+    for (let v = lower; v <= upper; v++) hits.add(v);
+    return hits;
+  }
+  if (entry.includes("/")) {
+    const seg = entry.split("/");
+    if (seg.length !== 2) return hits;
+    const steps = num(seg[1]!);
+    if (Number.isNaN(steps) || steps === 0) return hits;
+    // x/N lands on x + k·N — croner 6 walks raw bitmap indexes so index i is
+    // value i + min ("*" starts at index 0), while croner 8 offsets the start
+    // by the minimum. A dead start contributes nothing on either
+    if (version === "6") {
+      for (let i = seg[0] === "*" ? 0 : num(seg[0]!); i < size; i += steps) {
+        hits.add(i + min);
+      }
+      return hits;
+    }
+    for (let v = seg[0] === "*" ? min : num(seg[0]!); v < min + size; v += steps) {
+      if (v >= min) hits.add(v);
+    }
+    return hits;
+  }
+  const v = num(entry);
+  if (!Number.isNaN(v)) hits.add(v);
+  return hits;
+}
+
+// "either" is the pre-connect union — refuse only what both croners refuse,
+// so a 1.x server never stores what its unawaited validateCron would throw
+// on, while 2.x-only forms still reach a 2.x server. Within a field a
+// croner-legal entry that contributes no values is only refused when every
+// entry is dead like that — an all-zero field never runs, and an all-zero
+// month loops nextRun() forever — while a dead sibling next to a live one
+// still schedules on the server. The two date fields decide jointly under
+// croner's OR matching: a restricted day-of-week rescues a dead
+// day-of-month and vice versa, and when day-of-week cannot rescue, the
+// day-of-month × month pair must still name a real date.
+function isCronExpression(value: string, version: CronMajor | "either"): boolean {
+  if (version === "either") {
+    return isCronExpression(value, "6") || isCronExpression(value, "8");
+  }
+  const shape = cronParts(value, version);
+  if (shape === null) return false;
+  const dead = new Set<number>();
+  for (const [i, part] of shape.parts.entries()) {
+    let live = false;
+    for (const entry of part.split(",")) {
+      const verdict = cronEntryOk(entry, i, version, shape.lastDay);
+      if (verdict === "bad") return false;
+      live ||= verdict === "live";
+    }
+    if (!live) dead.add(i);
+  }
+  // seconds, minutes, hours and month each gate the run on their own
+  if (dead.has(0) || dead.has(1) || dead.has(2) || dead.has(4)) return false;
+  const domDead = dead.has(3);
+  const dowDead = dead.has(5);
+  const domStar = shape.parts[3] === "*";
+  const dowStar = shape.parts[5] === "*";
+  // a "?" in a date field re-substitutes the field's current value on every
+  // parse, so the per-today hits are what the schedule really contains
+  const hits = (i: number, c: number | null): number[] => {
+    const raw = c === null ? shape.parts[i]! : shape.q.get(i)!;
+    const values = new Set<number>();
+    for (const entry of raw.split(",")) {
+      const sub = c === null ? entry : entry.replace("?", String(c));
+      for (const v of entryValues(sub, i, version)) values.add(v);
+    }
+    return [...values];
+  };
+  // a "?" month that goes empty on some current month (a croner-6 "?/N"
+  // past the bitmap in December) would hang nextRun() outright
+  if (shape.q.has(4)) {
+    for (let m0 = 1; m0 <= 12; m0++) {
+      if (hits(4, m0).length === 0) return false;
+    }
+  }
+  // a "?" in day-of-week can die on some clock values too — "?0/5" stays
+  // live only on the zeroth weekday — and on those todays the field acts
+  // like a static dead one, judged by the same joint rule
+  const dowQDead =
+    shape.q.has(5) &&
+    [0, 1, 2, 3, 4, 5, 6].some(
+      (c) =>
+        !shape.q
+          .get(5)!
+          .split(",")
+          .some(
+            (entry) => cronEntryOk(entry.replace("?", String(c)), 5, version, false) === "live",
+          ),
+    );
+  // "*" hands the date decision to the other field; a restricted live one
+  // joins it through OR matching, so a dead date field is only fatal when
+  // the other side is dead or unrestricted
+  if ((domDead && dowStar) || ((dowDead || dowQDead) && (domDead || domStar))) return false;
+  if (!shape.lastDay && !domStar && (dowStar || dowDead || dowQDead)) {
+    // every possible today must still leave a real date — and both fields
+    // take the same today, so impossible today-pairs do not apply
+    const domHits = hits(3, null);
+    const monthHits = hits(4, null);
+    const fits = (d: number | null, m: number | null): boolean =>
+      (m === null ? monthHits : hits(4, m)).some((mo) =>
+        (d === null ? domHits : hits(3, d)).some((dd) => dd <= DAYS_IN_MONTH[mo]!),
+      );
+    const qDom = shape.q.has(3);
+    const qMonth = shape.q.has(4);
+    if (qDom && qMonth) {
+      for (let m0 = 1; m0 <= 12; m0++) {
+        for (let d0 = 1; d0 <= DAYS_IN_MONTH[m0]!; d0++) {
+          if (!fits(d0, m0)) return false;
+        }
+      }
+    } else if (qDom) {
+      for (let d0 = 1; d0 <= 31; d0++) {
+        if (!fits(d0, null)) return false;
+      }
+    } else if (qMonth) {
+      for (let m0 = 1; m0 <= 12; m0++) {
+        if (!fits(null, m0)) return false;
+      }
+    } else if (!fits(null, null)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 // Maintenance.jsonToBean writes title, description, strategy, intervalDay,
@@ -227,7 +535,12 @@ function isCronExpression(value: string, kuma2: boolean): boolean {
 // scoping monitors edit uses for its touched/typeChanged rule.
 function validateMaintenance(
   m: Record<string, unknown>,
-  opts: { full: boolean; touched?: ReadonlySet<string>; edit?: boolean; kuma2: boolean },
+  opts: {
+    full: boolean;
+    touched?: ReadonlySet<string>;
+    edit?: boolean;
+    kuma2: boolean | "unknown";
+  },
 ): void {
   const need = (key: string) => opts.full || opts.touched?.has(key) === true;
   if (!Array.isArray(m.dateRange)) fail(2, "dateRange must be an array");
@@ -268,7 +581,7 @@ function validateMaintenance(
     // the UI's 3650. The other strategies only store it, so null stays
     // acceptable there
     const required = strategy === "recurring-interval";
-    const cap = required && !opts.kuma2 ? 31 : MAX_INTERVAL_DAY;
+    const cap = required && opts.kuma2 === false ? 31 : MAX_INTERVAL_DAY;
     const v = m.intervalDay;
     const ok = required
       ? isPosInt(v) && v <= cap
@@ -299,8 +612,12 @@ function validateMaintenance(
       if (typeof cron !== "string" || cron === "") {
         fail(2, 'strategy "cron" requires a non-empty "cron" expression');
       }
-      if (!isCronExpression(cron, opts.kuma2)) {
-        fail(2, 'strategy "cron" requires "cron" as 5 or 6 whitespace-separated cron fields');
+      const cronVersion = opts.kuma2 === "unknown" ? "either" : opts.kuma2 ? "8" : "6";
+      if (!isCronExpression(cron, cronVersion)) {
+        fail(
+          2,
+          'strategy "cron" requires "cron" as 5 or 6 whitespace-separated cron fields with in-range values and steps',
+        );
       }
     }
     if (need("durationMinutes") && !isPosInt(m.durationMinutes)) {
@@ -356,7 +673,7 @@ function validateMaintenance(
   // strategies may carry a start but never an end on 1.x; 2.x's inferDuration
   // falls back to duration * 1000, so the end date is valid there.
   if (
-    !opts.kuma2 &&
+    opts.kuma2 === false &&
     strategy !== undefined &&
     (strategy === "cron" || strategy.startsWith("recurring-")) &&
     need("dateRange")
@@ -380,7 +697,7 @@ function validateMaintenance(
   // whenever dateRange is judged; on 1.x the refusal above already rejects
   // any end, so only the 2.x path needs it.
   if (
-    opts.kuma2 &&
+    opts.kuma2 !== false &&
     strategy !== undefined &&
     (strategy === "cron" || strategy.startsWith("recurring-")) &&
     need("dateRange")
@@ -621,10 +938,11 @@ export function registerMaintenance(program: Command): void {
         fail(2, "--start and --end do not apply to --strategy manual");
       }
       // Before connecting the version is unknown, so the check applies the
-      // union of both versions' rules — which is the 2.x set: every value 1.x
-      // accepts, 2.x accepts too. Once connected the same check runs again
-      // under the server's own version, adding the 1.x restrictions back.
-      validateMaintenance(payload, { full: true, kuma2: true });
+      // union of both versions' rules — the 2.x set for the non-cron fields
+      // and either croner's grammar for cron, whose accepted forms differ.
+      // Once connected the same check runs again under the server's own
+      // version, adding the other version's restrictions back.
+      validateMaintenance(payload, { full: true, kuma2: "unknown" });
       const s = await connect(["maintenanceList"]);
       validateMaintenance(payload, { full: true, kuma2: s.majorVersion >= 2 });
       const existing = s.maintenances().find((m) => m.title === payload.title);
@@ -669,6 +987,23 @@ export function registerMaintenance(program: Command): void {
         ) {
           fail(2, `unknown maintenance strategy "${String(candidate)}"`);
         }
+      }
+      // a cron given outright is refused on the union before connecting,
+      // like add, unless this edit also names a non-cron strategy where it
+      // is inert; non-string values are left for the post-fetch check,
+      // which knows the merged strategy. --set wins over --config-file, so
+      // a bad file value a --set replaces is not judged
+      const preStrategy = "strategy" in sets ? sets.strategy : fileConfig.strategy;
+      const preCron = "cron" in sets ? sets.cron : fileConfig.cron;
+      if (
+        typeof preCron === "string" &&
+        (preStrategy === undefined || String(preStrategy) === "cron") &&
+        !isCronExpression(preCron, "either")
+      ) {
+        fail(
+          2,
+          '"cron" must be 5 or 6 whitespace-separated cron fields with in-range values and steps',
+        );
       }
       const hasChange =
         opts.title !== undefined ||
