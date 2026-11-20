@@ -1829,7 +1829,12 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
             : sorted.filter((i) => (i.createdDate ?? "") < cursor);
         const rows = after.slice(0, 10);
         const last = rows[rows.length - 1];
-        const remaining = last === undefined ? 0 : after.length - rows.length;
+        // upstream counts created_date < last.created_date — rows sharing the
+        // cursor's timestamp never come back, so they are not "more"
+        const remaining =
+          last === undefined
+            ? 0
+            : after.filter((i) => (i.createdDate ?? "") < (last.createdDate ?? "")).length;
         return {
           ok: true,
           incidents: rows.map(incidentJSON),
