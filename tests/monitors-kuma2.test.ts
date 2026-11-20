@@ -3523,6 +3523,51 @@ describe("oracledb monitors", () => {
     expect(stored(k, "ora1").basic_auth_pass).toBe("ora-pw");
     expect(stored(k, "ora1").basic_auth_user).toBe("scott");
   });
+
+  // the picker's watcher resets conditions on every type change — a carried
+  // list would name another type's variables and throw at every check
+  test("edit type change into oracledb clears stored conditions", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [
+        http(7, "ora1", {
+          type: "dns",
+          conditions: [{ variable: "record", operator: "==", value: "x" }],
+        }),
+      ],
+    });
+    const f = oraFile({ basic_auth_user: "scott" });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=oracledb", "--config-file", f],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = editCalls(k)[0]!.args[0] as Record<string, unknown>;
+    expect(sent.conditions).toEqual([]);
+  });
+
+  test("edit type change keeps a conditions list the same edit sets", async () => {
+    const conditions = [{ variable: "result", operator: "==", value: "1" }];
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [
+        http(7, "ora1", {
+          type: "dns",
+          conditions: [{ variable: "record", operator: "==", value: "x" }],
+        }),
+      ],
+    });
+    const f = oraFile({ basic_auth_user: "scott", conditions });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=oracledb", "--config-file", f],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = editCalls(k)[0]!.args[0] as Record<string, unknown>;
+    expect(sent.conditions).toEqual(conditions);
+  });
 });
 
 describe("monitor timing on Kuma 2.x", () => {

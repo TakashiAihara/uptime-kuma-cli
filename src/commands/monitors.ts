@@ -1513,7 +1513,7 @@ export function registerMonitors(program: Command): void {
     .option("--radius-username <username>", "radius username (radius type)")
     .option("--radius-called-station-id <id>", "radius called station id (radius type)")
     .option("--radius-calling-station-id <id>", "radius calling station id (radius type)")
-    .option("--database-query <sql>", "SQL query (sqlserver, postgres, mysql types)")
+    .option("--database-query <sql>", "SQL query (sqlserver, postgres, mysql, oracledb types)")
     .option("--snmp-oid <oid>", "SNMP OID to query (snmp type)")
     .addOption(
       new Option("--snmp-version <version>", "SNMP version (snmp type)").choices([
@@ -2250,6 +2250,12 @@ export function registerMonitors(program: Command): void {
               monitor.accepted_statuscodes = HTTP_STATUS_DEFAULT;
             }
           }
+          // The watcher's last act resets conditions on every type change
+          // (EditMonitor.vue:3910-3913 — "condition variables likely
+          // change"): a dns monitor's `record` condition evaluated on
+          // oracledb's context would throw "Variable missing in context"
+          // every check. An explicit conditions list wins like everywhere.
+          if (!touched.has("conditions")) monitor.conditions = [];
         }
       }
       // The UI's interval watcher moves retryInterval only while the two
