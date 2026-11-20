@@ -1254,6 +1254,337 @@ describe("ntp monitors", () => {
   });
 });
 
+describe("smtp monitors", () => {
+  test("add --type smtp stores an smtp monitor with the check's port default on 2.x", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "smtp", "--name", "s1", "--hostname", "mail.example.com"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const m = stored(k, "s1");
+    expect(m.type).toBe("smtp");
+    expect(m.hostname).toBe("mail.example.com");
+    // the picker leaves the port blank but check() runs `port || 25`
+    expect(m.port).toBe(25);
+    // monitorDefaults has no smtpSecurity, so an add sends none — the
+    // column's null default is "unset" (plain SMTP, opportunistic STARTTLS)
+    expect(m).not.toHaveProperty("smtpSecurity");
+  });
+
+  test("add --type smtp --port overrides the check's default", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "smtp",
+        "--name",
+        "s1",
+        "--hostname",
+        "mail.example.com",
+        "--port",
+        "587",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "s1")).toMatchObject({ port: 587 });
+  });
+
+  test("add --type smtp --set smtpSecurity stores it", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "smtp",
+        "--name",
+        "s1",
+        "--hostname",
+        "mail.example.com",
+        "--set",
+        "smtpSecurity=starttls",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "s1")).toMatchObject({ smtpSecurity: "starttls" });
+  });
+
+  test("add --type smtp --set smtpSecurity=null stores the explicit unset", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "smtp",
+        "--name",
+        "s1",
+        "--hostname",
+        "mail.example.com",
+        "--set",
+        "smtpSecurity=null",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "s1")).toMatchObject({ smtpSecurity: null });
+  });
+
+  test("add --type smtp --config-file stores smtpSecurity", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const f = join(sb.dir, "smtp.json");
+    writeFileSync(f, JSON.stringify({ smtpSecurity: "secure" }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "smtp",
+        "--name",
+        "s1",
+        "--hostname",
+        "mail.example.com",
+        "--config-file",
+        f,
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "s1")).toMatchObject({ smtpSecurity: "secure" });
+  });
+
+  test("add --type smtp without --hostname exits 2 before connecting", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(sb, ["monitors", "add", "--type", "smtp", "--name", "s1"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--type smtp requires --hostname");
+    expect(k.calls).toHaveLength(0);
+  });
+
+  test.each([
+    ['smtpSecurity="tls"', "smtpSecurity must be one of secure, starttls, nostarttls, or null"],
+    ["smtpSecurity=0", "smtpSecurity must be one of secure, starttls, nostarttls, or null"],
+    ["smtpSecurity=true", "smtpSecurity must be one of secure, starttls, nostarttls, or null"],
+  ])("add --type smtp --set %s exits 2 before connecting", async (set, msg) => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "smtp", "--name", "s1", "--hostname", "h", "--set", set],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(msg);
+    expect(k.calls).toHaveLength(0);
+  });
+
+  test("add --type smtp --config-file with a bad smtpSecurity exits 2 before connecting", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const f = join(sb.dir, "smtp.json");
+    writeFileSync(f, JSON.stringify({ smtpSecurity: "tls" }));
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "smtp", "--name", "s1", "--hostname", "h", "--config-file", f],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("smtpSecurity must be one of secure, starttls, nostarttls, or null");
+    expect(k.calls).toHaveLength(0);
+  });
+
+  test("add --type smtp exits 2 on a 1.x server after connect", async () => {
+    const k = await useFake();
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "smtp", "--name", "s1", "--hostname", "h"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('type "smtp" needs Uptime Kuma 2.x; the server reports 1.23.17');
+    expect(k.calls.filter((c) => c.event === "add")).toHaveLength(0);
+  });
+
+  test("add --type smtp names the assumed 1.x when no version arrives", async () => {
+    const k = await useFake({ info: null });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "smtp", "--name", "s1", "--hostname", "h"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('type "smtp" needs Uptime Kuma 2.x; the server sent no version');
+  });
+
+  test("edit --set type=smtp on an http monitor needs hostname on the merged monitor", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [http(7, "h")] });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "type=smtp"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("hostname must be a non-empty string");
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  // the UI's watcher leaves the port blank for smtp; the CLI fills the
+  // check's `port || 25` instead, so an http monitor needs only hostname
+  test("edit --set type=smtp fills the check's port default on 2.x", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [http(7, "h")] });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=smtp", "--set", "hostname=mail.example.com"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "h")).toMatchObject({
+      type: "smtp",
+      hostname: "mail.example.com",
+      port: 25,
+    });
+  });
+
+  // the watcher replaces another type's well-known port, not a custom one —
+  // and smtp has no interval pick, so the stored interval is untouched
+  test("edit --set type=smtp replaces a dns monitor's port 53 but keeps its interval", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [
+        {
+          ...http(7, "h"),
+          type: "dns",
+          url: null,
+          hostname: "dns.example.com",
+          port: 53,
+          dns_resolve_type: "A",
+        },
+      ],
+    });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=smtp", "--set", "hostname=mail.example.com"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "h")).toMatchObject({
+      type: "smtp",
+      hostname: "mail.example.com",
+      port: 25,
+      interval: 60,
+    });
+  });
+
+  test("edit --set type=smtp keeps a custom port", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [
+        { ...http(7, "h"), type: "port", url: null, hostname: "h.example.com", port: 8080 },
+      ],
+    });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=smtp", "--set", "hostname=mail.example.com"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "h")).toMatchObject({
+      type: "smtp",
+      hostname: "mail.example.com",
+      port: 8080,
+    });
+  });
+
+  test("edit --set type=smtp keeps the port the edit sets", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [http(7, "h")] });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "type=smtp",
+        "--set",
+        "hostname=mail.example.com",
+        "--set",
+        "port=465",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "h")).toMatchObject({
+      type: "smtp",
+      hostname: "mail.example.com",
+      port: 465,
+    });
+  });
+
+  test("edit --set type=smtp exits 2 on a 1.x server before editMonitor", async () => {
+    const k = await useFake({ monitors: [http(7, "h")] });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "type=smtp"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('type "smtp" needs Uptime Kuma 2.x; the server reports 1.23.17');
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set smtpSecurity exits 2 on a 1.x server", async () => {
+    const k = await useFake({ monitors: [http(7, "h")] });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "smtpSecurity=secure"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('"smtpSecurity" needs Uptime Kuma 2.x');
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  // toJSON emits smtpSecurity, so the fetched monitor carries it back — an
+  // edit that does not touch it keeps the stored value
+  test("edit without smtpSecurity keeps the stored one", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [
+        {
+          ...http(7, "s"),
+          type: "smtp",
+          url: null,
+          hostname: "mail.example.com",
+          port: 25,
+          smtpSecurity: "secure",
+        },
+      ],
+    });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", 'name="s2"'], creds(k.url));
+    expect(r.code).toBe(0);
+    expect(stored(k, "s2")).toMatchObject({ smtpSecurity: "secure" });
+  });
+
+  test("edit --set smtpSecurity=bogus exits 2 before editMonitor", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [
+        {
+          ...http(7, "s"),
+          type: "smtp",
+          url: null,
+          hostname: "mail.example.com",
+          port: 25,
+        },
+      ],
+    });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "smtpSecurity=bogus"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("smtpSecurity must be one of secure, starttls, nostarttls, or null");
+    expect(editCalls(k)).toHaveLength(0);
+  });
+});
+
 describe("monitor timing on Kuma 2.x", () => {
   test("edit of a 2.x ping to a short interval keeps its timeout (no 80% cap)", async () => {
     const k = await useFake({
