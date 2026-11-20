@@ -195,36 +195,25 @@ const CRON_PART_LIMITS = [
   { min: 0, max: 7, size: 8 }, // day of week
 ] as const;
 
-// croner substitutes "?" with the field's current value at run time, so a
-// compound entry is only checkable where no possible value makes the field
-// unusable: a whole "?" entry; a step value ("5/?") on day-of-month or
-// month only, where the current value can never be 0 so the step stays in
-// 1..size; a step start ("?/5") — croner 8 always lands in-range and on
-// croner 6 a 31st or December "?" in day-of-month or month merely goes
-// dead, which the per-today checks below judge like any other dead entry;
-// a day-of-week "?L" or "?#n" (the rest side always parses); and a range
-// bound pinned to the field's end ("min-?" or "?-max", with or without a
-// step), since the current value never crosses it — day-of-week's real
-// top is 6 (getDay), though 7 stays a legal bound. Anywhere else "?" flips
-// the verdict with the clock.
+// croner substitutes "?" with the field's current value at run time, so an
+// entry carrying one is only checkable when no possible current value
+// makes it unusable: substitute every value the clock can produce and run
+// the same per-entry verdict croner would. "bad" is refused outright —
+// a form like "5-?" or "?-59" in seconds flips its verdict with the
+// clock. "dead" needs no verdict of its own: outside day-of-month and
+// month the current value always stays under the bitmap so a step start
+// can never go dead, and inside them the per-today checks below judge it
+// like any other dead entry. Day-of-week's real top is 6 (getDay), though
+// 7 stays a legal bound in the pattern.
 function questionOk(entry: string, partIndex: number, version: CronMajor): boolean {
   if (!entry.includes("?")) return true;
   const { min, max } = CRON_PART_LIMITS[partIndex]!;
-  let rest = entry;
-  if (version === "8" && partIndex === 5) rest = entry.split("#")[0]!;
-  const lowerQ = /^(\d+)-\?(?:\/\d+)?$/.exec(rest);
-  if (lowerQ !== null) return Number(lowerQ[1]) === min;
-  const upperQ = /^\?-(\d+)(?:\/\d+)?$/.exec(rest);
-  if (upperQ !== null) {
-    const bound = Number(upperQ[1]);
-    return bound <= max && bound >= (partIndex === 5 ? 6 : max);
+  for (let c = min; c <= (partIndex === 5 ? 6 : max); c++) {
+    if (cronEntryOk(entry.replace("?", String(c)), partIndex, version, false) === "bad") {
+      return false;
+    }
   }
-  return (
-    rest === "?" ||
-    rest === "?L" ||
-    /^\?\/\d+$/.test(rest) ||
-    ((partIndex === 3 || partIndex === 4) && rest.endsWith("/?"))
-  );
+  return true;
 }
 
 // parse's transforms up to throwAtIllegalCharacters: a nickname expands

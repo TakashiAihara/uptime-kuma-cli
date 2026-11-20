@@ -1708,6 +1708,7 @@ describe("maintenance", () => {
       "0 0 ?/31 2 *",
       "0 0 ?/5 2 *",
       "0 0 31/? 2,? *",
+      "0 0 ?-31* 2 *",
       "0 0 1-28/2*3 2 *",
       "0 0 1-2/3* 2 *",
       "0 0 *1-5 2 *",
@@ -1787,6 +1788,17 @@ describe("maintenance", () => {
       "0 0 5*3 2 *",
       "0 0 5/2*3 2 *",
       "0 0 */5* 2 *",
+      "0 0 ?* * *",
+      "0 0 * ?* *",
+      "0 0 * * ?*",
+      "?* 0 0 * * *",
+      "0-?* 9 * * *",
+      "?/5* 0 0 * * *",
+      "0 0 */?* * *",
+      "0 0 1-5*? * *",
+      "0 0 ?*1 * *",
+      "0 0 5*? 2 *",
+      "0 0 ?-31* * *",
     ])("a boundary cron %p is accepted", async (cron) => {
       const f = writeJson("bounds.json", { cron });
       const r = await run(
@@ -1829,6 +1841,7 @@ describe("maintenance", () => {
       "0 0 ?/18 * *",
       "0 0 * ?/5 *",
       "0 0 5 ?/5 *",
+      "0 0 ?/5* * *",
     ])("a croner 8-only value %p exits 2 once the 1.x version is known", async (cron) => {
       const f = writeJson("cron8value-on-1x.json", { cron });
       const r = await run(
