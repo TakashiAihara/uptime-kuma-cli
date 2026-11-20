@@ -208,6 +208,14 @@ type MonitorStatEvents = {
 // Grace after the pushed lists for the versioned `info` (connect() below).
 const INFO_GRACE_MS = 500;
 
+// 2.x answers login failures with i18n keys (msgi18n: true) where 1.x sent
+// English; the known keys map back to the 1.x texts so the printed failure
+// reads the same on both versions.
+const LOGIN_MSG_I18N: Record<string, string> = {
+  authIncorrectCreds: "Incorrect username or password.",
+  authInvalidToken: "Invalid Token!",
+};
+
 let currentSocket: Socket | undefined;
 
 // The socket would otherwise keep the process alive after the command finished.
@@ -503,10 +511,11 @@ export function parsePatchVersion(version: string | undefined): number {
 // name the further pushed lists they read through extraLists:
 // maintenanceList for the maintenance commands, statusPageList for
 // `maintenance status-pages`, every `status-pages` command and `settings set`
-// when its `entryPage` override names a status page — statusPageList arrives
-// ~500ms later (afterLogin sleeps first), so waiting for it unconditionally
-// would add that latency to every command — and apiKeyList for the api-keys
-// commands that check or print it.
+// when its `entryPage` override names a status page — on 1.x statusPageList
+// arrives ~500ms later (afterLogin sleeps first; on 2.x it is pushed before
+// the login ack with the rest), so waiting for it unconditionally would add
+// that latency to every command — and apiKeyList for the api-keys commands
+// that check or print it.
 export async function connect(
   extraLists: readonly ("maintenanceList" | "statusPageList" | "apiKeyList")[] = [],
 ): Promise<KumaSession> {
@@ -718,7 +727,9 @@ export async function connect(
   }
   if (login?.ok !== true) {
     const msg = typeof login?.msg === "string" ? login.msg : "login failed";
-    fail(2, msg);
+    // hasOwn, not []: a wire-controlled msg like "toString" would resolve
+    // a prototype member and print it
+    fail(2, Object.hasOwn(LOGIN_MSG_I18N, msg) ? LOGIN_MSG_I18N[msg] : msg);
   }
 
   const wanted = new Set<keyof typeof pushed>([
