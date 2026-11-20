@@ -2328,7 +2328,7 @@ describe("monitors add", () => {
       creds(kuma.url),
     );
     expect(r.code).toBe(2);
-    expect(r.stderr).toContain('"sshPassword" needs Uptime Kuma 2.x');
+    expect(r.stderr).toContain('"sshPassword" needs Uptime Kuma >= 2.5.4');
     expect(r.stderr).toContain("1.23.17");
     expect(addCalls()).toHaveLength(0);
   });

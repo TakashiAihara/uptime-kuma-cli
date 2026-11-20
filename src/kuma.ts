@@ -276,6 +276,10 @@ export class KumaSession {
     return parseMinorVersion(this.serverVersion);
   }
 
+  get patchVersion(): number {
+    return parsePatchVersion(this.serverVersion);
+  }
+
   // ok:false is Kuma answering no (exit 1); a missing callback is a timeout (exit 2).
   // timeoutMs overrides the session default for requests like shrinkDatabase
   // whose server-side work can outlast it.
@@ -479,6 +483,14 @@ export function parseMajorVersion(version: string | undefined): number {
 // missing value can fall back to 0 because the major check refuses first.
 export function parseMinorVersion(version: string | undefined): number {
   const match = version === undefined ? null : /^\d+\.(\d+)\.\d+/.exec(version);
+  return match === null ? 0 : Number(match[1]);
+}
+
+// Same shape as the minor: the patch only reaches a comparison after the
+// major.minor matched the gate's minimum — an unparseable or missing value
+// can fall back to 0 because the earlier checks refuse first.
+export function parsePatchVersion(version: string | undefined): number {
+  const match = version === undefined ? null : /^\d+\.\d+\.(\d+)/.exec(version);
   return match === null ? 0 : Number(match[1]);
 }
 

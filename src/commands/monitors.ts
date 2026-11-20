@@ -63,21 +63,52 @@ const MONITOR_2X_TYPES = ["manual", "ntp", "smtp"] as const;
 // server/monitor-types/ntp.js first ships in 2.5.0 (upstream #7214), so the
 // major gate alone would let a 2.0-2.4 server store an ntp row whose checks
 // all throw "Unknown Monitor Type" — the failure the type gate exists to
-// prevent. Entries are the first release carrying the type's monitor-types
-// file as [major, minor]; a type absent from the map shipped with 2.0.0
-// (manual in beta.4, smtp in beta.3) and needs only major 2.
-const KUMA2_TYPE_MIN_VERSION: Record<string, readonly [number, number]> = { ntp: [2, 5] };
+// prevent. A type absent from the map shipped with 2.0.0 (manual in beta.4,
+// smtp in beta.3) and needs only major 2.
 
-// The ntp_*_threshold columns and ntp.js share upstream commit 73f199f4
-// (first released 2.5.0), so on 2.0-2.4 `editMonitor` silently drops a set
-// ntp*Threshold key while answering ok — the same drop the field gate
-// refuses on 1.x. Entries are the first release carrying the column as
-// [major, minor]; a field absent from the map shipped with 2.0.0
-// (manual_status in beta.4, smtpSecurity in beta.3) and needs only major 2.
-const KUMA2_FIELD_MIN_VERSION: Record<string, readonly [number, number]> = {
-  ntpStratumThreshold: [2, 5],
-  ntpTimeOffsetThreshold: [2, 5],
-  ntpRootDispersionThreshold: [2, 5],
+// The first release a gated thing needs, as [major, minor, patch] — most
+// entries land on x.y.0, but ssh/sftp's fields first shipped in a patch
+// release (2.5.4), so patch must compare too.
+type MinVersion = readonly [number, number, number];
+
+const KUMA2_0: MinVersion = [2, 0, 0];
+
+const KUMA2_TYPE_MIN_VERSION: Record<string, MinVersion> = { ntp: [2, 5, 0] };
+
+// A 2.x-only field whose column postdates 2.0.0 is silently dropped by
+// `editMonitor` on every older 2.x, the same drop the field gate refuses on
+// 1.x — on `add` the missing column fails loudly instead. Entries are the
+// first release whose `editMonitor` reads the key, verified per upstream
+// tag: 2.1.0 for the response-config / ws / domain-expiry batch, 2.4.0 for
+// the token fields, 2.5.0 for the ntp thresholds (their columns share
+// ntp.js's upstream commit 73f199f4) and screenshot_delay, 2.5.4 for the
+// ssh/sftp batch. A field absent from the map is read since 2.0.0
+// (manual_status, smtpSecurity, the snmp/rabbitmq/mqtt keys, ...) and needs
+// only major 2.
+const KUMA2_FIELD_MIN_VERSION: Record<string, MinVersion> = {
+  domainExpiryNotification: [2, 1, 0],
+  location: [2, 1, 0],
+  protocol: [2, 1, 0],
+  responseMaxLength: [2, 1, 0],
+  retryOnlyOnStatusCodeFailure: [2, 1, 0],
+  saveErrorResponse: [2, 1, 0],
+  saveResponse: [2, 1, 0],
+  subtype: [2, 1, 0],
+  system_service_name: [2, 1, 0],
+  wsIgnoreSecWebsocketAcceptHeader: [2, 1, 0],
+  wsSubprotocol: [2, 1, 0],
+  bearer_token: [2, 4, 0],
+  gamedigToken: [2, 4, 0],
+  ntpRootDispersionThreshold: [2, 5, 0],
+  ntpStratumThreshold: [2, 5, 0],
+  ntpTimeOffsetThreshold: [2, 5, 0],
+  screenshot_delay: [2, 5, 0],
+  sftpPath: [2, 5, 4],
+  sshAuthMethod: [2, 5, 4],
+  sshPassphrase: [2, 5, 4],
+  sshPassword: [2, 5, 4],
+  sshPrivateKey: [2, 5, 4],
+  sshUsername: [2, 5, 4],
 };
 
 // The five database types of EditMonitor.vue all show a required
@@ -388,6 +419,24 @@ function checkEditFields(fields: Record<string, unknown>, source: string): void 
   }
 }
 
+function meetsMinVersion(s: KumaSession, [maj, min, pat]: MinVersion): boolean {
+  return (
+    s.majorVersion > maj ||
+    (s.majorVersion === maj &&
+      (s.minorVersion > min || (s.minorVersion === min && s.patchVersion >= pat)))
+  );
+}
+
+function refuseKumaVersion(s: KumaSession, what: string, [maj, min, pat]: MinVersion): never {
+  const needs = min === 0 && pat === 0 ? "Uptime Kuma 2.x" : `Uptime Kuma >= ${maj}.${min}.${pat}`;
+  return fail(
+    2,
+    s.serverVersion === undefined
+      ? `${what} needs ${needs}; the server sent no version, so 1.x was assumed`
+      : `${what} needs ${needs}; the server reports ${s.serverVersion}`,
+  );
+}
+
 // A 2.x-only field can only be refused once the version is known: on 1.23
 // `add` would fail on the unknown column and `editMonitor` would silently
 // drop the value while answering ok. A field with a KUMA2_FIELD_MIN_VERSION
@@ -396,17 +445,8 @@ function checkEditFields(fields: Record<string, unknown>, source: string): void 
 function checkKuma2xFields(s: KumaSession, keys: Iterable<string>): void {
   for (const key of keys) {
     if (!MONITOR_2X_FIELDS.has(key)) continue;
-    const [minMajor, minMinor] = KUMA2_FIELD_MIN_VERSION[key] ?? [2, 0];
-    if (s.majorVersion > minMajor || (s.majorVersion === minMajor && s.minorVersion >= minMinor)) {
-      continue;
-    }
-    const needs = minMinor === 0 ? "Uptime Kuma 2.x" : `Uptime Kuma >= ${minMajor}.${minMinor}.0`;
-    fail(
-      2,
-      s.serverVersion === undefined
-        ? `"${key}" needs ${needs}; the server sent no version, so 1.x was assumed`
-        : `"${key}" needs ${needs}; the server reports ${s.serverVersion}`,
-    );
+    const min = KUMA2_FIELD_MIN_VERSION[key] ?? KUMA2_0;
+    if (!meetsMinVersion(s, min)) refuseKumaVersion(s, `"${key}"`, min);
   }
 }
 
@@ -582,16 +622,8 @@ function checkNotificationIds(s: KumaSession, value: unknown): void {
 // edit only when the type changes.
 function checkKuma2xType(s: KumaSession, type: unknown): void {
   if (typeof type !== "string" || !(MONITOR_2X_TYPES as readonly string[]).includes(type)) return;
-  const [minMajor, minMinor] = KUMA2_TYPE_MIN_VERSION[type] ?? [2, 0];
-  if (s.majorVersion > minMajor || (s.majorVersion === minMajor && s.minorVersion >= minMinor))
-    return;
-  const needs = minMinor === 0 ? "Uptime Kuma 2.x" : `Uptime Kuma >= ${minMajor}.${minMinor}.0`;
-  fail(
-    2,
-    s.serverVersion === undefined
-      ? `type "${type}" needs ${needs}; the server sent no version, so 1.x was assumed`
-      : `type "${type}" needs ${needs}; the server reports ${s.serverVersion}`,
-  );
+  const min = KUMA2_TYPE_MIN_VERSION[type] ?? KUMA2_0;
+  if (!meetsMinVersion(s, min)) refuseKumaVersion(s, `type "${type}"`, min);
 }
 
 // The official image ships no tailscale binary, so the picker hides

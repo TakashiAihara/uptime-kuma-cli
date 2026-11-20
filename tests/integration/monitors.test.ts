@@ -673,6 +673,8 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
     const r = await cliRun(sb, ["monitors", "edit", String(id), "--set", "ntpStratumThreshold=10"]);
     if (onNtp) {
       expect(r.code).toBe(0);
+      const g = await cliRun(sb, ["monitors", "get", String(id)]);
+      expect(g.json().ntpStratumThreshold).toBe(10);
     } else {
       expect(r.code).toBe(2);
       expect(r.stderr).toContain('"ntpStratumThreshold" needs Uptime Kuma >= 2.5.0');
