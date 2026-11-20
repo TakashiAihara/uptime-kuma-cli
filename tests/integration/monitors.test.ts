@@ -932,7 +932,24 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
     const g = await cliRun(sb, ["monitors", "get", String(id)]);
     expect(g.json()).toMatchObject({ type: "snmp", snmpVersion: "3" });
 
+    // get/list cannot see the username — a beat is the only observable
+    // proof it survived: snmp.js throws "SNMPv3 username is required" at
+    // check time when the column is empty, so any other beat msg means the
+    // column is still there (loopback answers nothing, so it is a down
+    // beat with a net-snmp error, not that message)
+    const res = await cliRun(sb, ["monitors", "resume", String(id)]);
+    expect(res.code).toBe(0);
+    let beat: any;
+    for (let i = 0; i < 12 && !beat; i++) {
+      await new Promise((r) => setTimeout(r, 5_000));
+      const b = await cliRun(sb, ["beats", String(id), "--hours", "1"]);
+      expect(b.code).toBe(0);
+      beat = b.json().find((x: any) => x.status === 0);
+    }
+    expect(beat).toBeDefined();
+    expect(beat.msg).not.toContain("SNMPv3 username is required");
+
     const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
     expect(del.code).toBe(0);
-  }, 120_000);
+  }, 300_000);
 });

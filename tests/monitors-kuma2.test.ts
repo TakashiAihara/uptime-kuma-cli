@@ -2504,6 +2504,36 @@ describe("snmp monitors", () => {
     },
   );
 
+  // an empty username beside a non-3 version stores an empty column — the
+  // hatch check already refuses "", so the flag path refuses it too
+  test("add --type snmp --snmp-version 2c --snmp-v3-username '' exits 2", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [...snmpAdd, "--snmp-version", "2c", "--snmp-v3-username", ""],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('snmpV3Username only applies to snmpVersion "3"');
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  // the column survives a 2c downgrade (no editMonitor writes it) but the
+  // stored version no longer proves it — the row could never have been v3
+  // — so re-upgrading is refused even though the username may still exist
+  test("a v3 monitor downgraded to 2c cannot be set back to 3", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [snmpFixture(7, "s", { snmpVersion: "3", snmpV3Username: "ops" })],
+    });
+    const down = await run(sb, ["monitors", "edit", "7", "--set", "snmpVersion=2c"], creds(k.url));
+    expect(down.code).toBe(0);
+    const up = await run(sb, ["monitors", "edit", "7", "--set", "snmpVersion=3"], creds(k.url));
+    expect(up.code).toBe(2);
+    expect(up.stderr).toContain('cannot set snmpVersion "3" on a monitor that is not already v3');
+    expect(stored(k, "s")).toMatchObject({ snmpVersion: "2c", snmpV3Username: "ops" });
+  });
+
   // 2.x mirrors the watcher here too: a stored 48 turns into ping's 10 —
   // and when a custom ping_per_request_timeout no longer fits, the same
   // save the UI would lose fails the same way, with the bound named

@@ -1106,8 +1106,10 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
         row.manual_status = before.manual_status;
       }
       // No release's editMonitor reads snmpV3Username, so the column is
-      // never part of the UPDATE — the stored username survives any edit
-      if (!("snmpV3Username" in row) && before.snmpV3Username !== undefined) {
+      // never part of the UPDATE — a stored username survives any edit,
+      // and a payload that carries the key is ignored the same way
+      delete row.snmpV3Username;
+      if (before.snmpV3Username !== undefined) {
         row.snmpV3Username = before.snmpV3Username;
       }
       state.monitors[i] = {

@@ -1093,12 +1093,8 @@ function validateFinalMonitor(
     // The column only exists for v3 — a username beside another version
     // would store a value no version can ever use (edit can never turn the
     // monitor v3 to reach it), so the picker hides the input and the CLI
-    // refuses it.
-    if (
-      monitor.snmpVersion !== "3" &&
-      typeof monitor.snmpV3Username === "string" &&
-      monitor.snmpV3Username !== ""
-    ) {
+    // refuses it, empty string included like the hatch check does.
+    if (monitor.snmpVersion !== "3" && monitor.snmpV3Username !== undefined) {
       fail(2, 'snmpV3Username only applies to snmpVersion "3"; drop it or set the version to 3');
     }
   }
