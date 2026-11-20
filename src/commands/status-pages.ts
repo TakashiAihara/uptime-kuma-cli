@@ -128,7 +128,13 @@ async function incidentHistory(
     incidents.push(...(page as Record<string, unknown>[]));
     total = res?.total;
     const next = res?.nextCursor;
-    if (res?.hasMore !== true || typeof next !== "string" || next === cursor) break;
+    if (res?.hasMore !== true) break;
+    // hasMore promises a continuable cursor — a missing or non-string one is
+    // a malformed page like a non-array incidents; a repeated one only risks
+    // a request loop, so that alone still stops quietly (the count check
+    // below then reports the shortfall)
+    if (typeof next !== "string") fail(70, "unexpected getIncidentHistory response");
+    if (next === cursor) break;
     cursor = next;
   }
   if (typeof total === "number" && incidents.length !== total) {

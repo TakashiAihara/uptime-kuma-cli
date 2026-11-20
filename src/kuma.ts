@@ -446,9 +446,19 @@ export class KumaSession {
       return cert !== undefined && inBurst(rec?.uptime.get(720), cert.at) ? cert.json : undefined;
     };
     const certDone = (id: number): boolean => {
-      const uptime30d = this.statsEvents.get(id)?.uptime.get(720);
+      const rec = this.statsEvents.get(id);
+      const uptime30d = rec?.uptime.get(720);
       if (uptime30d === undefined) return false;
-      return certInTime(id) !== undefined || Date.now() >= uptime30d.at + 500;
+      if (Date.now() >= uptime30d.at + 500) return true;
+      // sendStats ends with sendDomainInfo and awaits a monitor read plus the
+      // domain_expiry lookup between the certInfo and domainInfo emits, so on
+      // 2.1+ a landed certInfo cannot end the wait — only the burst's last
+      // event can. Before 2.1 certInfo is the last emit and breaks early.
+      if (meetsMinVersion(this, [2, 1, 0])) {
+        const dom = rec?.domainInfo;
+        return dom !== undefined && inBurst(uptime30d, dom.at);
+      }
+      return certInTime(id) !== undefined;
     };
 
     for (;;) {

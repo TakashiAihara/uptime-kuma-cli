@@ -570,6 +570,19 @@ describe("status-pages", () => {
         expect(r.code).toBe(70);
         expect(r.stderr).toContain("unexpected getIncidentHistory response");
       });
+
+      test("a hasMore page without a usable cursor exits 70", async () => {
+        kuma.state.incidentHistoryResult = {
+          ok: true,
+          incidents: [],
+          total: 30,
+          hasMore: true,
+          nextCursor: null,
+        };
+        const r = await run(sb, ["status-pages", "incident-history", "status"], creds(kuma.url));
+        expect(r.code).toBe(70);
+        expect(r.stderr).toContain("unexpected getIncidentHistory response");
+      });
     });
   });
 

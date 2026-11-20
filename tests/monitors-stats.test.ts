@@ -365,6 +365,24 @@ describe("monitors stats", () => {
       expect(r.json()).toMatchObject({ domainExpiresAt: null, domainDaysRemaining: -1 });
     });
 
+    test("a domainInfo trailing a landed certInfo still counts", async () => {
+      // sendStats awaits a monitor read and the domain_expiry lookup between
+      // the certInfo and domainInfo emits, so the real 2.x gap is nonzero;
+      // a wait that ends on the certInfo's arrival would drop the domain
+      // keys even though they land well inside the 500 ms burst
+      kuma.state.stats[1] = {
+        certInfo: CERT_1,
+        domainInfo: { daysRemaining: 90, expiry: "2026-01-02T03:04:05.000Z" },
+      };
+      kuma.state.domainInfoDelay = { 1: 80 };
+      const r = await run(sb, ["monitors", "stats", "1"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      expect(r.json()).toMatchObject({
+        domainExpiresAt: "2026-01-02T03:04:05.000Z",
+        domainDaysRemaining: 90,
+      });
+    });
+
     test("a domainInfo past its monitor's 500 ms burst reads as absent", async () => {
       kuma.state.domainInfoDelay = { 1: 600 };
       const r = await run(sb, ["monitors", "stats", "1"], creds(kuma.url));
