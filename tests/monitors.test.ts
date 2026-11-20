@@ -6025,6 +6025,32 @@ describe("monitor tags", () => {
       }
     });
 
+    // sqlite's BINARY collation orders by UTF-8 bytes: a fullwidth name
+    // (EF…) sorts before an emoji (F0…), where UTF-16 code units would
+    // put the emoji's lead surrogate (D83D) first
+    test("on 2.x the tag sort orders non-BMP names by UTF-8 bytes like 1.x", async () => {
+      const k2 = await startFakeKuma({
+        profile: "2.x",
+        monitors: [
+          http(9, "trade1 push", {
+            type: "push",
+            url: null,
+            tags: [mt(3, 9, 5, "a", "😀"), mt(4, 9, 6, "b", "Ａ")],
+          }),
+        ],
+      });
+      try {
+        const g = await run(sb, ["monitors", "get", "9"], creds(k2.url));
+        expect(g.code).toBe(0);
+        expect(g.json().tags).toEqual([
+          { tagId: 6, name: "Ａ", value: "b" },
+          { tagId: 5, name: "😀", value: "a" },
+        ]);
+      } finally {
+        await k2.close();
+      }
+    });
+
     test("get on a monitor without tags prints an empty array", async () => {
       const r = await run(sb, ["monitors", "get", "2"], creds(kuma.url));
       expect(r.code).toBe(0);

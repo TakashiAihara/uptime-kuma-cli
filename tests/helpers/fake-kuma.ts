@@ -610,11 +610,12 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
 
   // Monitor.getTags orders the join by tag.name on 1.23; 2.x's batched
   // query has no ORDER BY, so the seeded order survives and the CLI's own
-  // sort is what puts the output right
+  // sort is what puts the output right. sqlite's BINARY collation compares
+  // UTF-8 bytes, not UTF-16 code units
   const monitorTags = (m: Monitor): MonitorTagRow[] =>
     profile2x
       ? [...tagsOf(m)]
-      : [...tagsOf(m)].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+      : [...tagsOf(m)].sort((a, b) => Buffer.compare(Buffer.from(a.name), Buffer.from(b.name)));
 
   // Monitor.toJSON emits neither manual_status (2.5.11 editMonitor reads it
   // from the payload anyway) nor snmpV3Username (2.5.11 monitor.js toJSON
