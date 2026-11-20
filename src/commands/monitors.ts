@@ -1097,6 +1097,15 @@ function validateFinalMonitor(
           `url must be a ${allowed === null ? "valid url with a host" : `${allowed.map((p) => `${p}//`).join(" or ")} url`} for type ${type}, got "${String(redactUrl(monitor.url))}"`,
         );
       }
+      // ws ~8.19 throws `SyntaxError: The URL contains a fragment
+      // identifier` before connecting — an http url's fragment is
+      // dropped client-side, so the refusal is websocket-upgrade's own.
+      if (type === "websocket-upgrade" && parsed.hash !== "") {
+        fail(
+          2,
+          `url must not contain a fragment for type ${type}, got "${String(redactUrl(monitor.url))}"`,
+        );
+      }
     }
   }
   if (type === "keyword" || type === "grpc-keyword") needString("keyword");

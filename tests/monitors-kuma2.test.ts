@@ -2657,6 +2657,29 @@ describe("websocket-upgrade monitors", () => {
     expect(addCalls(k)).toHaveLength(0);
   });
 
+  // `new WebSocket` throws SyntaxError on a fragment before connecting —
+  // the stored monitor could never check
+  test("add --type websocket-upgrade with a fragment url exits 2", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "websocket-upgrade",
+        "--name",
+        "ws1",
+        "--url",
+        "wss://ws.example.com/#health",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("fragment");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
   // a --config-file url may carry userinfo the flag paths refused — the
   // scheme refusal must not echo it to stderr
   test("add --type websocket-upgrade redacts userinfo in the scheme refusal", async () => {
