@@ -6,6 +6,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -194,8 +195,21 @@ describe("install.sh", () => {
     async () => {
       const dash = Bun.which("dash");
       if (!dash) throw new Error("dash is needed for this test");
-      startServer({ "v1.0.0": release("#!/bin/sh\nsleep 2\n") });
+      const realMktemp = Bun.which("mktemp");
+      if (!realMktemp) throw new Error("mktemp is needed for this test");
+      startServer({ "v1.0.0": release(WORKING) });
       shimCurl();
+      // A mktemp that exits only when the test releases it keeps the shell inside
+      // tmp=$(...) with the dir already visible, so the TERM lands in the window that
+      // used to need scheduler luck. dash defers the trap to the end of the command,
+      // so the fixed script still exits 143 and cleans up.
+      const hold = join(sb.dir, "hold-mktemp");
+      rmSync(join(bin, "mktemp"));
+      writeTool(
+        "mktemp",
+        `${realMktemp} "$@" || exit\nwhile [ ! -f "${hold}" ]; do sleep 0.05; done`,
+      );
+
       const proc = Bun.spawn([dash, INSTALL_SH], {
         cwd: sb.dir,
         env: { PATH: bin, HOME: sb.home, UPTIME_KUMA_CLI_INSTALL_DIR: installDir },
@@ -207,6 +221,10 @@ describe("install.sh", () => {
       expect(leftovers().length).toBe(1);
 
       proc.kill("SIGTERM");
+      // The shim still holds the substitution open, so the signal provably arrived
+      // while the dir existed
+      expect(leftovers().length).toBe(1);
+      writeFileSync(hold, "");
 
       expect(await proc.exited).toBe(143);
       expect(leftovers()).toEqual([]);
