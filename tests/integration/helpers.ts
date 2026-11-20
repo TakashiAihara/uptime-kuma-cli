@@ -140,3 +140,34 @@ export async function withKuma<T>(
     socket.disconnect();
   }
 }
+
+// The integration admin is the only account, so 2FA coverage toggles it for
+// the length of fn: prepare2FA mints a secret and returns it inside the
+// otpauth uri, save2FA flips twofa_status (the emits the UI's enable-2FA
+// dialog makes), and fn runs with that secret. The finally's disable2FA
+// restores the tokenless login the rest of the suite needs — a left-on 2FA
+// would fail every later login, so a refused answer here is rethrown over
+// whatever fn itself produced.
+export async function withKuma2FA<T>(fn: (secret: string) => Promise<T>): Promise<T> {
+  return withKuma(async (call) => {
+    const password = itEnv().UPTIME_KUMA_PASSWORD;
+    const ack = async (event: "prepare2FA" | "save2FA" | "disable2FA") => {
+      const res = await call<{ ok?: boolean; uri?: string; msg?: string }>(event, [password]);
+      if (res?.ok !== true) throw new Error(`${event} failed: ${res?.msg ?? "no answer"}`);
+      return res;
+    };
+
+    const prepared = await ack("prepare2FA");
+    const secret =
+      typeof prepared.uri === "string"
+        ? new URLSearchParams(prepared.uri.slice(prepared.uri.indexOf("?"))).get("secret")
+        : null;
+    if (!secret) throw new Error("prepare2FA uri carries no secret");
+    await ack("save2FA");
+    try {
+      return await fn(secret);
+    } finally {
+      await ack("disable2FA");
+    }
+  });
+}
