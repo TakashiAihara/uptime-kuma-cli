@@ -84,7 +84,9 @@ const KUMA2_TYPE_MIN_VERSION: Record<string, MinVersion> = { ntp: [2, 5, 0] };
 // ntp.js's upstream commit 73f199f4) and screenshot_delay, 2.5.4 for the
 // ssh/sftp batch. A field absent from the map is read since 2.0.0
 // (manual_status, smtpSecurity, the snmp/rabbitmq/mqtt keys, ...) and needs
-// only major 2.
+// only major 2. Prerelease servers are treated as the release they name —
+// a 2.1.0-beta.x without the field still drops it, but gating betas needs
+// per-beta entries.
 const KUMA2_FIELD_MIN_VERSION: Record<string, MinVersion> = {
   domainExpiryNotification: [2, 1, 0],
   location: [2, 1, 0],
@@ -428,7 +430,8 @@ function meetsMinVersion(s: KumaSession, [maj, min, pat]: MinVersion): boolean {
 }
 
 function refuseKumaVersion(s: KumaSession, what: string, [maj, min, pat]: MinVersion): never {
-  const needs = min === 0 && pat === 0 ? "Uptime Kuma 2.x" : `Uptime Kuma >= ${maj}.${min}.${pat}`;
+  const needs =
+    maj === 2 && min === 0 && pat === 0 ? "Uptime Kuma 2.x" : `Uptime Kuma >= ${maj}.${min}.${pat}`;
   return fail(
     2,
     s.serverVersion === undefined

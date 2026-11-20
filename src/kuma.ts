@@ -486,9 +486,10 @@ export function parseMinorVersion(version: string | undefined): number {
   return match === null ? 0 : Number(match[1]);
 }
 
-// Same shape as the minor: the patch only reaches a comparison after the
-// major.minor matched the gate's minimum — an unparseable or missing value
-// can fall back to 0 because the earlier checks refuse first.
+// Same shape as the minor: when the major.minor already matched the gate's
+// minimum but the patch cannot be parsed ("2.5" reports no third part), the
+// fallback 0 stays on the safe side — entries needing a patch refuse,
+// entries at patch 0 accept.
 export function parsePatchVersion(version: string | undefined): number {
   const match = version === undefined ? null : /^\d+\.\d+\.(\d+)/.exec(version);
   return match === null ? 0 : Number(match[1]);
