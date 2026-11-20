@@ -690,6 +690,29 @@ describe("status-pages", () => {
         expect(callsOf("editIncident")).toHaveLength(0);
       });
 
+      test("an id lost to the created_date boundary reports an incomplete fetch", async () => {
+        // eleven rows sharing one created_date: the eleventh sorts past the
+        // first page's cursor (created_date < last) and can never be
+        // returned, so "not found" would be a lie — the edit reports the
+        // shortfall instead
+        kuma.state.incidents = Array.from({ length: 11 }, (_, i) => ({
+          id: i + 1,
+          statusPageId: 7,
+          title: `i${i + 1}`,
+          createdDate: "2024-01-01T00:00:00.000Z",
+        }));
+        const r = await run(
+          sb,
+          ["status-pages", "incident-edit", "status", "11", "--title", "x"],
+          creds(kuma.url),
+        );
+        expect(r.code).toBe(1);
+        expect(r.stderr).toContain(
+          "incident 11 may exist: the fetched history is incomplete (10 of 11 fetched)",
+        );
+        expect(callsOf("editIncident")).toHaveLength(0);
+      });
+
       test("an edit keeps a resolved incident inactive", async () => {
         // upstream editIncident writes only title/content/style/pin and
         // lastUpdatedDate — active is untouched, so a resolved incident

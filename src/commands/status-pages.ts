@@ -120,11 +120,12 @@ async function incidentHistory(
   s: KumaSession,
   slug: string,
   findId?: number,
-): Promise<{ total: unknown; incidents: Record<string, unknown>[] }> {
+): Promise<{ total: unknown; incidents: Record<string, unknown>[]; complete: boolean }> {
   const incidents: Record<string, unknown>[] = [];
   let total: unknown;
   let cursor: string | null = null;
   let found = false;
+  let truncated = false;
   for (;;) {
     const res = await s.request("getIncidentHistory", [slug, cursor]);
     const page = res?.incidents;
@@ -144,15 +145,21 @@ async function incidentHistory(
     // a request loop, so that alone still stops quietly (the count check
     // below then reports the shortfall)
     if (typeof next !== "string") fail(70, "unexpected getIncidentHistory response");
-    if (next === cursor) break;
+    if (next === cursor) {
+      truncated = true;
+      break;
+    }
     cursor = next;
   }
-  if (!found && typeof total === "number" && incidents.length !== total) {
+  const short = typeof total === "number" && incidents.length !== total;
+  if (!found && short) {
     console.error(
       `warning: incident history may be incomplete: got ${incidents.length} of ${total} incidents`,
     );
   }
-  return { total, incidents };
+  // a findId hit ends the walk on purpose; anything else is complete only when
+  // it ran to hasMore false and fetched every row the total reports
+  return { total, incidents, complete: found || (!truncated && !short) };
 }
 
 function parseAddSlug(value: string): string {
@@ -745,10 +752,20 @@ export function registerStatusPages(program: Command): void {
       // editIncident overwrites every field unconditionally like the UI's
       // pre-filled form, so the stored incident is fetched and the flags
       // merge over it — an omitted flag keeps its stored value
-      const existing = (await incidentHistory(s, slug, incidentId)).incidents.find(
-        (i) => i.id === incidentId,
-      );
-      if (existing === undefined) fail(1, `incident ${incidentId} not found`);
+      const fetched = await incidentHistory(s, slug, incidentId);
+      const existing = fetched.incidents.find((i) => i.id === incidentId);
+      if (existing === undefined) {
+        // an id absent from a complete history does not exist; one missing
+        // from a cut one may sit beyond the cursor's created_date boundary
+        if (!fetched.complete) {
+          const count =
+            typeof fetched.total === "number"
+              ? ` (${fetched.incidents.length} of ${fetched.total} fetched)`
+              : "";
+          fail(1, `incident ${incidentId} may exist: the fetched history is incomplete${count}`);
+        }
+        fail(1, `incident ${incidentId} not found`);
+      }
       const title = opts.title ?? existing.title;
       const content = opts.content ?? existing.content;
       const style = opts.style ?? existing.style;
