@@ -812,6 +812,11 @@ describe("ntp monitors", () => {
     expect(m.port).toBe(123);
     expect(m.interval).toBe(300);
     expect(m.retryInterval).toBe(300);
+    // the ntp_*_threshold columns do not exist before the 2.5 migration, so
+    // an add sends none of them — the column defaults fill them there
+    expect(m).not.toHaveProperty("ntpStratumThreshold");
+    expect(m).not.toHaveProperty("ntpTimeOffsetThreshold");
+    expect(m).not.toHaveProperty("ntpRootDispersionThreshold");
   });
 
   test("add --type ntp --port and --interval override the defaults", async () => {
@@ -1099,6 +1104,27 @@ describe("ntp monitors", () => {
       hostname: "ntp.example.com",
       port: 8053,
       interval: 60,
+    });
+  });
+
+  // the defaulted interval is a timing change: a stored timeout that no
+  // longer fits it is re-capped to 80%, like an interval the edit set
+  test("edit --set type=ntp re-caps a stored timeout over the new interval's 80%", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [{ ...http(7, "h"), interval: 3600, retryInterval: 3600, timeout: 2000 }],
+    });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=ntp", "--set", "hostname=ntp.example.com"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "h")).toMatchObject({
+      type: "ntp",
+      interval: 300,
+      retryInterval: 300,
+      timeout: 240,
     });
   });
 

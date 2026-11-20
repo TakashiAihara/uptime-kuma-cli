@@ -1780,8 +1780,16 @@ export function registerMonitors(program: Command): void {
       // string forms, so a numeric stored port slips through there — the
       // CLI covers the intent instead: an empty port or one of
       // 22 / 53 / 123 / 1812 goes to 123. Values this edit sets win.
+      // The defaulted interval is a timing change this edit makes, so it
+      // re-derives the timeout's 80% cap like a touched interval would —
+      // otherwise a stored timeout of e.g. 2000s would survive beside the
+      // new 300s interval.
+      let intervalDefaulted = false;
       if (typeChanged && type === "ntp") {
-        if (!touched.has("interval")) monitor.interval = 300;
+        if (!touched.has("interval")) {
+          intervalDefaulted = monitor.interval !== 300;
+          monitor.interval = 300;
+        }
         const port = monitor.port;
         if (
           !touched.has("port") &&
@@ -1800,7 +1808,7 @@ export function registerMonitors(program: Command): void {
       ) {
         monitor.retryInterval = monitor.interval;
       }
-      if (timingTouched || timeoutUnset) {
+      if (timingTouched || timeoutUnset || intervalDefaulted) {
         deriveMonitorTiming(monitor, defaultTimeoutSeconds(s, type), capsTimeout(s, type));
       }
       // The new type's eligibility is judged before its required fields, like
