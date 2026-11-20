@@ -529,9 +529,9 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
       expect(r.json()).toEqual({ id: groupId, deleted: true });
       const list = await cliRun(sb, ["monitors", "list"]);
       expect(list.code).toBe(0);
-      expect((list.json() as { name: string }[]).some((m) => m.name === "it-grp-child")).toBe(
-        false,
-      );
+      const names = (list.json() as { name: string }[]).map((m) => m.name);
+      expect(names).not.toContain("it-grp");
+      expect(names).not.toContain("it-grp-child");
     }, 240_000);
   });
 

@@ -446,5 +446,31 @@ describe("monitors stats", () => {
         domainDaysRemaining: 5,
       });
     });
+
+    test("a domainInfo with a non-number daysRemaining keeps the keys with null", async () => {
+      // the event arriving malformed differs from it never coming — like a
+      // malformed certInfo, the keys stay and the unreadable field is null
+      kuma.state.stats[1] = {
+        domainInfo: { daysRemaining: "soon", expiry: "2026-01-02T03:04:05.000Z" },
+      };
+      const r = await run(sb, ["monitors", "stats", "1"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      expect(r.json()).toMatchObject({
+        domainExpiresAt: "2026-01-02T03:04:05.000Z",
+        domainDaysRemaining: null,
+      });
+    });
+
+    test("a domainInfo with a non-string expiry reports domainExpiresAt null", async () => {
+      kuma.state.stats[1] = {
+        domainInfo: { daysRemaining: 5, expiry: 1700000000 },
+      };
+      const r = await run(sb, ["monitors", "stats", "1"], creds(kuma.url));
+      expect(r.code).toBe(0);
+      expect(r.json()).toMatchObject({
+        domainExpiresAt: null,
+        domainDaysRemaining: 5,
+      });
+    });
   });
 });

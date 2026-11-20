@@ -109,19 +109,22 @@ function requireIncidentEvents(s: KumaSession, command: string): void {
 
 // getIncidentHistory pages INCIDENT_PAGE_SIZE (10) incidents per call,
 // created_date DESC; the CLI follows nextCursor to the end so the printed
-// array is the whole history. A cursor that does not move means a
-// misbehaving server — stop rather than loop requests forever. Rows sharing
-// the boundary's created_date are unreachable through the server's cursor
-// (created_date < last), so a collected count below the reported total is
-// warned on rather than printed as a quietly complete history. findId stops
-// the walk as soon as that row is seen (the incident-edit lookup), which is
-// an intended truncation and skips the shortfall warning.
+// array is the whole history. A cursor the walk already visited means a
+// misbehaving server — an immediate repeat, or a cycle of cursors — so the
+// walk stops rather than re-request forever; each request is timeout-bounded
+// but the loop itself is not. Rows sharing the boundary's created_date are
+// unreachable through the server's cursor (created_date < last), so a
+// collected count below the reported total is warned on rather than printed
+// as a quietly complete history. findId stops the walk as soon as that row
+// is seen (the incident-edit lookup), which is an intended truncation and
+// skips the shortfall warning.
 async function incidentHistory(
   s: KumaSession,
   slug: string,
   findId?: number,
 ): Promise<{ total: number; incidents: Record<string, unknown>[]; complete: boolean }> {
   const incidents: Record<string, unknown>[] = [];
+  const seenCursors = new Set<string>();
   let total = 0;
   let cursor: string | null = null;
   let found = false;
@@ -129,21 +132,30 @@ async function incidentHistory(
   for (;;) {
     const res = await s.request("getIncidentHistory", [slug, cursor]);
     const page = res?.incidents;
-    // total drives the completeness check and the printed output, so a
-    // non-number one is as malformed as a non-array or non-object row
+    // total drives the completeness check and the printed output, and id
+    // drives incident-edit's lookup, so a non-integer-or-negative total or
+    // a row without a numeric id is as malformed as a non-array incidents
     if (
       !Array.isArray(page) ||
       typeof res?.total !== "number" ||
-      page.some((i) => i === null || typeof i !== "object" || Array.isArray(i))
+      !Number.isInteger(res.total) ||
+      res.total < 0 ||
+      page.some(
+        (i) =>
+          i === null ||
+          typeof i !== "object" ||
+          Array.isArray(i) ||
+          typeof (i as Record<string, unknown>).id !== "number",
+      )
     ) {
       fail(70, "unexpected getIncidentHistory response");
     }
     const next = res?.nextCursor;
-    // a repeated cursor means the request was replayed — the page's rows
-    // duplicate the previous answer's, so collecting them would fake a
-    // matching count. Stop before the push so the shortfall check below
-    // reports what the walk actually gathered
-    if (res?.hasMore === true && typeof next === "string" && next === cursor) {
+    // a revisited cursor means the request was replayed — the page's rows
+    // duplicate an earlier answer's, so collecting them would fake the
+    // count. Stop before the push so the shortfall check below reports
+    // what the walk actually gathered
+    if (res?.hasMore === true && typeof next === "string" && seenCursors.has(next)) {
       truncated = true;
       break;
     }
@@ -159,6 +171,7 @@ async function incidentHistory(
     // hasMore promises a continuable cursor — a missing or non-string one is
     // a malformed page like a non-array incidents
     if (typeof next !== "string") fail(70, "unexpected getIncidentHistory response");
+    seenCursors.add(next);
     cursor = next;
   }
   const short = incidents.length !== total;

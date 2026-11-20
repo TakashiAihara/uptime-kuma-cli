@@ -606,6 +606,66 @@ describe("status-pages", () => {
         expect(r.json().incidents).toHaveLength(1);
       });
 
+      test("a cursor cycle stops the walk instead of looping", async () => {
+        // A -> B -> A: only the immediate-repeat check would not catch this,
+        // so the visited set bounds the walk
+        kuma.state.incidentHistoryResults = [
+          {
+            ok: true,
+            incidents: [{ id: 1, title: "i1" }],
+            total: 3,
+            hasMore: true,
+            nextCursor: "A",
+          },
+          {
+            ok: true,
+            incidents: [{ id: 2, title: "i2" }],
+            total: 3,
+            hasMore: true,
+            nextCursor: "B",
+          },
+          {
+            ok: true,
+            incidents: [{ id: 3, title: "i3" }],
+            total: 3,
+            hasMore: true,
+            nextCursor: "A",
+          },
+        ];
+        const r = await run(sb, ["status-pages", "incident-history", "status"], creds(kuma.url));
+        expect(r.code).toBe(0);
+        expect(callsOf("getIncidentHistory")).toHaveLength(3);
+        expect(r.stderr).toContain(
+          "warning: incident history may be incomplete: got 2 of 3 incidents",
+        );
+        expect(r.json().incidents).toHaveLength(2);
+      });
+
+      test("a history row with a non-numeric id exits 70", async () => {
+        kuma.state.incidentHistoryResult = {
+          ok: true,
+          incidents: [{ id: "5", title: "x" }],
+          total: 1,
+        };
+        const r = await run(sb, ["status-pages", "incident-history", "status"], creds(kuma.url));
+        expect(r.code).toBe(70);
+        expect(r.stderr).toContain("unexpected getIncidentHistory response");
+      });
+
+      test("a negative total exits 70", async () => {
+        kuma.state.incidentHistoryResult = { ok: true, incidents: [], total: -1 };
+        const r = await run(sb, ["status-pages", "incident-history", "status"], creds(kuma.url));
+        expect(r.code).toBe(70);
+        expect(r.stderr).toContain("unexpected getIncidentHistory response");
+      });
+
+      test("a fractional total exits 70", async () => {
+        kuma.state.incidentHistoryResult = { ok: true, incidents: [], total: 1.5 };
+        const r = await run(sb, ["status-pages", "incident-history", "status"], creds(kuma.url));
+        expect(r.code).toBe(70);
+        expect(r.stderr).toContain("unexpected getIncidentHistory response");
+      });
+
       test("a non-number total exits 70", async () => {
         kuma.state.incidentHistoryResult = { ok: true, incidents: [], total: "many" };
         const r = await run(sb, ["status-pages", "incident-history", "status"], creds(kuma.url));
@@ -693,6 +753,50 @@ describe("status-pages", () => {
           style: "info",
           pin: false,
         });
+      });
+
+      test("a stored row without pin sends pin true like the UI default", async () => {
+        // the wire can omit pin (absent column); editIncident's overwrite
+        // would then send nothing, so the merge supplies the UI's default
+        kuma.state.incidentHistoryResult = {
+          ok: true,
+          incidents: [{ id: 5, title: "t", content: "c", style: "info" }],
+          total: 1,
+          hasMore: false,
+        };
+        const r = await run(
+          sb,
+          ["status-pages", "incident-edit", "status", "5", "--title", "t2"],
+          creds(kuma.url),
+        );
+        expect(r.code).toBe(0);
+        expect(callsOf("editIncident")[0]!.args).toEqual([
+          "status",
+          5,
+          { title: "t2", content: "c", style: "info", pin: true },
+        ]);
+      });
+
+      test("a non-string stored style falls back to warning", async () => {
+        // validateIncident substitutes warning for an unknown style, so the
+        // merge does the same rather than round-tripping a non-string
+        kuma.state.incidentHistoryResult = {
+          ok: true,
+          incidents: [{ id: 5, title: "t", content: "c", style: 42, pin: false }],
+          total: 1,
+          hasMore: false,
+        };
+        const r = await run(
+          sb,
+          ["status-pages", "incident-edit", "status", "5", "--title", "t2"],
+          creds(kuma.url),
+        );
+        expect(r.code).toBe(0);
+        expect(callsOf("editIncident")[0]!.args).toEqual([
+          "status",
+          5,
+          { title: "t2", content: "c", style: "warning", pin: false },
+        ]);
       });
 
       test("--pin and --unpin set the stored pin explicitly", async () => {

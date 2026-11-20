@@ -1396,9 +1396,9 @@ function domainInfoFields(info: MonitorStats["domainInfo"]): {
   };
 }
 
-// deleteMonitor's deleteChildren parameter first ships in 2.1.0 — older
-// servers take (id, callback), where a boolean second argument would be
-// called as the callback and crash the handler
+// deleteMonitor's deleteChildren parameter first ships in 2.1.0 — on an
+// older server (id, callback) puts the boolean in the callback slot, so the
+// delete would still run and only crash when the result callback is invoked
 const DELETE_CHILDREN_MIN: MinVersion = [2, 1, 0];
 
 export function registerMonitors(program: Command): void {

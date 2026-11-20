@@ -134,7 +134,8 @@ export type StatsValues = {
   uptime30d?: number;
   certInfo?: string;
   uptime1y?: number;
-  domainInfo?: { daysRemaining: number; expiry: string };
+  // unknown so malformed wire values can be fed verbatim
+  domainInfo?: { daysRemaining: unknown; expiry: unknown };
 };
 
 type ResolvedStats = {
@@ -143,7 +144,7 @@ type ResolvedStats = {
   uptime30d: number;
   certInfo: string | undefined;
   uptime1y: number;
-  domainInfo: { daysRemaining: number; expiry: string } | undefined;
+  domainInfo: { daysRemaining: unknown; expiry: unknown } | undefined;
 };
 
 export type FakeState = {
@@ -184,6 +185,10 @@ export type FakeState = {
   // verbatim getIncidentHistory / editIncident / resolveIncident answers when
   // set (2.x-only events); lets tests feed malformed shapes
   incidentHistoryResult: Record<string, unknown> | null;
+  // per-call getIncidentHistory answers: call n reads index n, the last entry
+  // repeats once the list runs out; checked before incidentHistoryResult so a
+  // cursor cycling server can be scripted
+  incidentHistoryResults: Record<string, unknown>[];
   editIncidentResult: Record<string, unknown> | null;
   resolveIncidentResult: Record<string, unknown> | null;
   // rows pushed as maintenanceList after login and returned by getMaintenance
@@ -537,6 +542,7 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
     apiRequests: [],
     postIncidentResult: null,
     incidentHistoryResult: null,
+    incidentHistoryResults: [],
     editIncidentResult: null,
     resolveIncidentResult: null,
     maintenances: [],
@@ -1828,6 +1834,11 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
       // StatusPage.getIncidentHistory: created_date DESC pages of
       // INCIDENT_PAGE_SIZE (10); the cursor is the last row's created_date
       handle("getIncidentHistory", (slug: string, cursor: string | null) => {
+        if (state.incidentHistoryResults.length > 0) {
+          // onAny has already logged this call, so the count is 1-based
+          const n = calls.filter((c) => c.event === "getIncidentHistory").length - 1;
+          return state.incidentHistoryResults[Math.min(n, state.incidentHistoryResults.length - 1)];
+        }
         if (state.incidentHistoryResult !== null) return state.incidentHistoryResult;
         const page = state.statusPages.find((p) => p.slug === slug);
         if (page === undefined) throw new Error("slug is not found");

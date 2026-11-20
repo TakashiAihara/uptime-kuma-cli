@@ -197,7 +197,7 @@ export type MonitorStats = {
   uptime30d: number;
   certInfo: string | undefined;
   uptime1y?: number;
-  domainInfo?: { daysRemaining: number; expiryDate: string };
+  domainInfo?: { daysRemaining: number | null; expiryDate: string };
 };
 
 type BeatRow = Record<string, unknown>;
@@ -210,7 +210,7 @@ type MonitorStatEvents = {
   uptime: Map<number, { at: number; value: number }>;
   certInfo?: { at: number; json: string };
   uptime1y?: { at: number; value: number };
-  domainInfo?: { at: number; daysRemaining: number; expiryDate: string };
+  domainInfo?: { at: number; daysRemaining: number | null; expiryDate: string };
 };
 
 // Grace after the pushed lists for the versioned `info` (connect() below).
@@ -717,20 +717,25 @@ export async function connect(
     }
   });
   // 2.1.0+ sendDomainInfo emits (id, daysRemaining, expiryDate) right after
-  // certInfo, only for monitors whose domain resolved an expiry through RDAP
+  // certInfo, only for monitors whose domain resolved an expiry through RDAP.
+  // A malformed field records null like a malformed certInfo does — the event
+  // arriving and being unreadable differs from it never coming, so it is not
+  // dropped whole
   socket.on("domainInfo", (id: unknown, daysRemaining: unknown, expiryDate: unknown) => {
     const mid = statId(id);
-    if (
-      Number.isNaN(mid) ||
-      typeof daysRemaining !== "number" ||
-      !Number.isFinite(daysRemaining) ||
-      typeof expiryDate !== "string"
-    ) {
+    if (Number.isNaN(mid)) {
       return;
     }
     const rec = statRecord(mid);
     if (rec.domainInfo === undefined) {
-      rec.domainInfo = { at: Date.now(), daysRemaining, expiryDate };
+      rec.domainInfo = {
+        at: Date.now(),
+        daysRemaining:
+          typeof daysRemaining === "number" && Number.isFinite(daysRemaining)
+            ? daysRemaining
+            : null,
+        expiryDate: typeof expiryDate === "string" ? expiryDate : "",
+      };
     }
   });
 
