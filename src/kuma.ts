@@ -96,11 +96,13 @@ export const MONITOR_ADD_FIELDS = new Set([
   "authWorkstation",
 ]);
 
-// The monitor fields 2.5.11's editMonitor reads (2.5.11/server/server.js
-// editMonitor) that MONITOR_ADD_FIELDS lacks. 1.23's `add` stores the object
-// as-is and fails on an unknown column, and its editMonitor copies a fixed
-// list and silently drops the rest, so the CLI accepts these only after
-// connect() on a >= 2 server.
+// The monitor fields a 2.x `add` persists or 2.5.11's editMonitor reads
+// (2.5.11/server/server.js add + editMonitor) that MONITOR_ADD_FIELDS
+// lacks. 1.23's `add` stores the object as-is and fails on an unknown
+// column, and its editMonitor copies a fixed list and silently drops the
+// rest, so the CLI accepts these only after connect() on a >= 2 server.
+// snmpV3Username is add-only: editMonitor never reads it on any version —
+// checkEditFields refuses it outright.
 export const MONITOR_2X_FIELDS = new Set([
   "bearer_token",
   "cacheBust",
@@ -133,6 +135,7 @@ export const MONITOR_2X_FIELDS = new Set([
   "sftpPath",
   "smtpSecurity",
   "snmpOid",
+  "snmpV3Username",
   "snmpVersion",
   "sshAuthMethod",
   "sshPassphrase",

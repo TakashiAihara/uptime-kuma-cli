@@ -404,11 +404,11 @@ const ADD_KEYS = new Set([
   "authWorkstation",
 ]);
 
-// The columns a 2.x `add` accepts: the 1.23 set plus the fields 2.5.11's
-// editMonitor reads (2.5.11/server/server.js editMonitor) — the same list as
-// MONITOR_2X_FIELDS in src/kuma.ts, kept as a literal copy for the same
-// reason. editMonitor copies a fixed field list and silently drops the rest,
-// which the fake approximates by storing the object whole.
+// The columns a 2.x `add` accepts: the 1.23 set plus the fields a 2.x `add`
+// persists or 2.5.11's editMonitor reads (2.5.11/server/server.js) — the
+// same list as MONITOR_2X_FIELDS in src/kuma.ts, kept as a literal copy for
+// the same reason. editMonitor copies a fixed field list and silently drops
+// the rest, which the fake approximates by storing the object whole.
 const ADD_KEYS_2X = new Set([
   ...ADD_KEYS,
   "bearer_token",
@@ -442,6 +442,7 @@ const ADD_KEYS_2X = new Set([
   "sftpPath",
   "smtpSecurity",
   "snmpOid",
+  "snmpV3Username",
   "snmpVersion",
   "sshAuthMethod",
   "sshPassphrase",
@@ -611,10 +612,12 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
   const monitorTags = (m: Monitor): MonitorTagRow[] =>
     [...tagsOf(m)].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
-  // Monitor.toJSON does not emit manual_status (2.5.11 editMonitor reads it
-  // from the payload anyway), so a fetched monitor cannot carry it back
+  // Monitor.toJSON emits neither manual_status (2.5.11 editMonitor reads it
+  // from the payload anyway) nor snmpV3Username (2.5.11 monitor.js toJSON
+  // lists snmpOid/snmpVersion only), so a fetched monitor cannot carry
+  // either back
   const monitorJSON = (m: Monitor): Monitor => {
-    const { manual_status: _omitted, ...rest } = structuredClone(m);
+    const { manual_status: _omitted, snmpV3Username: _omitted2, ...rest } = structuredClone(m);
     return { ...rest, tags: monitorTags(m) } as Monitor;
   };
 
@@ -1101,6 +1104,13 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
       // drops undefined keys from the UPDATE, so the stored value survives
       if (!("manual_status" in row) && before.manual_status !== undefined) {
         row.manual_status = before.manual_status;
+      }
+      // No release's editMonitor reads snmpV3Username, so the column is
+      // never part of the UPDATE — a stored username survives any edit,
+      // and a payload that carries the key is ignored the same way
+      delete row.snmpV3Username;
+      if (before.snmpV3Username !== undefined) {
+        row.snmpV3Username = before.snmpV3Username;
       }
       state.monitors[i] = {
         ...row,

@@ -58,13 +58,13 @@ const MONITOR_TYPES = [
 // Like a 2.x-only field, one of these can only be refused after connect() on
 // a 1.x server — 1.23's `add` would store the row and every check would throw
 // "Unknown Monitor Type" — so the pre-connect choices list takes the union.
-const MONITOR_2X_TYPES = ["manual", "ntp", "smtp"] as const;
+const MONITOR_2X_TYPES = ["manual", "ntp", "smtp", "snmp"] as const;
 
 // server/monitor-types/ntp.js first ships in 2.5.0 (upstream #7214), so the
 // major gate alone would let a 2.0-2.4 server store an ntp row whose checks
 // all throw "Unknown Monitor Type" — the failure the type gate exists to
 // prevent. A type absent from the map shipped with 2.0.0 (manual in beta.4,
-// smtp in beta.3) and needs only major 2.
+// smtp in beta.3, snmp in beta.0) and needs only major 2.
 
 // The first release a gated thing needs, as [major, minor, patch] — most
 // entries land on x.y.0, but ssh/sftp's fields first shipped in a patch
@@ -79,14 +79,19 @@ const KUMA2_TYPE_MIN_VERSION: Record<string, MinVersion> = { ntp: [2, 5, 0] };
 // `editMonitor` on every older 2.x, the same drop the field gate refuses on
 // 1.x — on `add` the missing column fails loudly instead. Entries are the
 // first release whose `editMonitor` reads the key, verified per upstream
-// tag: 2.1.0 for the response-config / ws / domain-expiry batch, 2.4.0 for
-// the token fields, 2.5.0 for the ntp thresholds (their columns share
-// ntp.js's upstream commit 73f199f4) and screenshot_delay, 2.5.4 for the
-// ssh/sftp batch. A field absent from the map is read since 2.0.0
-// (manual_status, smtpSecurity, the snmp/rabbitmq/mqtt keys, ...) and needs
-// only major 2. Prerelease servers are treated as the release they name —
-// a 2.1.0-beta.x without the field still drops it, but gating betas needs
-// per-beta entries.
+// tag: 2.1.0 for the response-config / ws / domain-expiry batch and
+// snmpV3Username, 2.4.0 for the token fields, 2.5.0 for the ntp thresholds
+// (their columns share ntp.js's upstream commit 73f199f4) and
+// screenshot_delay, 2.5.4 for the ssh/sftp batch. A field absent from the
+// map is read since 2.0.0 (manual_status, smtpSecurity, the
+// snmp/rabbitmq/mqtt keys, ...) and needs only major 2. Prerelease servers
+// are treated as the release they name — a 2.1.0-beta.x without the field
+// still drops it, but gating betas needs per-beta entries.
+// snmpV3Username is the exception to the map's editMonitor rule: no
+// editMonitor ever reads it — only `add`'s bean.import persists it (into
+// snmp_v3_username, whose column and snmp.js's v3 branch ship together in
+// 2.1.0) — so its entry gates add instead, where the missing column would
+// fail loudly on the insert. checkEditFields refuses it outright.
 const KUMA2_FIELD_MIN_VERSION: Record<string, MinVersion> = {
   domainExpiryNotification: [2, 1, 0],
   location: [2, 1, 0],
@@ -99,6 +104,7 @@ const KUMA2_FIELD_MIN_VERSION: Record<string, MinVersion> = {
   system_service_name: [2, 1, 0],
   wsIgnoreSecWebsocketAcceptHeader: [2, 1, 0],
   wsSubprotocol: [2, 1, 0],
+  snmpV3Username: [2, 1, 0],
   bearer_token: [2, 4, 0],
   gamedigToken: [2, 4, 0],
   ntpRootDispersionThreshold: [2, 5, 0],
@@ -143,6 +149,13 @@ const DNS_RESOLVE_TYPES = [
 // 2.x-only monitor field and the 2.x UI defaults it to "==".
 const JSON_PATH_OPERATORS = ["==", "!=", "<", "<=", ">", ">=", "contains"] as const;
 
+// The picker's SNMP Version select (2.5.11 EditMonitor.vue): net-snmp's
+// Version keys minus "2", which upstream never offered.
+const SNMP_VERSIONS = ["1", "2c", "3"] as const;
+
+// The picker's snmpOid input pattern (2.5.11 EditMonitor.vue).
+const SNMP_OID_PATTERN = /^([0-2])((\.0)|(\.[1-9][0-9]*))*$/;
+
 // monitorTypesWithEncodingAllowed of EditMonitor.vue's submit() (1.23.17 and
 // 2.5.11 alike): httpBodyEncoding stays on the monitor only for these types;
 // for every other type the UI sends null.
@@ -171,18 +184,19 @@ const TYPE_FLAGS: { flag: string; opt: string; types: readonly string[] }[] = [
       "tailscale-ping",
       "ntp",
       "smtp",
+      "snmp",
     ],
   },
   {
     flag: "--port",
     opt: "port",
-    types: ["port", "dns", "steam", "gamedig", "mqtt", "radius", "ntp", "smtp"],
+    types: ["port", "dns", "steam", "gamedig", "mqtt", "radius", "ntp", "smtp", "snmp"],
   },
   { flag: "--keyword", opt: "keyword", types: ["keyword", "grpc-keyword"] },
   { flag: "--invert-keyword", opt: "invertKeyword", types: ["keyword", "grpc-keyword"] },
-  { flag: "--json-path", opt: "jsonPath", types: ["json-query"] },
-  { flag: "--json-path-operator", opt: "jsonPathOperator", types: ["json-query"] },
-  { flag: "--expected-value", opt: "expectedValue", types: ["json-query"] },
+  { flag: "--json-path", opt: "jsonPath", types: ["json-query", "snmp"] },
+  { flag: "--json-path-operator", opt: "jsonPathOperator", types: ["json-query", "snmp"] },
+  { flag: "--expected-value", opt: "expectedValue", types: ["json-query", "snmp"] },
   { flag: "--packet-size", opt: "packetSize", types: ["ping"] },
   { flag: "--dns-resolve-server", opt: "dnsResolveServer", types: ["dns"] },
   { flag: "--dns-resolve-type", opt: "dnsResolveType", types: ["dns"] },
@@ -211,6 +225,9 @@ const TYPE_FLAGS: { flag: string; opt: string; types: readonly string[] }[] = [
   { flag: "--radius-calling-station-id", opt: "radiusCallingStationId", types: ["radius"] },
   { flag: "--database-query", opt: "databaseQuery", types: DATABASE_QUERY_TYPES },
   { flag: "--push-token", opt: "pushToken", types: ["push"] },
+  { flag: "--snmp-oid", opt: "snmpOid", types: ["snmp"] },
+  { flag: "--snmp-version", opt: "snmpVersion", types: ["snmp"] },
+  { flag: "--snmp-v3-username", opt: "snmpV3Username", types: ["snmp"] },
 ];
 
 // monitorDefaults of src/pages/EditMonitor.vue in Kuma 1.23.17, minus the fields the CLI always
@@ -256,21 +273,24 @@ const MONITOR_2X_DEFAULTS: Record<string, unknown> = {
 };
 
 // The timeout default the 2.x UI picks per type (2.5.11 EditMonitor.vue);
-// every other type the CLI can add, and every type on 1.23, defaults to 48
-// (the 2.x UI's snmp default of 5 does not apply: the picker has no snmp).
-const KUMA2_TIMEOUT_DEFAULTS: Record<string, number> = { ping: 10, "kafka-producer": 1 };
+// every other type the CLI can add, and every type on 1.23, defaults to 48.
+const KUMA2_TIMEOUT_DEFAULTS: Record<string, number> = {
+  ping: 10,
+  "kafka-producer": 1,
+  snmp: 5,
+};
 
 // The interval default the 2.x UI picks per type (2.5.11 EditMonitor.vue:
 // "NTP servers may rate-limit frequent queries; default to 5 minutes");
 // every other type, and every type on 1.23, defaults to 60.
 const KUMA2_INTERVAL_DEFAULTS: Record<string, number> = { ntp: 300 };
 
-// The port a type's own default is on an edit type change — ntp's comes
-// from the picker's watcher like the add's; smtp's watcher leaves the
-// required input blank, but its check() runs `port || 25`. An empty port
-// or another type's well-known default is replaced by it; a port the
-// edit sets wins.
-const TYPE_CHANGE_PORT_DEFAULTS: Record<string, number> = { ntp: 123, smtp: 25 };
+// The port a type's own default is on an edit type change — ntp's and
+// snmp's come from the picker's watcher like the add's; smtp's watcher
+// leaves the required input blank, but its check() runs `port || 25`. An
+// empty port or another type's well-known default is replaced by it; a
+// port the edit sets wins.
+const TYPE_CHANGE_PORT_DEFAULTS: Record<string, number> = { ntp: 123, smtp: 25, snmp: 161 };
 
 // The ports that read as "another type's default" to the watcher:
 // 22 / 53 / 123 / 1812 are its own list (sftp / dns / ntp / radius), and
@@ -286,6 +306,14 @@ const TYPE_CHANGE_KNOWN_PORTS = new Set([
   1812,
   ...Object.values(TYPE_CHANGE_PORT_DEFAULTS),
 ]);
+
+// The timeouts that read as "the picker's default" on an edit type change:
+// the 2.x watcher resets timeout to the new type's pick on every change,
+// but the CLI cannot tell a watcher-stored value from a user's pick of the
+// same number — so like the port rule, only a stored watcher value (the
+// per-type picks plus the generic 48, which is also every 1.x default) is
+// replaced, and a custom timeout survives the change.
+const TYPE_CHANGE_KNOWN_TIMEOUTS = new Set([...Object.values(KUMA2_TIMEOUT_DEFAULTS), 48]);
 
 const PUSH_TOKEN_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -414,6 +442,15 @@ function checkEditFields(fields: Record<string, unknown>, source: string): void 
     if (key === "id") fail(2, `${source} cannot set "id"; the id selects the monitor`);
     if (key === "active") {
       fail(2, `${source} cannot set "active"; use monitors pause / resume instead`);
+    }
+    // snmpV3Username is a monitor field but no editMonitor ever copies it
+    // onto the bean — only `add`'s bean.import persists it — so a set
+    // snmpV3Username= would silently do nothing on every version.
+    if (key === "snmpV3Username") {
+      fail(
+        2,
+        `${source} cannot set "snmpV3Username"; Kuma's editMonitor does not read it — the v3 username can only be set when the monitor is added`,
+      );
     }
     if (!isMonitorField(key)) {
       fail(2, `${source} key "${key}" is not a monitor field`);
@@ -819,6 +856,25 @@ const HATCH_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unknow
     }
     return v;
   },
+  snmpVersion: (v, k) => {
+    // a --set snmpVersion=3 parses to the number 3; the wire value is the
+    // string form, like port's number parse
+    const s = typeof v === "number" ? String(v) : v;
+    if (typeof s !== "string" || !(SNMP_VERSIONS as readonly string[]).includes(s)) {
+      fail(2, `${k} must be one of ${SNMP_VERSIONS.join(", ")}`);
+    }
+    return s;
+  },
+  snmpOid: (v, k) => {
+    if (typeof v !== "string" || !SNMP_OID_PATTERN.test(v)) {
+      fail(2, `${k} must be an OID like 1.3.6.1.4.1.9.6.1.101`);
+    }
+    return v;
+  },
+  snmpV3Username: (v, k) => {
+    if (typeof v !== "string" || v === "") fail(2, `${k} must be a non-empty string`);
+    return v;
+  },
   // a manual monitor's check writes manual_status into the heartbeat row.
   // The server would store any smallint, but the UI only offers Up/Down and
   // manual.js gives every other value a "Pending" msg, so only the UI's
@@ -919,7 +975,7 @@ function checkKuma2Ping(s: KumaSession, monitor: Record<string, unknown>): void 
 function validateFinalMonitor(
   s: KumaSession,
   monitor: Record<string, unknown>,
-  edit?: { touched: ReadonlySet<string>; typeChanged: boolean },
+  edit?: { touched: ReadonlySet<string>; typeChanged: boolean; storedSnmpVersion?: unknown },
 ): void {
   const type = typeof monitor.type === "string" ? monitor.type : "";
   const inScope = (field: string): boolean =>
@@ -957,7 +1013,9 @@ function validateFinalMonitor(
       }
     }
   }
-  if (type === "json-query") {
+  if (type === "json-query" || type === "snmp") {
+    // The picker's shared Json Query block requires both for snmp the same
+    // as for json-query — snmp.js runs evaluateJsonQuery on the varbind.
     needString("jsonPath");
     needString("expectedValue");
   }
@@ -971,7 +1029,8 @@ function validateFinalMonitor(
     type === "mqtt" ||
     type === "radius" ||
     type === "ntp" ||
-    type === "smtp"
+    type === "smtp" ||
+    type === "snmp"
   ) {
     needString("hostname");
   }
@@ -982,7 +1041,8 @@ function validateFinalMonitor(
       type === "mqtt" ||
       type === "radius" ||
       type === "ntp" ||
-      type === "smtp") &&
+      type === "smtp" ||
+      type === "snmp") &&
     inScope("port")
   ) {
     const port = monitor.port;
@@ -1011,6 +1071,48 @@ function validateFinalMonitor(
     needString("radiusSecret");
     needString("radiusCalledStationId");
     needString("radiusCallingStationId");
+  }
+  if (type === "snmp") {
+    needString("snmpOid");
+    if (
+      inScope("snmpOid") &&
+      typeof monitor.snmpOid === "string" &&
+      !SNMP_OID_PATTERN.test(monitor.snmpOid)
+    ) {
+      fail(2, `snmpOid must be an OID like 1.3.6.1.4.1.9.6.1.101, got "${monitor.snmpOid}"`);
+    }
+    // A v3 monitor can never gain its username later — no editMonitor reads
+    // snmpV3Username — so storing a v3 monitor without one can only break;
+    // the picker's input is required the same way. A row that is already v3
+    // keeps the username its add stored (the column survives every edit —
+    // even a type change away and back — because nothing writes it), so an
+    // edit only needs a username when the stored row is not already v3.
+    if (monitor.snmpVersion === "3" && edit?.storedSnmpVersion !== "3") {
+      needString("snmpV3Username");
+    }
+    // The column only exists for v3 — a username beside another version
+    // would store a value no version can ever use (edit can never turn the
+    // monitor v3 to reach it), so the picker hides the input and the CLI
+    // refuses it, empty string included like the hatch check does.
+    if (monitor.snmpVersion !== "3" && monitor.snmpV3Username !== undefined) {
+      fail(2, 'snmpV3Username only applies to snmpVersion "3"; drop it or set the version to 3');
+    }
+  }
+  // A "3" stored outside snmp can only be the untouched carry of a row
+  // that really was v3 (a monitor edited away and back); a set that writes
+  // one onto a non-snmp monitor forges the exact state a later type=snmp
+  // edit must trust — the username that would prove it is invisible to
+  // toJSON — and the monitor it becomes would beat dead on "SNMPv3
+  // username is required" with no edit able to fix it.
+  if (
+    type !== "snmp" &&
+    monitor.snmpVersion === "3" &&
+    (edit === undefined || edit.touched.has("snmpVersion"))
+  ) {
+    fail(
+      2,
+      'snmpVersion "3" cannot be set on a non-snmp monitor: the row would look like a v3 monitor with no username — set the version on the snmp type, or add a new v3 monitor',
+    );
   }
   // databaseConnectionString is a secret, so it can only arrive through
   // --config-file (--set refuses it) and there is no typed flag to check
@@ -1220,17 +1322,18 @@ export function registerMonitors(program: Command): void {
     .option("--url <url>", "monitor url")
     .option(
       "--hostname <hostname>",
-      "hostname (port, ping, dns, steam, gamedig, mqtt, radius, tailscale-ping, ntp)",
+      "hostname (port, ping, dns, steam, gamedig, mqtt, radius, tailscale-ping, ntp, smtp, snmp)",
     )
-    .option("--port <port>", "port (port, dns, steam, gamedig, mqtt, radius, ntp)")
+    .option("--port <port>", "port (port, dns, steam, gamedig, mqtt, radius, ntp, smtp, snmp)")
     .option("--keyword <keyword>", "keyword (keyword, grpc-keyword types)")
-    .option("--json-path <path>", "json path (json-query type)")
+    .option("--json-path <path>", "json path (json-query, snmp types)")
     .addOption(
-      new Option("--json-path-operator <op>", "json query operator (json-query type)").choices([
-        ...JSON_PATH_OPERATORS,
-      ]),
+      new Option(
+        "--json-path-operator <op>",
+        "json query operator (json-query, snmp types)",
+      ).choices([...JSON_PATH_OPERATORS]),
     )
-    .option("--expected-value <value>", "expected value (json-query type)")
+    .option("--expected-value <value>", "expected value (json-query, snmp types)")
     .option("--packet-size <bytes>", "ping packet size")
     .option("--dns-resolve-server <server>", "DNS resolver server")
     .addOption(
@@ -1267,6 +1370,13 @@ export function registerMonitors(program: Command): void {
     .option("--radius-called-station-id <id>", "radius called station id (radius type)")
     .option("--radius-calling-station-id <id>", "radius calling station id (radius type)")
     .option("--database-query <sql>", "SQL query (sqlserver, postgres, mysql types)")
+    .option("--snmp-oid <oid>", "SNMP OID to query (snmp type)")
+    .addOption(
+      new Option("--snmp-version <version>", "SNMP version (snmp type)").choices([
+        ...SNMP_VERSIONS,
+      ]),
+    )
+    .option("--snmp-v3-username <username>", "SNMPv3 username (snmp type, add only)")
     .option("--interval <seconds>", "heartbeat interval")
     .option("--retry-interval <seconds>", "retry interval")
     .option("--max-retries <n>", "maximum retries")
@@ -1346,9 +1456,23 @@ export function registerMonitors(program: Command): void {
         type === "tailscale-ping" ||
         type === "radius" ||
         type === "ntp" ||
-        type === "smtp"
+        type === "smtp" ||
+        type === "snmp"
       ) {
         if (!opts.hostname) fail(2, `--type ${type} requires --hostname`);
+      }
+      if (type === "snmp") {
+        if (opts.snmpOid === undefined) fail(2, "--type snmp requires --snmp-oid");
+        if (typeof opts.snmpOid === "string" && !SNMP_OID_PATTERN.test(opts.snmpOid)) {
+          fail(2, `--snmp-oid must be an OID like 1.3.6.1.4.1.9.6.1.101, got "${opts.snmpOid}"`);
+        }
+        // The shared picker's Json Query block marks all three required for
+        // snmp the same as for json-query.
+        if (!opts.jsonPath) fail(2, "--type snmp requires --json-path");
+        if (opts.expectedValue === undefined) {
+          fail(2, "--type snmp requires --expected-value");
+        }
+        if (opts.expectedValue === "") fail(2, "expectedValue must be a non-empty string");
       }
       if (type === "radius") {
         if (!opts.radiusUsername) fail(2, "--type radius requires --radius-username");
@@ -1469,10 +1593,10 @@ export function registerMonitors(program: Command): void {
           : parseTimeoutSeconds(opts.timeout, "--timeout");
       const proxyIdOption =
         opts.proxyId === undefined ? undefined : parseId(opts.proxyId, "--proxy-id");
-      // dns, radius and ntp get their well-known ports from the UI's type
-      // watcher (53 / 1812 / 123); smtp's watcher leaves the required input
-      // blank, but the check runs `port || 25`, so 25 is its own default.
-      // The other port types require --port (checked above).
+      // dns, radius, ntp and snmp get their well-known ports from the UI's
+      // type watcher (53 / 1812 / 123 / 161); smtp's watcher leaves the
+      // required input blank, but the check runs `port || 25`, so 25 is its
+      // own default. The other port types require --port (checked above).
       let port: number | undefined;
       if (type === "dns") {
         port = opts.port === undefined ? 53 : parsePort(opts.port, "--port");
@@ -1482,6 +1606,8 @@ export function registerMonitors(program: Command): void {
         port = opts.port === undefined ? 123 : parsePort(opts.port, "--port");
       } else if (type === "smtp") {
         port = opts.port === undefined ? 25 : parsePort(opts.port, "--port");
+      } else if (type === "snmp") {
+        port = opts.port === undefined ? 161 : parsePort(opts.port, "--port");
       } else if (type === "port" || type === "steam" || type === "gamedig" || type === "mqtt") {
         port = parsePort(opts.port, "--port");
       }
@@ -1526,6 +1652,12 @@ export function registerMonitors(program: Command): void {
       // add ignores the flag on other types, so only json-query counts here
       if (opts.jsonPathOperator !== undefined && type === "json-query") {
         twoXFieldCandidates.push("jsonPathOperator");
+      }
+      // snmpV3Username's add-time gate is above major 2 (snmp_v3_username
+      // first ships in 2.1.0), so the flag's field cannot wait for the
+      // hatch merge to count.
+      if (opts.snmpV3Username !== undefined && type === "snmp") {
+        twoXFieldCandidates.push("snmpV3Username");
       }
       checkKuma2xType(s, type);
       checkKuma2xFields(s, twoXFieldCandidates);
@@ -1653,6 +1785,17 @@ export function registerMonitors(program: Command): void {
         // default; the UI sends "==". 1.23 never receives the field — the
         // flag and the hatch keys were refused after connect().
         if (s.majorVersion >= 2) typed.jsonPathOperator = opts.jsonPathOperator ?? "==";
+      }
+      if (type === "snmp") {
+        typed.snmpOid = opts.snmpOid;
+        // The picker defaults snmpVersion to "2c" when unset.
+        typed.snmpVersion = opts.snmpVersion ?? "2c";
+        typed.jsonPath = opts.jsonPath;
+        typed.expectedValue = opts.expectedValue;
+        // Same jsonPathOperator fill as json-query — snmp runs the same
+        // evaluateJsonQuery on the varbind value and the type is 2.x-only.
+        typed.jsonPathOperator = opts.jsonPathOperator ?? "==";
+        if (opts.snmpV3Username !== undefined) typed.snmpV3Username = opts.snmpV3Username;
       }
       if (port !== undefined) {
         typed.hostname = opts.hostname;
@@ -1829,10 +1972,14 @@ export function registerMonitors(program: Command): void {
       for (const [k, v] of Object.entries(fileConfig)) monitor[k] = v;
       for (const [k, v] of Object.entries(sets)) monitor[k] = v;
       const typeChanged = monitor.type !== fetched.type;
-      if (opts.jsonPathOperator !== undefined && monitor.type !== "json-query") {
-        fail(2, "--json-path-operator only applies to --type json-query");
+      if (
+        opts.jsonPathOperator !== undefined &&
+        monitor.type !== "json-query" &&
+        monitor.type !== "snmp"
+      ) {
+        fail(2, "--json-path-operator only applies to --type json-query or snmp");
       }
-      if (monitor.type === "json-query" && s.majorVersion >= 2) {
+      if ((monitor.type === "json-query" || monitor.type === "snmp") && s.majorVersion >= 2) {
         // Like add's typed flags, the flag sits below --config-file and --set;
         // a monitor turned into json-query needs an operator like a new one.
         if (
@@ -1844,6 +1991,10 @@ export function registerMonitors(program: Command): void {
         }
         monitor.jsonPathOperator ??= "==";
       }
+      // The picker's watcher defaults an unset snmpVersion to "2c" — a
+      // monitor turned into snmp (or added before the field existed) has
+      // none, and net-snmp would read null as v1.
+      if (monitor.type === "snmp" && !monitor.snmpVersion) monitor.snmpVersion = "2c";
       if (parentId !== undefined) monitor.parent = parentId;
       // Kuma iterates notificationIDList with for...in, so an array would be
       // stored under its indexes; always send the object shape.
@@ -1861,18 +2012,23 @@ export function registerMonitors(program: Command): void {
         sets.timeout !== undefined ||
         fileConfig.timeout !== undefined;
       const type = typeof monitor.type === "string" ? monitor.type : "";
-      // A type change that keeps a stored timeout the new type cannot run is
-      // normalized like an unset one — on 1.23 a nonpositive timeout reads as
-      // interval × 800 seconds at check time, so a stored 0 (or less) gets the
-      // type default, while on 2.x a stored 0 is legal and kept. A timeout the
-      // same edit sets is never overwritten.
-      const timeoutUnset =
+      // A type change resets a stored timeout to the new type's pick like
+      // the watcher does, under the same "defaults are defaults" rule as
+      // the port branch: an unset or invalid one (on 1.23 a nonpositive
+      // timeout reads as interval × 800 seconds at check time; on 2.x a
+      // stored 0 is legal and kept) and, on 2.x only, a stored watcher
+      // value alike are replaced — the 1.x watcher never touches timeout
+      // on a type change, so there a 48 is a user's pick and survives —
+      // while a custom timeout and one the same edit sets are never
+      // overwritten.
+      const timeoutDefaulted =
         typeChanged &&
         !touched.has("timeout") &&
         (typeof monitor.timeout !== "number" ||
           monitor.timeout < 0 ||
-          (monitor.timeout === 0 && s.majorVersion < 2));
-      if (timeoutUnset) {
+          (monitor.timeout === 0 && s.majorVersion < 2) ||
+          (s.majorVersion >= 2 && TYPE_CHANGE_KNOWN_TIMEOUTS.has(monitor.timeout)));
+      if (timeoutDefaulted) {
         monitor.timeout = defaultTimeoutSeconds(s, type);
       }
       // The UI's submit() sends httpBodyEncoding null outside the encoding
@@ -1924,7 +2080,7 @@ export function registerMonitors(program: Command): void {
       ) {
         monitor.retryInterval = monitor.interval;
       }
-      if (timingTouched || timeoutUnset || intervalDefaulted) {
+      if (timingTouched || timeoutDefaulted || intervalDefaulted) {
         deriveMonitorTiming(monitor, defaultTimeoutSeconds(s, type), capsTimeout(s, type));
       }
       // The new type's eligibility is judged before its required fields, like
@@ -1934,7 +2090,21 @@ export function registerMonitors(program: Command): void {
         checkKuma2xType(s, monitor.type);
         checkTailscalePing(s, monitor.type);
       }
-      validateFinalMonitor(s, monitor, { touched, typeChanged });
+      // A non-v3 monitor can never become v3 by edit: snmpV3Username is
+      // required for v3 and no editMonitor reads it, so the monitor would
+      // run v3 with no username — a down check that no later edit can fix.
+      // An already-v3 monitor keeps its stored username.
+      if (monitor.type === "snmp" && monitor.snmpVersion === "3" && fetched.snmpVersion !== "3") {
+        fail(
+          2,
+          'cannot set snmpVersion "3" on a monitor that is not already v3: snmpV3Username is required and can only be given on add — create a new monitor',
+        );
+      }
+      validateFinalMonitor(s, monitor, {
+        touched,
+        typeChanged,
+        storedSnmpVersion: fetched.snmpVersion,
+      });
       checkKuma2Ping(s, monitor);
       if (monitor.type === "gamedig" && (typeChanged || touched.has("game"))) {
         await checkGameId(s, monitor);
