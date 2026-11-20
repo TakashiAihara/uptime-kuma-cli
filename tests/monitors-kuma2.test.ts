@@ -79,6 +79,10 @@ describe("monitors add on Kuma 2.x", () => {
       const m = stored(k, name);
       expect(m.conditions).toEqual([]);
       expect(m.rabbitmqNodes).toEqual([]);
+      // the UI's monitorDefaults carries the ntp thresholds for every type
+      expect(m.ntpStratumThreshold).toBe(5);
+      expect(m.ntpTimeOffsetThreshold).toBe(1000);
+      expect(m.ntpRootDispersionThreshold).toBe(500);
     }
   });
 
@@ -812,6 +816,10 @@ describe("ntp monitors", () => {
     expect(m.port).toBe(123);
     expect(m.interval).toBe(300);
     expect(m.retryInterval).toBe(300);
+    // and its monitorDefaults carries the thresholds
+    expect(m.ntpStratumThreshold).toBe(5);
+    expect(m.ntpTimeOffsetThreshold).toBe(1000);
+    expect(m.ntpRootDispersionThreshold).toBe(500);
   });
 
   test("add --type ntp --port and --interval override the defaults", async () => {
@@ -1005,19 +1013,76 @@ describe("ntp monitors", () => {
     expect(editCalls(k)).toHaveLength(0);
   });
 
-  test("edit --set type=ntp needs port on the merged monitor", async () => {
+  // the UI's type watcher fills the same defaults on a type change, so an
+  // http monitor needs only hostname to become ntp
+  test("edit --set type=ntp fills the picker's port and interval on 2.x", async () => {
     const k = await useFake({ profile: "2.x", monitors: [http(7, "h")] });
     const r = await run(
       sb,
       ["monitors", "edit", "7", "--set", "type=ntp", "--set", "hostname=ntp.example.com"],
       creds(k.url),
     );
-    expect(r.code).toBe(2);
-    expect(r.stderr).toContain("port must be a port number");
-    expect(editCalls(k)).toHaveLength(0);
+    expect(r.code).toBe(0);
+    expect(stored(k, "h")).toMatchObject({
+      type: "ntp",
+      hostname: "ntp.example.com",
+      port: 123,
+      interval: 300,
+      retryInterval: 300,
+    });
   });
 
-  test("edit --set type=ntp with hostname and port stores it on 2.x", async () => {
+  // the watcher replaces another type's well-known port, not a custom one
+  test("edit --set type=ntp replaces a dns monitor's port 53", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [
+        {
+          ...http(7, "h"),
+          type: "dns",
+          url: null,
+          hostname: "dns.example.com",
+          port: 53,
+          dns_resolve_type: "A",
+        },
+      ],
+    });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=ntp", "--set", "hostname=ntp.example.com"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "h")).toMatchObject({
+      type: "ntp",
+      hostname: "ntp.example.com",
+      port: 123,
+      interval: 300,
+    });
+  });
+
+  test("edit --set type=ntp keeps a custom port", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [
+        { ...http(7, "h"), type: "port", url: null, hostname: "h.example.com", port: 8080 },
+      ],
+    });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=ntp", "--set", "hostname=ntp.example.com"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "h")).toMatchObject({
+      type: "ntp",
+      hostname: "ntp.example.com",
+      port: 8080,
+      interval: 300,
+    });
+  });
+
+  test("edit --set type=ntp keeps the port and interval the edit sets", async () => {
     const k = await useFake({ profile: "2.x", monitors: [http(7, "h")] });
     const r = await run(
       sb,
@@ -1030,7 +1095,9 @@ describe("ntp monitors", () => {
         "--set",
         "hostname=ntp.example.com",
         "--set",
-        "port=123",
+        "port=8053",
+        "--set",
+        "interval=60",
       ],
       creds(k.url),
     );
@@ -1038,7 +1105,8 @@ describe("ntp monitors", () => {
     expect(stored(k, "h")).toMatchObject({
       type: "ntp",
       hostname: "ntp.example.com",
-      port: 123,
+      port: 8053,
+      interval: 60,
     });
   });
 
@@ -1109,6 +1177,33 @@ describe("ntp monitors", () => {
     );
     expect(r.code).toBe(2);
     expect(r.stderr).toContain("ntpStratumThreshold must be an integer between 1 and 15");
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  // an empty --interval must fail, not silently land on the 300 default
+  test("add --type ntp --interval '' exits 2", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "ntp", "--name", "n1", "--hostname", "h", "--interval", ""],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--interval must be at least 1 second");
+    expect(k.calls).toHaveLength(0);
+  });
+
+  // a type the server cannot run is refused before the new type's
+  // required fields are judged, like the 2.x gate
+  test("edit --set type=tailscale-ping names the container refusal before the hostname check", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [http(7, "h")] });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=tailscale-ping"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("tailscale-ping is not available");
     expect(editCalls(k)).toHaveLength(0);
   });
 

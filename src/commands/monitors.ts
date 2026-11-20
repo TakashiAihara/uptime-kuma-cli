@@ -189,6 +189,11 @@ const MONITOR_2X_DEFAULTS: Record<string, unknown> = {
   // the 2.x UI sends it for every type, so a monitor later turned into
   // json-query still has an operator (null fails every beat)
   jsonPathOperator: "==",
+  // the UI's monitorDefaults carries the ntp thresholds for every type
+  // too, so a UI-created row always has them filled
+  ntpStratumThreshold: 5,
+  ntpTimeOffsetThreshold: 1000,
+  ntpRootDispersionThreshold: 500,
 };
 
 // The timeout default the 2.x UI picks per type (2.5.11 EditMonitor.vue);
@@ -1773,6 +1778,20 @@ export function registerMonitors(program: Command): void {
         !(BODY_ENCODING_TYPES as readonly string[]).includes(type)
       ) {
         monitor.httpBodyEncoding = null;
+      }
+      // The UI's type watcher runs these on a type change to ntp too:
+      // interval goes to 300 ("NTP servers may rate-limit frequent
+      // queries") and a port that is empty or another type's well-known
+      // default goes to 123; values this edit sets win.
+      if (typeChanged && type === "ntp") {
+        if (!touched.has("interval")) monitor.interval = 300;
+        const port = monitor.port;
+        if (
+          !touched.has("port") &&
+          (!port || port === 22 || port === 53 || port === 123 || port === 1812)
+        ) {
+          monitor.port = 123;
+        }
       }
       // The UI's interval watcher moves retryInterval only while the two
       // stored values were equal; a retryInterval the edit sets wins.
