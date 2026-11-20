@@ -833,8 +833,12 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
     expect(r.code).toBe(0);
     const id = r.json().id;
 
+    // the add persisted the row; toJSON emits snmpVersion but not the
+    // username (2.5.11 monitor.js toJSON lists snmpOid/snmpVersion only —
+    // like manual_status, the column is stored but never read back)
     const g = await cliRun(sb, ["monitors", "get", String(id)]);
-    expect(g.json()).toMatchObject({ type: "snmp", snmpVersion: "3", snmpV3Username: "ituser" });
+    expect(g.json()).toMatchObject({ type: "snmp", snmpVersion: "3" });
+    expect(g.json()).not.toHaveProperty("snmpV3Username");
 
     // no release's editMonitor reads the column — a set of it exits 2
     // instead of silently doing nothing, like `active`
@@ -842,11 +846,11 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
     expect(u.code).toBe(2);
     expect(u.stderr).toContain('cannot set "snmpV3Username"');
 
-    // an unrelated edit keeps the stored username
+    // an unrelated edit leaves the v3 monitor editable and stored
     const e = await cliRun(sb, ["monitors", "edit", String(id), "--set", "description=it"]);
     expect(e.code).toBe(0);
     const g2 = await cliRun(sb, ["monitors", "get", String(id)]);
-    expect(g2.json().snmpV3Username).toBe("ituser");
+    expect(g2.json()).toMatchObject({ description: "it", snmpVersion: "3" });
 
     const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
     expect(del.code).toBe(0);
@@ -878,6 +882,55 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
     const r = await cliRun(sb, ["monitors", "edit", String(id), "--set", "snmpVersion=3"]);
     expect(r.code).toBe(2);
     expect(r.stderr).toContain('cannot set snmpVersion "3" on a monitor that is not already v3');
+
+    const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
+    expect(del.code).toBe(0);
+  }, 120_000);
+
+  // the username column survives a type change away (no editMonitor writes
+  // it), and toJSON keeps emitting snmpVersion "3" — so a v3 monitor that
+  // left snmp can come back: it is still a v3 row with its username
+  test("snmp v3: a v3 monitor can leave snmp and come back", async () => {
+    if (!onSnmpV3) return;
+    const a = await cliRun(sb, [
+      "monitors",
+      "add",
+      "--type",
+      "snmp",
+      "--name",
+      "it-snmpv3rt",
+      "--hostname",
+      "127.0.0.1",
+      "--snmp-oid",
+      "1.3.6.1.2.1.1.1.0",
+      "--json-path",
+      "$",
+      "--expected-value",
+      "up",
+      "--snmp-version",
+      "3",
+      "--snmp-v3-username",
+      "ituser",
+      "--paused",
+    ]);
+    expect(a.code).toBe(0);
+    const id = a.json().id;
+
+    const away = await cliRun(sb, [
+      "monitors",
+      "edit",
+      String(id),
+      "--set",
+      "type=http",
+      "--set",
+      "url=https://example.com",
+    ]);
+    expect(away.code).toBe(0);
+
+    const back = await cliRun(sb, ["monitors", "edit", String(id), "--set", "type=snmp"]);
+    expect(back.code).toBe(0);
+    const g = await cliRun(sb, ["monitors", "get", String(id)]);
+    expect(g.json()).toMatchObject({ type: "snmp", snmpVersion: "3" });
 
     const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
     expect(del.code).toBe(0);

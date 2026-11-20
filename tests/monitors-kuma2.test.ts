@@ -2401,6 +2401,91 @@ describe("snmp monitors", () => {
     expect(r.stderr).toContain('type "snmp" needs Uptime Kuma 2.x; the server reports 1.23.17');
     expect(editCalls(k)).toHaveLength(0);
   });
+
+  // a v3 row keeps its username column through a type change away (no
+  // editMonitor writes it) and its snmpVersion stays stored — so editing
+  // back to snmp is legal: the row was v3, still is v3, and the username
+  // it added with is still there
+  test("a v3 monitor can leave snmp and come back", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [snmpFixture(7, "s", { snmpVersion: "3", snmpV3Username: "ops" })],
+    });
+    const away = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=http", "--set", "url=https://example.com"],
+      creds(k.url),
+    );
+    expect(away.code).toBe(0);
+    const back = await run(sb, ["monitors", "edit", "7", "--set", "type=snmp"], creds(k.url));
+    expect(back.code).toBe(0);
+    expect(stored(k, "s")).toMatchObject({
+      type: "snmp",
+      snmpVersion: "3",
+      snmpV3Username: "ops",
+    });
+  });
+
+  // the column exists for v3 only — a username beside another version can
+  // never be reached, since no edit turns the monitor v3 later
+  test.each(["1", "2c"])(
+    "add --type snmp --snmp-version %s --snmp-v3-username exits 2",
+    async (version) => {
+      const k = await useFake({ profile: "2.x" });
+      const r = await run(
+        sb,
+        [...snmpAdd, "--snmp-version", version, "--snmp-v3-username", "ops"],
+        creds(k.url),
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain('snmpV3Username only applies to snmpVersion "3"');
+      expect(addCalls(k)).toHaveLength(0);
+    },
+  );
+
+  // the watcher reset is 2.x-only: the 1.x picker never touches timeout on
+  // a type change, so even a 48 there is the user's own pick
+  test.each([10, 48])(
+    "edit --set type=keyword keeps a stored timeout %d on a 1.x server",
+    async (timeout) => {
+      const k = await useFake({ monitors: [{ ...http(7, "h"), timeout }] });
+      const r = await run(
+        sb,
+        [
+          "monitors",
+          "edit",
+          "7",
+          "--set",
+          "type=keyword",
+          "--set",
+          "url=https://example.com",
+          "--set",
+          "keyword=ok",
+        ],
+        creds(k.url),
+      );
+      expect(r.code).toBe(0);
+      expect(stored(k, "h")).toMatchObject({ type: "keyword", timeout });
+    },
+  );
+
+  // 2.x mirrors the watcher here too: a stored 48 turns into ping's 10 —
+  // and when a custom ping_per_request_timeout no longer fits, the same
+  // save the UI would lose fails the same way, with the bound named
+  test("edit --set type=ping exits 2 when the stored per-request timeout outgrows the reset", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [{ ...http(7, "h"), ping_per_request_timeout: 15 }],
+    });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=ping", "--set", "hostname=127.0.0.1"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("at least ping_per_request_timeout (15)");
+    expect(editCalls(k)).toHaveLength(0);
+  });
 });
 
 describe("monitor timing on Kuma 2.x", () => {

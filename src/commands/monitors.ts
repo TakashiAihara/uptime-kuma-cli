@@ -975,7 +975,7 @@ function checkKuma2Ping(s: KumaSession, monitor: Record<string, unknown>): void 
 function validateFinalMonitor(
   s: KumaSession,
   monitor: Record<string, unknown>,
-  edit?: { touched: ReadonlySet<string>; typeChanged: boolean },
+  edit?: { touched: ReadonlySet<string>; typeChanged: boolean; storedSnmpVersion?: unknown },
 ): void {
   const type = typeof monitor.type === "string" ? monitor.type : "";
   const inScope = (field: string): boolean =>
@@ -1083,8 +1083,24 @@ function validateFinalMonitor(
     }
     // A v3 monitor can never gain its username later — no editMonitor reads
     // snmpV3Username — so storing a v3 monitor without one can only break;
-    // the picker's input is required the same way.
-    if (monitor.snmpVersion === "3") needString("snmpV3Username");
+    // the picker's input is required the same way. A row that is already v3
+    // keeps the username its add stored (the column survives every edit —
+    // even a type change away and back — because nothing writes it), so an
+    // edit only needs a username when the stored row is not already v3.
+    if (monitor.snmpVersion === "3" && edit?.storedSnmpVersion !== "3") {
+      needString("snmpV3Username");
+    }
+    // The column only exists for v3 — a username beside another version
+    // would store a value no version can ever use (edit can never turn the
+    // monitor v3 to reach it), so the picker hides the input and the CLI
+    // refuses it.
+    if (
+      monitor.snmpVersion !== "3" &&
+      typeof monitor.snmpV3Username === "string" &&
+      monitor.snmpV3Username !== ""
+    ) {
+      fail(2, 'snmpV3Username only applies to snmpVersion "3"; drop it or set the version to 3');
+    }
   }
   // databaseConnectionString is a secret, so it can only arrive through
   // --config-file (--set refuses it) and there is no typed flag to check
@@ -1988,16 +2004,18 @@ export function registerMonitors(program: Command): void {
       // the watcher does, under the same "defaults are defaults" rule as
       // the port branch: an unset or invalid one (on 1.23 a nonpositive
       // timeout reads as interval × 800 seconds at check time; on 2.x a
-      // stored 0 is legal and kept) and a stored watcher value alike are
-      // replaced, while a custom timeout and one the same edit sets are
-      // never overwritten.
+      // stored 0 is legal and kept) and, on 2.x only, a stored watcher
+      // value alike are replaced — the 1.x watcher never touches timeout
+      // on a type change, so there a 48 is a user's pick and survives —
+      // while a custom timeout and one the same edit sets are never
+      // overwritten.
       const timeoutDefaulted =
         typeChanged &&
         !touched.has("timeout") &&
         (typeof monitor.timeout !== "number" ||
           monitor.timeout < 0 ||
           (monitor.timeout === 0 && s.majorVersion < 2) ||
-          TYPE_CHANGE_KNOWN_TIMEOUTS.has(monitor.timeout));
+          (s.majorVersion >= 2 && TYPE_CHANGE_KNOWN_TIMEOUTS.has(monitor.timeout)));
       if (timeoutDefaulted) {
         monitor.timeout = defaultTimeoutSeconds(s, type);
       }
@@ -2070,7 +2088,11 @@ export function registerMonitors(program: Command): void {
           'cannot set snmpVersion "3" on a monitor that is not already v3: snmpV3Username is required and can only be given on add — create a new monitor',
         );
       }
-      validateFinalMonitor(s, monitor, { touched, typeChanged });
+      validateFinalMonitor(s, monitor, {
+        touched,
+        typeChanged,
+        storedSnmpVersion: fetched.snmpVersion,
+      });
       checkKuma2Ping(s, monitor);
       if (monitor.type === "gamedig" && (typeChanged || touched.has("game"))) {
         await checkGameId(s, monitor);

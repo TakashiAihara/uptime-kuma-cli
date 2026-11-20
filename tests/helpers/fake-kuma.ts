@@ -612,10 +612,12 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
   const monitorTags = (m: Monitor): MonitorTagRow[] =>
     [...tagsOf(m)].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
-  // Monitor.toJSON does not emit manual_status (2.5.11 editMonitor reads it
-  // from the payload anyway), so a fetched monitor cannot carry it back
+  // Monitor.toJSON emits neither manual_status (2.5.11 editMonitor reads it
+  // from the payload anyway) nor snmpV3Username (2.5.11 monitor.js toJSON
+  // lists snmpOid/snmpVersion only), so a fetched monitor cannot carry
+  // either back
   const monitorJSON = (m: Monitor): Monitor => {
-    const { manual_status: _omitted, ...rest } = structuredClone(m);
+    const { manual_status: _omitted, snmpV3Username: _omitted2, ...rest } = structuredClone(m);
     return { ...rest, tags: monitorTags(m) } as Monitor;
   };
 
@@ -1102,6 +1104,11 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
       // drops undefined keys from the UPDATE, so the stored value survives
       if (!("manual_status" in row) && before.manual_status !== undefined) {
         row.manual_status = before.manual_status;
+      }
+      // No release's editMonitor reads snmpV3Username, so the column is
+      // never part of the UPDATE — the stored username survives any edit
+      if (!("snmpV3Username" in row) && before.snmpV3Username !== undefined) {
+        row.snmpV3Username = before.snmpV3Username;
       }
       state.monitors[i] = {
         ...row,
