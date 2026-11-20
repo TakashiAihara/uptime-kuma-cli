@@ -584,4 +584,71 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
     const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
     expect(del.code).toBe(0);
   }, 300_000);
+
+  test("ntp: 2.x stores the thresholds and a down beat arrives; 1.x refuses the type", async () => {
+    const r = await cliRun(sb, [
+      "monitors",
+      "add",
+      "--type",
+      "ntp",
+      "--name",
+      "it-ntp",
+      "--hostname",
+      "127.0.0.1",
+      "--set",
+      "ntpStratumThreshold=10",
+      "--set",
+      "ntpTimeOffsetThreshold=2000",
+      "--set",
+      "ntpRootDispersionThreshold=100",
+      "--interval",
+      "20",
+      "--timeout",
+      "5",
+    ]);
+    if (!on2x) {
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain('type "ntp" needs Uptime Kuma 2.x');
+      return;
+    }
+    expect(r.code).toBe(0);
+    const id = r.json().id;
+
+    // the camelCase wire keys land in the snake_case columns and toJSON
+    // emits them back under the same names
+    const g = await cliRun(sb, ["monitors", "get", String(id)]);
+    expect(g.json()).toMatchObject({
+      type: "ntp",
+      hostname: "127.0.0.1",
+      port: 123,
+      ntpStratumThreshold: 10,
+      ntpTimeOffsetThreshold: 2000,
+      ntpRootDispersionThreshold: 100,
+    });
+
+    // nothing answers UDP 123 on the container's loopback — the check fails
+    // (timeout at the 5 s bound) and the down beat proves the monitor runs
+    let down = false;
+    for (let i = 0; i < 12 && !down; i++) {
+      await new Promise((res) => setTimeout(res, 5_000));
+      const b = await cliRun(sb, ["beats", String(id), "--hours", "1"]);
+      expect(b.code).toBe(0);
+      down = b.json().some((beat: any) => beat.status === 0);
+    }
+    expect(down).toBe(true);
+
+    // the thresholds ride the getMonitor -> editMonitor round trip, so an
+    // unrelated edit leaves them alone
+    const e = await cliRun(sb, ["monitors", "edit", String(id), "--set", "description=it"]);
+    expect(e.code).toBe(0);
+    expect(e.json()).toMatchObject({
+      description: "it",
+      ntpStratumThreshold: 10,
+      ntpTimeOffsetThreshold: 2000,
+      ntpRootDispersionThreshold: 100,
+    });
+
+    const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
+    expect(del.code).toBe(0);
+  }, 300_000);
 });

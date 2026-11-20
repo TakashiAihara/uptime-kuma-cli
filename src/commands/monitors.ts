@@ -9,6 +9,7 @@ import {
   parseId,
   parseNonNegativeInteger,
   parsePort,
+  parsePositiveInteger,
   parsePositiveNumber,
   parseSets,
   printJson,
@@ -57,7 +58,7 @@ const MONITOR_TYPES = [
 // Like a 2.x-only field, one of these can only be refused after connect() on
 // a 1.x server — 1.23's `add` would store the row and every check would throw
 // "Unknown Monitor Type" — so the pre-connect choices list takes the union.
-const MONITOR_2X_TYPES = ["manual"] as const;
+const MONITOR_2X_TYPES = ["manual", "ntp"] as const;
 
 // The five database types of EditMonitor.vue all show a required
 // databaseConnectionString. The UI's type watcher prefills it with a template
@@ -106,9 +107,13 @@ const TYPE_FLAGS: { flag: string; opt: string; types: readonly string[] }[] = [
   {
     flag: "--hostname",
     opt: "hostname",
-    types: ["port", "ping", "dns", "steam", "gamedig", "mqtt", "radius", "tailscale-ping"],
+    types: ["port", "ping", "dns", "steam", "gamedig", "mqtt", "radius", "tailscale-ping", "ntp"],
   },
-  { flag: "--port", opt: "port", types: ["port", "dns", "steam", "gamedig", "mqtt", "radius"] },
+  {
+    flag: "--port",
+    opt: "port",
+    types: ["port", "dns", "steam", "gamedig", "mqtt", "radius", "ntp"],
+  },
   { flag: "--keyword", opt: "keyword", types: ["keyword", "grpc-keyword"] },
   { flag: "--invert-keyword", opt: "invertKeyword", types: ["keyword", "grpc-keyword"] },
   { flag: "--json-path", opt: "jsonPath", types: ["json-query"] },
@@ -190,6 +195,11 @@ const MONITOR_2X_DEFAULTS: Record<string, unknown> = {
 // every other type the CLI can add, and every type on 1.23, defaults to 48
 // (the 2.x UI's snmp default of 5 does not apply: the picker has no snmp).
 const KUMA2_TIMEOUT_DEFAULTS: Record<string, number> = { ping: 10, "kafka-producer": 1 };
+
+// The interval default the 2.x UI picks per type (2.5.11 EditMonitor.vue:
+// "NTP servers may rate-limit frequent queries; default to 5 minutes");
+// every other type, and every type on 1.23, defaults to 60.
+const KUMA2_INTERVAL_DEFAULTS: Record<string, number> = { ntp: 300 };
 
 const PUSH_TOKEN_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -605,6 +615,15 @@ function parsePacketSize(value: string, flag: string): number {
   return n;
 }
 
+// The 2.x UI's stratum-threshold input is min=1 max=15 step=1.
+function parseNtpStratumThreshold(value: string, flag: string): number {
+  const n = decimalNumber(value);
+  if (!Number.isInteger(n) || n < 1 || n > 15) {
+    fail(2, `${flag} must be an integer between 1 and 15, got "${value}"`);
+  }
+  return n;
+}
+
 // MIN/MAX_INTERVAL_SECOND of src/util.ts in Kuma 1.23.17; Monitor.validate()
 // enforces the same bounds server-side before the monitor is stored. 2.x
 // lowered the minimum to 1 and dropped the maximum, so only the union —
@@ -713,6 +732,13 @@ const HATCH_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unknow
     }
     return v;
   },
+  // The 2.x UI's NTP threshold inputs (type=number): stratum is min=1 max=15,
+  // offset and dispersion min=1, all step=1. The server would store any
+  // integer (falsy falls back to the check() defaults of 5 / 1000 / 500), so
+  // only the UI's values are accepted — like manual_status.
+  ntpStratumThreshold: (v, k) => hatchNumber(v, k, parseNtpStratumThreshold),
+  ntpTimeOffsetThreshold: (v, k) => hatchNumber(v, k, parsePositiveInteger),
+  ntpRootDispersionThreshold: (v, k) => hatchNumber(v, k, parsePositiveInteger),
 };
 
 // Runs before connecting so a bad hatch value exits 2 with nothing sent.
@@ -838,7 +864,8 @@ function validateFinalMonitor(
     type === "dns" ||
     type === "tailscale-ping" ||
     type === "mqtt" ||
-    type === "radius"
+    type === "radius" ||
+    type === "ntp"
   ) {
     needString("hostname");
   }
@@ -847,7 +874,8 @@ function validateFinalMonitor(
       type === "steam" ||
       type === "gamedig" ||
       type === "mqtt" ||
-      type === "radius") &&
+      type === "radius" ||
+      type === "ntp") &&
     inScope("port")
   ) {
     const port = monitor.port;
@@ -1085,9 +1113,9 @@ export function registerMonitors(program: Command): void {
     .option("--url <url>", "monitor url")
     .option(
       "--hostname <hostname>",
-      "hostname (port, ping, dns, steam, gamedig, mqtt, radius, tailscale-ping)",
+      "hostname (port, ping, dns, steam, gamedig, mqtt, radius, tailscale-ping, ntp)",
     )
-    .option("--port <port>", "port (port, dns, steam, gamedig, mqtt, radius)")
+    .option("--port <port>", "port (port, dns, steam, gamedig, mqtt, radius, ntp)")
     .option("--keyword <keyword>", "keyword (keyword, grpc-keyword types)")
     .option("--json-path <path>", "json path (json-query type)")
     .addOption(
@@ -1205,7 +1233,13 @@ export function registerMonitors(program: Command): void {
           fail(2, "--type kafka-producer requires --kafka-producer-message");
         }
       }
-      if (type === "ping" || type === "dns" || type === "tailscale-ping" || type === "radius") {
+      if (
+        type === "ping" ||
+        type === "dns" ||
+        type === "tailscale-ping" ||
+        type === "radius" ||
+        type === "ntp"
+      ) {
         if (!opts.hostname) fail(2, `--type ${type} requires --hostname`);
       }
       if (type === "radius") {
@@ -1306,7 +1340,10 @@ export function registerMonitors(program: Command): void {
       const interval =
         sets.interval !== undefined || fileConfig.interval !== undefined
           ? undefined
-          : parseMonitorInterval(opts.interval ?? "60", "--interval");
+          : parseMonitorInterval(
+              opts.interval ?? String(KUMA2_INTERVAL_DEFAULTS[type] ?? 60),
+              "--interval",
+            );
       const retryInterval =
         opts.retryInterval === undefined ||
         sets.retryInterval !== undefined ||
@@ -1324,13 +1361,16 @@ export function registerMonitors(program: Command): void {
           : parseTimeoutSeconds(opts.timeout, "--timeout");
       const proxyIdOption =
         opts.proxyId === undefined ? undefined : parseId(opts.proxyId, "--proxy-id");
-      // dns and radius get their well-known ports from the UI's type watcher
-      // (53 / 1812); the other port types require --port (checked above).
+      // dns, radius and ntp get their well-known ports from the UI's type
+      // watcher (53 / 1812 / 123); the other port types require --port
+      // (checked above).
       let port: number | undefined;
       if (type === "dns") {
         port = opts.port === undefined ? 53 : parsePort(opts.port, "--port");
       } else if (type === "radius") {
         port = opts.port === undefined ? 1812 : parsePort(opts.port, "--port");
+      } else if (type === "ntp") {
+        port = opts.port === undefined ? 123 : parsePort(opts.port, "--port");
       } else if (type === "port" || type === "steam" || type === "gamedig" || type === "mqtt") {
         port = parsePort(opts.port, "--port");
       }
@@ -1747,12 +1787,15 @@ export function registerMonitors(program: Command): void {
       if (timingTouched || timeoutUnset) {
         deriveMonitorTiming(monitor, defaultTimeoutSeconds(s, type), capsTimeout(s, type));
       }
-      validateFinalMonitor(s, monitor, { touched, typeChanged });
-      checkKuma2Ping(s, monitor);
+      // The new type's eligibility is judged before its required fields, like
+      // add's checkKuma2xType ahead of validateFinalMonitor — on a 1.x server
+      // "type needs 2.x" is the blocker, not a missing hostname.
       if (typeChanged) {
         checkKuma2xType(s, monitor.type);
         checkTailscalePing(s, monitor.type);
       }
+      validateFinalMonitor(s, monitor, { touched, typeChanged });
+      checkKuma2Ping(s, monitor);
       if (monitor.type === "gamedig" && (typeChanged || touched.has("game"))) {
         await checkGameId(s, monitor);
       }

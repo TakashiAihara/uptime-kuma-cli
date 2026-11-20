@@ -796,6 +796,335 @@ describe("manual monitors", () => {
   });
 });
 
+describe("ntp monitors", () => {
+  test("add --type ntp stores an ntp monitor with the UI's defaults on 2.x", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "ntp", "--name", "n1", "--hostname", "ntp.example.com"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const m = stored(k, "n1");
+    expect(m.type).toBe("ntp");
+    expect(m.hostname).toBe("ntp.example.com");
+    // the UI's type watcher fills port 123 and a 5-minute interval
+    expect(m.port).toBe(123);
+    expect(m.interval).toBe(300);
+    expect(m.retryInterval).toBe(300);
+  });
+
+  test("add --type ntp --port and --interval override the defaults", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "ntp",
+        "--name",
+        "n1",
+        "--hostname",
+        "ntp.example.com",
+        "--port",
+        "8123",
+        "--interval",
+        "120",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "n1")).toMatchObject({ port: 8123, interval: 120, retryInterval: 120 });
+  });
+
+  test("add --type ntp --set interval/port overrides the defaults too", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "ntp",
+        "--name",
+        "n1",
+        "--hostname",
+        "ntp.example.com",
+        "--set",
+        "interval=60",
+        "--set",
+        "port=8123",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "n1")).toMatchObject({ port: 8123, interval: 60 });
+  });
+
+  test("add --type ntp --set ntp*Threshold stores the thresholds", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "ntp",
+        "--name",
+        "n1",
+        "--hostname",
+        "ntp.example.com",
+        "--set",
+        "ntpStratumThreshold=10",
+        "--set",
+        "ntpTimeOffsetThreshold=2000",
+        "--set",
+        "ntpRootDispersionThreshold=100",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "n1")).toMatchObject({
+      ntpStratumThreshold: 10,
+      ntpTimeOffsetThreshold: 2000,
+      ntpRootDispersionThreshold: 100,
+    });
+  });
+
+  test("add --type ntp --config-file stores the thresholds", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const f = join(sb.dir, "ntp.json");
+    writeFileSync(
+      f,
+      JSON.stringify({
+        ntpStratumThreshold: 3,
+        ntpTimeOffsetThreshold: 250,
+        ntpRootDispersionThreshold: 50,
+      }),
+    );
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "ntp",
+        "--name",
+        "n1",
+        "--hostname",
+        "ntp.example.com",
+        "--config-file",
+        f,
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "n1")).toMatchObject({
+      ntpStratumThreshold: 3,
+      ntpTimeOffsetThreshold: 250,
+      ntpRootDispersionThreshold: 50,
+    });
+  });
+
+  test("add --type ntp without --hostname exits 2 before connecting", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(sb, ["monitors", "add", "--type", "ntp", "--name", "n1"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--type ntp requires --hostname");
+    expect(k.calls).toHaveLength(0);
+  });
+
+  test.each([
+    ["ntpStratumThreshold=0", "ntpStratumThreshold must be an integer between 1 and 15"],
+    ["ntpStratumThreshold=16", "ntpStratumThreshold must be an integer between 1 and 15"],
+    ["ntpStratumThreshold=-1", "ntpStratumThreshold must be an integer between 1 and 15"],
+    ["ntpStratumThreshold=1.5", "ntpStratumThreshold must be an integer between 1 and 15"],
+    ['ntpStratumThreshold="x"', "ntpStratumThreshold must be an integer between 1 and 15"],
+    ["ntpStratumThreshold=null", "ntpStratumThreshold must be a number"],
+    ["ntpTimeOffsetThreshold=0", "ntpTimeOffsetThreshold must be a positive integer"],
+    ["ntpTimeOffsetThreshold=-1", "ntpTimeOffsetThreshold must be a positive integer"],
+    ["ntpTimeOffsetThreshold=1.5", "ntpTimeOffsetThreshold must be a positive integer"],
+    ["ntpRootDispersionThreshold=0", "ntpRootDispersionThreshold must be a positive integer"],
+    ["ntpRootDispersionThreshold=1.5", "ntpRootDispersionThreshold must be a positive integer"],
+  ])("add --set %s exits 2 before connecting", async (set, msg) => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "ntp", "--name", "n1", "--hostname", "h", "--set", set],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(msg);
+    expect(k.calls).toHaveLength(0);
+  });
+
+  test("add --type ntp --config-file with a bad threshold exits 2 before connecting", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const f = join(sb.dir, "ntp.json");
+    writeFileSync(f, JSON.stringify({ ntpStratumThreshold: 16 }));
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "ntp", "--name", "n1", "--hostname", "h", "--config-file", f],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("ntpStratumThreshold must be an integer between 1 and 15");
+    expect(k.calls).toHaveLength(0);
+  });
+
+  test("add --type ntp exits 2 on a 1.x server after connect", async () => {
+    const k = await useFake();
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "ntp", "--name", "n1", "--hostname", "h"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('type "ntp" needs Uptime Kuma 2.x; the server reports 1.23.17');
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --type ntp names the assumed 1.x when no version arrives", async () => {
+    const k = await useFake({ info: null });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "ntp", "--name", "n1", "--hostname", "h"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('type "ntp" needs Uptime Kuma 2.x; the server sent no version');
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set type=ntp on an http monitor needs hostname on the merged monitor", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [http(7, "h")] });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "type=ntp"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("hostname must be a non-empty string");
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set type=ntp needs port on the merged monitor", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [http(7, "h")] });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=ntp", "--set", "hostname=ntp.example.com"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("port must be a port number");
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set type=ntp with hostname and port stores it on 2.x", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [http(7, "h")] });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "type=ntp",
+        "--set",
+        "hostname=ntp.example.com",
+        "--set",
+        "port=123",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "h")).toMatchObject({
+      type: "ntp",
+      hostname: "ntp.example.com",
+      port: 123,
+    });
+  });
+
+  test("edit --set type=ntp exits 2 on a 1.x server before editMonitor", async () => {
+    const k = await useFake({ monitors: [http(7, "h")] });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "type=ntp"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('type "ntp" needs Uptime Kuma 2.x; the server reports 1.23.17');
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set ntpStratumThreshold exits 2 on a 1.x server", async () => {
+    const k = await useFake({ monitors: [http(7, "h")] });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "ntpStratumThreshold=10"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('"ntpStratumThreshold" needs Uptime Kuma 2.x');
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  // toJSON emits the ntp fields, so the fetched monitor carries them back —
+  // an edit that does not touch them keeps the stored values
+  test("edit without the ntp keys keeps the stored thresholds", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [
+        {
+          ...http(7, "n"),
+          type: "ntp",
+          url: null,
+          hostname: "ntp.example.com",
+          port: 123,
+          ntpStratumThreshold: 10,
+          ntpTimeOffsetThreshold: 2000,
+          ntpRootDispersionThreshold: 100,
+        },
+      ],
+    });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", 'name="n2"'], creds(k.url));
+    expect(r.code).toBe(0);
+    expect(stored(k, "n2")).toMatchObject({
+      ntpStratumThreshold: 10,
+      ntpTimeOffsetThreshold: 2000,
+      ntpRootDispersionThreshold: 100,
+    });
+  });
+
+  test("edit --set ntpStratumThreshold=0 exits 2 before editMonitor", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [
+        {
+          ...http(7, "n"),
+          type: "ntp",
+          url: null,
+          hostname: "ntp.example.com",
+          port: 123,
+        },
+      ],
+    });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "ntpStratumThreshold=0"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("ntpStratumThreshold must be an integer between 1 and 15");
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("--type ntp refuses a flag for another type before connecting", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "ntp", "--name", "n1", "--hostname", "h", "--keyword", "x"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--keyword only applies to --type");
+    expect(k.calls).toHaveLength(0);
+  });
+});
+
 describe("monitor timing on Kuma 2.x", () => {
   test("edit of a 2.x ping to a short interval keeps its timeout (no 80% cap)", async () => {
     const k = await useFake({
