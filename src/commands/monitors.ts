@@ -58,14 +58,22 @@ const MONITOR_TYPES = [
 // Like a 2.x-only field, one of these can only be refused after connect() on
 // a 1.x server — 1.23's `add` would store the row and every check would throw
 // "Unknown Monitor Type" — so the pre-connect choices list takes the union.
-const MONITOR_2X_TYPES = ["websocket-upgrade", "manual", "ntp", "smtp", "snmp"] as const;
+const MONITOR_2X_TYPES = [
+  "websocket-upgrade",
+  "manual",
+  "ntp",
+  "smtp",
+  "snmp",
+  "oracledb",
+] as const;
 
-// server/monitor-types/websocket-upgrade.js and ntp.js first ship in 2.1.0
-// and 2.5.0 (upstream #5613 and #7214) respectively, so the major gate
-// alone would let an older 2.x store a row whose checks all throw
-// "Unknown Monitor Type" — the failure the type gate exists to prevent. A
-// type absent from the map shipped with 2.0.0 (manual in beta.4, smtp in
-// beta.3, snmp in beta.0) and needs only major 2.
+// server/monitor-types/websocket-upgrade.js, oracledb.js and ntp.js first
+// ship in 2.1.0, 2.3.0 and 2.5.0 (upstream #5613, #7156 and #7214)
+// respectively, so the major gate alone would let an older 2.x store a
+// row whose checks all throw "Unknown Monitor Type" — the failure the
+// type gate exists to prevent. A type absent from the map shipped with
+// 2.0.0 (manual in beta.4, smtp in beta.3, snmp in beta.0) and needs only
+// major 2.
 
 // The first release a gated thing needs, as [major, minor, patch] — most
 // entries land on x.y.0, but ssh/sftp's fields first shipped in a patch
@@ -76,6 +84,7 @@ const KUMA2_0: MinVersion = [2, 0, 0];
 
 const KUMA2_TYPE_MIN_VERSION: Record<string, MinVersion> = {
   "websocket-upgrade": [2, 1, 0],
+  oracledb: [2, 3, 0],
   ntp: [2, 5, 0],
 };
 
@@ -123,14 +132,16 @@ const KUMA2_FIELD_MIN_VERSION: Record<string, MinVersion> = {
   sshUsername: [2, 5, 4],
 };
 
-// The five database types of EditMonitor.vue all show a required
+// The six database types of EditMonitor.vue all show a required
 // databaseConnectionString. The UI's type watcher prefills it with a template
 // (connectionStringTemplates); the CLI sends no default, so a missing one is
 // only caught on the merged monitor in validateFinalMonitor.
-const DATABASE_TYPES = ["sqlserver", "postgres", "mysql", "mongodb", "redis"] as const;
+const DATABASE_TYPES = ["sqlserver", "postgres", "mysql", "mongodb", "redis", "oracledb"] as const;
 
-// sqlserver / postgres / mysql also show the optional databaseQuery textarea.
-const DATABASE_QUERY_TYPES = ["sqlserver", "postgres", "mysql"] as const;
+// sqlserver / postgres / mysql / oracledb also show the optional
+// databaseQuery textarea (oracledb's placeholder is "SELECT 1 FROM DUAL",
+// the query oracledb.js runs when the column is unset).
+const DATABASE_QUERY_TYPES = ["sqlserver", "postgres", "mysql", "oracledb"] as const;
 
 // kafkaSaslMechanismOptions of EditMonitor.vue
 const KAFKA_SASL_MECHANISMS = ["None", "plain", "scram-sha-256", "scram-sha-512", "aws"] as const;
@@ -1244,6 +1255,19 @@ function validateFinalMonitor(
       fail(2, "databaseConnectionString must be a non-empty string; pass it in --config-file");
     }
   }
+  // The picker marks Oracle's Username and Password required and
+  // oracledb.js dereferences both without a fallback, so a missing one
+  // makes every check throw — basic_auth_pass is a secret and can only
+  // arrive through --config-file like the connection string.
+  if (type === "oracledb") {
+    needString("basic_auth_user");
+    if (inScope("basic_auth_pass")) {
+      const pass = monitor.basic_auth_pass;
+      if (typeof pass !== "string" || pass === "") {
+        fail(2, "basic_auth_pass must be a non-empty string; pass it in --config-file");
+      }
+    }
+  }
   if (type === "gamedig") needString("game");
   if (type === "docker") {
     needString("docker_container");
@@ -1489,7 +1513,7 @@ export function registerMonitors(program: Command): void {
     .option("--radius-username <username>", "radius username (radius type)")
     .option("--radius-called-station-id <id>", "radius called station id (radius type)")
     .option("--radius-calling-station-id <id>", "radius calling station id (radius type)")
-    .option("--database-query <sql>", "SQL query (sqlserver, postgres, mysql types)")
+    .option("--database-query <sql>", "SQL query (sqlserver, postgres, mysql, oracledb types)")
     .option("--snmp-oid <oid>", "SNMP OID to query (snmp type)")
     .addOption(
       new Option("--snmp-version <version>", "SNMP version (snmp type)").choices([
@@ -2226,6 +2250,12 @@ export function registerMonitors(program: Command): void {
               monitor.accepted_statuscodes = HTTP_STATUS_DEFAULT;
             }
           }
+          // The watcher's last act resets conditions on every type change
+          // (EditMonitor.vue:3910-3913 — "condition variables likely
+          // change"): a dns monitor's `record` condition evaluated on
+          // oracledb's context would throw "Variable missing in context"
+          // every check. An explicit conditions list wins like everywhere.
+          if (!touched.has("conditions")) monitor.conditions = [];
         }
       }
       // The UI's interval watcher moves retryInterval only while the two

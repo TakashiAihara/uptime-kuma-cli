@@ -3357,6 +3357,247 @@ describe("websocket-upgrade monitors", () => {
   });
 });
 
+describe("oracledb monitors", () => {
+  // the secrets (connection string and basic_auth_pass) travel by
+  // --config-file; basic_auth_user is not a secret and fits --set
+  const oraFile = (extra: Record<string, unknown> = {}) => {
+    const f = join(sb.dir, "ora.json");
+    writeFileSync(
+      f,
+      JSON.stringify({
+        databaseConnectionString: "dbhost.example.com:1521/FREEPDB1",
+        basic_auth_pass: "ora-pw",
+        ...extra,
+      }),
+    );
+    return f;
+  };
+
+  const oraArgs = (file: string) => [
+    "monitors",
+    "add",
+    "--type",
+    "oracledb",
+    "--name",
+    "ora1",
+    "--set",
+    "basic_auth_user=scott",
+    "--config-file",
+    file,
+  ];
+
+  test("add sends the connection string, credentials and query", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [...oraArgs(oraFile()), "--database-query", "SELECT 1 FROM DUAL"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls(k)[0]!.args[0] as Record<string, unknown>;
+    expect(sent.type).toBe("oracledb");
+    expect(sent.databaseConnectionString).toBe("dbhost.example.com:1521/FREEPDB1");
+    expect(sent.basic_auth_user).toBe("scott");
+    expect(sent.basic_auth_pass).toBe("ora-pw");
+    expect(sent.databaseQuery).toBe("SELECT 1 FROM DUAL");
+  });
+
+  test("add without --database-query sends none for the server's SELECT 1 FROM DUAL", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(sb, oraArgs(oraFile()), creds(k.url));
+    expect(r.code).toBe(0);
+    const sent = addCalls(k)[0]!.args[0] as Record<string, unknown>;
+    expect(sent.databaseQuery).toBeUndefined();
+  });
+
+  test("add without databaseConnectionString exits 2 and sends no add", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const f = join(sb.dir, "ora-noconn.json");
+    writeFileSync(f, JSON.stringify({ basic_auth_pass: "ora-pw" }));
+    const r = await run(sb, oraArgs(f), creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("databaseConnectionString");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add without basic_auth_user exits 2 and sends no add", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "oracledb", "--name", "ora1", "--config-file", oraFile()],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("basic_auth_user");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add without basic_auth_pass exits 2 and sends no add", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const f = join(sb.dir, "ora-nopass.json");
+    writeFileSync(
+      f,
+      JSON.stringify({ databaseConnectionString: "dbhost.example.com:1521/FREEPDB1" }),
+    );
+    const r = await run(sb, oraArgs(f), creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("basic_auth_pass");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --set basic_auth_pass is refused before connecting", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "oracledb", "--name", "ora1", "--set", "basic_auth_pass=x"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--config-file");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --type oracledb exits 2 on a 1.x server naming 2.3.0", async () => {
+    const k = await useFake();
+    const r = await run(sb, oraArgs(oraFile()), creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(
+      'type "oracledb" needs Uptime Kuma >= 2.3.0; the server reports 1.23.17',
+    );
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --type oracledb exits 2 on 2.2.x naming 2.3.0", async () => {
+    const k = await useFake({ profile: "2.x", info: { version: "2.2.1" } });
+    const r = await run(sb, oraArgs(oraFile()), creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(
+      'type "oracledb" needs Uptime Kuma >= 2.3.0; the server reports 2.2.1',
+    );
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --type oracledb runs at the 2.3.0 boundary", async () => {
+    const k = await useFake({ profile: "2.x", info: { version: "2.3.0" } });
+    const r = await run(sb, oraArgs(oraFile()), creds(k.url));
+    expect(r.code).toBe(0);
+    expect(addCalls(k)).toHaveLength(1);
+  });
+
+  test("add with an empty basic_auth_pass exits 2 and sends no add", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const f = oraFile({ basic_auth_pass: "" });
+    const r = await run(sb, oraArgs(f), creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("basic_auth_pass");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set type=oracledb without the fields exits 2", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [http(7, "h")] });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "type=oracledb"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("databaseConnectionString");
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set type=oracledb with a full config file stores it", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [http(7, "h")] });
+    const f = oraFile({ basic_auth_user: "scott" });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=oracledb", "--config-file", f],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "h").type).toBe("oracledb");
+    expect(stored(k, "h").basic_auth_pass).toBe("ora-pw");
+  });
+
+  test("edit without touching the credentials keeps them on a stored oracledb", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [
+        http(7, "ora1", {
+          type: "oracledb",
+          url: null,
+          databaseConnectionString: "dbhost.example.com:1521/FREEPDB1",
+          basic_auth_user: "scott",
+          basic_auth_pass: "ora-pw",
+        }),
+      ],
+    });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "description=x"], creds(k.url));
+    expect(r.code).toBe(0);
+    expect(stored(k, "ora1").basic_auth_pass).toBe("ora-pw");
+    expect(stored(k, "ora1").basic_auth_user).toBe("scott");
+  });
+
+  // a stored value the edit does not touch is never re-judged — a raw
+  // socket client could store the row without credentials and a plain
+  // edit still passes, like every other required field
+  test("edit on a stored oracledb missing credentials does not re-judge it", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [
+        http(7, "ora1", {
+          type: "oracledb",
+          url: null,
+          databaseConnectionString: "dbhost.example.com:1521/FREEPDB1",
+          basic_auth_user: "scott",
+        }),
+      ],
+    });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "description=x"], creds(k.url));
+    expect(r.code).toBe(0);
+  });
+
+  // the picker's watcher resets conditions on every type change — a carried
+  // list would name another type's variables and throw at every check
+  test("edit type change into oracledb clears stored conditions", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [
+        http(7, "ora1", {
+          type: "dns",
+          conditions: [{ variable: "record", operator: "==", value: "x" }],
+        }),
+      ],
+    });
+    const f = oraFile({ basic_auth_user: "scott" });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=oracledb", "--config-file", f],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = editCalls(k)[0]!.args[0] as Record<string, unknown>;
+    expect(sent.conditions).toEqual([]);
+  });
+
+  test("edit type change keeps a conditions list the same edit sets", async () => {
+    const conditions = [{ variable: "result", operator: "==", value: "1" }];
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [
+        http(7, "ora1", {
+          type: "dns",
+          conditions: [{ variable: "record", operator: "==", value: "x" }],
+        }),
+      ],
+    });
+    const f = oraFile({ basic_auth_user: "scott", conditions });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=oracledb", "--config-file", f],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = editCalls(k)[0]!.args[0] as Record<string, unknown>;
+    expect(sent.conditions).toEqual(conditions);
+  });
+});
+
 describe("monitor timing on Kuma 2.x", () => {
   test("edit of a 2.x ping to a short interval keeps its timeout (no 80% cap)", async () => {
     const k = await useFake({

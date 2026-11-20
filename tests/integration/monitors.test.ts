@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { sandbox, type Sandbox } from "../helpers/run";
-import { cliRun, on2x, onNtp, onSnmpV3, onWsUpgrade } from "./helpers";
+import { cliRun, on2x, onNtp, onOracleDb, onSnmpV3, onWsUpgrade } from "./helpers";
 
 // Runs only when scripts/integration.ts provides UPTIME_KUMA_IT_*; a plain
 // `bun test` skips the whole file.
@@ -1003,6 +1003,65 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
       down = b.json().some((beat: any) => beat.status === 0);
     }
     expect(down).toBe(true);
+
+    const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
+    expect(del.code).toBe(0);
+  }, 300_000);
+
+  // oracledb.js first ships in 2.3.0 (upstream #7156) — the type gate
+  // names the real minimum on both older lines
+  test("oracledb: 2.3+ stores the credentials and a down beat arrives; older servers refuse", async () => {
+    const f = join(sb.dir, "ora-it.json");
+    writeFileSync(
+      f,
+      JSON.stringify({
+        databaseConnectionString: "127.0.0.1:1/FREEPDB1",
+        basic_auth_pass: "oracle-pw",
+      }),
+    );
+    const r = await cliRun(sb, [
+      "monitors",
+      "add",
+      "--type",
+      "oracledb",
+      "--name",
+      "it-ora",
+      "--set",
+      "basic_auth_user=scott",
+      "--config-file",
+      f,
+      "--interval",
+      "20",
+    ]);
+    if (!onOracleDb) {
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain('type "oracledb" needs Uptime Kuma >= 2.3.0');
+      return;
+    }
+    expect(r.code).toBe(0);
+    const id = r.json().id;
+
+    const g = await cliRun(sb, ["monitors", "get", String(id)]);
+    expect(g.json()).toMatchObject({
+      type: "oracledb",
+      databaseConnectionString: "***",
+      basic_auth_user: "scott",
+      basic_auth_pass: "***",
+    });
+
+    // nothing answers on port 1 — the driver fails to connect and the
+    // down beat proves the monitor runs; the beat message must come from
+    // the driver's connect attempt, not a TypeError from the .trim() on
+    // the credential fields (an unread field would beat down the same way)
+    let downMsg = "";
+    for (let i = 0; i < 12 && !downMsg; i++) {
+      await new Promise((res) => setTimeout(res, 5_000));
+      const b = await cliRun(sb, ["beats", String(id), "--hours", "1"]);
+      expect(b.code).toBe(0);
+      downMsg = b.json().find((beat: any) => beat.status === 0)?.msg ?? "";
+    }
+    expect(downMsg).toContain("Database connection/query failed");
+    expect(downMsg).not.toContain("trim");
 
     const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
     expect(del.code).toBe(0);

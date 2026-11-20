@@ -26,6 +26,12 @@ export const onWsUpgrade =
   parseMajorVersion(itVersion) > 2 ||
   (parseMajorVersion(itVersion) === 2 && parseMinorVersion(itVersion) >= 1);
 
+// oracledb.js first ships in 2.3.0 (upstream #7156) — 1.x and 2.0-2.2 legs
+// take the type-gate refusal for any add or type change.
+export const onOracleDb =
+  parseMajorVersion(itVersion) > 2 ||
+  (parseMajorVersion(itVersion) === 2 && parseMinorVersion(itVersion) >= 3);
+
 // Every CLI invocation logs in once (the integration admin has no 2FA) and
 // Kuma 1.23 allows 20 logins per minute for the whole instance, so
 // invocation starts are paced to stay under it.
