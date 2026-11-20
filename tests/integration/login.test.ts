@@ -32,7 +32,15 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("login (real Kuma)", () => {
       // totp_secret_command mints inside the spawned login instead — at use
       // time, through the same resolveTotp a real account would drive.
       writeConfig(sb, `totp_secret_command = "printenv IT_TOTP_SECRET"`);
-      const login = await cliRun(sb, ["monitors", "list"], { IT_TOTP_SECRET: secret });
+      // A 2FA login can spend up to 4 login events — the tokenless probe,
+      // the token, and the two adjacent-counter retries — so the calls
+      // reserve that many slots of the per-minute budget
+      const login = await cliRun(
+        sb,
+        ["monitors", "list"],
+        { IT_TOTP_SECRET: secret },
+        { logins: 4 },
+      );
       expect(login.code).toBe(0);
 
       // Inside one 30 s window this login's first mint equals the
@@ -40,7 +48,12 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("login (real Kuma)", () => {
       // rejection reaches the adjacent-counter retry only the
       // secret-command path can mint; a rolled-over window takes the fresh
       // mint instead. Either way the relogin succeeds.
-      const relogin = await cliRun(sb, ["monitors", "list"], { IT_TOTP_SECRET: secret });
+      const relogin = await cliRun(
+        sb,
+        ["monitors", "list"],
+        { IT_TOTP_SECRET: secret },
+        { logins: 4 },
+      );
       expect(relogin.code).toBe(0);
 
       // Picked so no counter the pacing-delayed send could still land in
@@ -51,10 +64,19 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("login (real Kuma)", () => {
       );
       let wrong = "000000";
       while (valid.has(wrong)) wrong = String(Number(wrong) + 1).padStart(6, "0");
-      const denied = await cliRun(sb, ["monitors", "list"], { UPTIME_KUMA_TOTP: wrong });
+      const denied = await cliRun(
+        sb,
+        ["monitors", "list"],
+        { UPTIME_KUMA_TOTP: wrong },
+        { logins: 2 },
+      );
       expect(denied.code).toBe(2);
       expect(denied.stderr).toContain("Invalid Token!");
       expect(denied.stderr + denied.stdout).not.toContain(wrong);
     });
-  }, 300_000);
+    // The timeout must outlast the spawn watchdog (360 s) plus the pacing
+    // waits and socket setup a run can legitimately spend: a hung cliRun
+    // has to reject inside fn so the finally's disable2FA still runs
+    // instead of leaving the shared admin token-gated for later files.
+  }, 600_000);
 });

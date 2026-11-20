@@ -39,14 +39,27 @@ export const on21 =
   parseMajorVersion(itVersion) > 2 ||
   (parseMajorVersion(itVersion) === 2 && parseMinorVersion(itVersion) >= 1);
 
-// Every CLI invocation logs in once (the integration admin has no 2FA) and
-// Kuma 1.23 allows 20 logins per minute for the whole instance, so
-// invocation starts are paced to stay under it.
+// Kuma allows 20 logins per minute for the whole instance, and a single
+// invocation can spend several (a 2FA login sends a tokenless probe plus
+// the token and up to two adjacent retries), so calls reserve the login
+// count they can spend and the per-minute total is paced under the limit.
 const WINDOW_MS = 60_000;
-const MAX_STARTS_PER_WINDOW = 15;
-const starts: number[] = [];
+const MAX_LOGINS_PER_WINDOW = 15;
+const reserved: number[] = [];
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function takeLogins(logins: number): Promise<void> {
+  for (;;) {
+    const now = Date.now();
+    while (reserved.length > 0 && now - reserved[0]! >= WINDOW_MS) reserved.shift();
+    if (reserved.length + logins <= MAX_LOGINS_PER_WINDOW) {
+      reserved.push(...Array<number>(logins).fill(now));
+      break;
+    }
+    await sleep(reserved[0]! + WINDOW_MS - now + 20);
+  }
+}
 
 function itEnv(): Record<string, string> {
   return {
@@ -61,16 +74,9 @@ export async function cliRun(
   sb: Sandbox,
   args: string[],
   env: Record<string, string> = {},
+  opts: { logins?: number } = {},
 ): Promise<Result> {
-  for (;;) {
-    const now = Date.now();
-    while (starts.length > 0 && now - starts[0]! >= WINDOW_MS) starts.shift();
-    if (starts.length < MAX_STARTS_PER_WINDOW) {
-      starts.push(now);
-      break;
-    }
-    await sleep(starts[0]! + WINDOW_MS - now + 20);
-  }
+  await takeLogins(opts.logins ?? 1);
   const r = await run(sb, args, { ...itEnv(), ...env });
   // A failing assert only shows the exit code; the CLI's message is the
   // evidence, and the CI log is the only place it can be read afterwards.
@@ -125,6 +131,9 @@ export async function withKuma<T>(
         resolve();
       });
     });
+    // The socket login is a login event too; it shares the per-minute
+    // budget with cliRun instead of bypassing the limiter
+    await takeLogins(1);
     const login = await emitAck<{ ok?: boolean; msg?: string }>(socket, "login", [
       {
         username: process.env.UPTIME_KUMA_IT_USERNAME ?? "",
