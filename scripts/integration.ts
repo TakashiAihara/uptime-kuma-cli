@@ -57,9 +57,9 @@ const TEARDOWN_ATTEMPTS = 3;
 // Children a signal kills get this long to exit before SIGKILL.
 const KILL_GRACE_MS = 5_000;
 // cliRun paces invocations to 15 logins/min, so the suite's floor grows with
-// its call count; 12 min leaves headroom for the tests still to come while
+// its call count; 15 min leaves headroom for the tests still to come while
 // still catching a genuinely hung run well under the CI job's 20 min.
-const TEST_LIMIT_MS = 12 * 60_000;
+const TEST_LIMIT_MS = 15 * 60_000;
 const KEEP = process.env.UPTIME_KUMA_IT_KEEP === "1";
 // An empty value (a mistyped CI matrix key) would make compose fall back to
 // 1.23.17 while the job claims another image.

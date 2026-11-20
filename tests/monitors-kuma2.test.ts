@@ -619,6 +619,183 @@ describe("2.x-only fields on Kuma 1.x", () => {
   });
 });
 
+describe("manual monitors", () => {
+  test("add --type manual stores a manual monitor on 2.x", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(sb, ["monitors", "add", "--type", "manual", "--name", "m1"], creds(k.url));
+    expect(r.code).toBe(0);
+    expect(r.json()).toMatchObject({ name: "m1", type: "manual", active: true });
+    const m = stored(k, "m1");
+    expect(m.type).toBe("manual");
+    // the UI leaves manual_status unset until a button is pressed
+    expect(m.manual_status).toBeUndefined();
+    expect(m.conditions).toEqual([]);
+  });
+
+  test("add --type manual --set manual_status=1 stores the status", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "manual", "--name", "m1", "--set", "manual_status=1"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "m1").manual_status).toBe(1);
+  });
+
+  test("add --type manual --set manual_status=null stores null", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "manual", "--name", "m1", "--set", "manual_status=null"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "m1").manual_status).toBeNull();
+  });
+
+  test("add --type manual --config-file manual_status=0 stores the status", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const f = join(sb.dir, "ms.json");
+    writeFileSync(f, JSON.stringify({ manual_status: 0 }));
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "manual", "--name", "m1", "--config-file", f],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "m1").manual_status).toBe(0);
+  });
+
+  test.each([
+    ["manual_status=2"],
+    ["manual_status=3"],
+    ["manual_status=4"],
+    ["manual_status=-1"],
+    ["manual_status=1.5"],
+    ['manual_status="up"'],
+  ])("add --set %s exits 2 before connecting", async (set) => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "manual", "--name", "m1", "--set", set],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("manual_status must be null, 0 (down), or 1 (up)");
+    expect(k.calls).toHaveLength(0);
+  });
+
+  test("add --type manual --config-file with a bad manual_status exits 2 before connecting", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const f = join(sb.dir, "ms.json");
+    writeFileSync(f, JSON.stringify({ manual_status: 2 }));
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "manual", "--name", "m1", "--config-file", f],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("manual_status must be null, 0 (down), or 1 (up)");
+    expect(k.calls).toHaveLength(0);
+  });
+
+  test("add --type manual exits 2 on a 1.x server after connect", async () => {
+    const k = await useFake();
+    const r = await run(sb, ["monitors", "add", "--type", "manual", "--name", "m1"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('type "manual" needs Uptime Kuma 2.x; the server reports 1.23.17');
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --type manual names the assumed 1.x when no version arrives", async () => {
+    const k = await useFake({ info: null });
+    const r = await run(sb, ["monitors", "add", "--type", "manual", "--name", "m1"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('type "manual" needs Uptime Kuma 2.x; the server sent no version');
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set type=manual stores it on 2.x", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [http(7, "h")] });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "type=manual"], creds(k.url));
+    expect(r.code).toBe(0);
+    expect(stored(k, "h").type).toBe("manual");
+  });
+
+  test("edit --set type=manual exits 2 on a 1.x server before editMonitor", async () => {
+    const k = await useFake({ monitors: [http(7, "h")] });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "type=manual"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('type "manual" needs Uptime Kuma 2.x; the server reports 1.23.17');
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set type=manual names the assumed 1.x when no version arrives", async () => {
+    const k = await useFake({ info: null, monitors: [http(7, "h")] });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "type=manual"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('type "manual" needs Uptime Kuma 2.x; the server sent no version');
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set manual_status stores it on 2.x", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [{ ...http(7, "m"), type: "manual", url: null }],
+    });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "manual_status=0"], creds(k.url));
+    expect(r.code).toBe(0);
+    expect(stored(k, "m").manual_status).toBe(0);
+  });
+
+  // the fetched monitor cannot carry manual_status (toJSON does not emit it),
+  // so an edit without the key sends none — and knex drops undefined update
+  // keys, leaving the stored status alone
+  test("edit without manual_status keeps the stored status", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [{ ...http(7, "m"), type: "manual", url: null, manual_status: 1 }],
+    });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", 'name="m2"'], creds(k.url));
+    expect(r.code).toBe(0);
+    expect(stored(k, "m2").manual_status).toBe(1);
+  });
+
+  test("edit --set manual_status=null clears the stored status", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [{ ...http(7, "m"), type: "manual", url: null, manual_status: 1 }],
+    });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "manual_status=null"], creds(k.url));
+    expect(r.code).toBe(0);
+    expect(stored(k, "m").manual_status).toBeNull();
+  });
+
+  test("edit --set manual_status=5 exits 2 before editMonitor", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [{ ...http(7, "m"), type: "manual", url: null }],
+    });
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "manual_status=5"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("manual_status must be null, 0 (down), or 1 (up)");
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("--type manual refuses a flag for another type before connecting", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "manual", "--name", "m1", "--hostname", "h.example.com"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--hostname only applies to --type");
+    expect(k.calls).toHaveLength(0);
+  });
+});
+
 describe("monitor timing on Kuma 2.x", () => {
   test("edit of a 2.x ping to a short interval keeps its timeout (no 80% cap)", async () => {
     const k = await useFake({

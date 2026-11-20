@@ -53,6 +53,12 @@ const MONITOR_TYPES = [
   "tailscale-ping",
 ] as const;
 
+// Types the 2.x picker adds, in its order (2.5.11/src/pages/EditMonitor.vue).
+// Like a 2.x-only field, one of these can only be refused after connect() on
+// a 1.x server — 1.23's `add` would store the row and every check would throw
+// "Unknown Monitor Type" — so the pre-connect choices list takes the union.
+const MONITOR_2X_TYPES = ["manual"] as const;
+
 // The five database types of EditMonitor.vue all show a required
 // databaseConnectionString. The UI's type watcher prefills it with a template
 // (connectionStringTemplates); the CLI sends no default, so a missing one is
@@ -500,6 +506,22 @@ function checkNotificationIds(s: KumaSession, value: unknown): void {
   }
 }
 
+// A 2.x-only type is refused once the version is known, like a 2.x-only
+// field: 1.23 would store the row and every check would throw "Unknown
+// Monitor Type". Checked on the type the merged monitor ends up with — on
+// add always, on edit only when the type changes.
+function checkKuma2xType(s: KumaSession, type: unknown): void {
+  if (s.majorVersion >= 2) return;
+  if (typeof type === "string" && (MONITOR_2X_TYPES as readonly string[]).includes(type)) {
+    fail(
+      2,
+      s.serverVersion === undefined
+        ? `type "${type}" needs Uptime Kuma 2.x; the server sent no version, so 1.x was assumed`
+        : `type "${type}" needs Uptime Kuma 2.x; the server reports ${s.serverVersion}`,
+    );
+  }
+}
+
 // The official image ships no tailscale binary, so the picker hides
 // tailscale-ping when info.isContainer is set. Checked on the type the merged
 // monitor ends up with — on add always, on edit only when the type changes.
@@ -635,11 +657,12 @@ const HATCH_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unknow
     }
     return v;
   },
-  // edit may switch the type to any the 1.23.17 picker offers; anything else
-  // is not a monitor type at all.
+  // edit may switch the type to any the pickers of both versions offer; a
+  // 2.x-only type is refused after connect() like a 2.x-only field.
   type: (v, k) => {
-    if (typeof v !== "string" || !(MONITOR_TYPES as readonly string[]).includes(v)) {
-      fail(2, `${k} must be one of ${MONITOR_TYPES.join(", ")}`);
+    const types: readonly string[] = [...MONITOR_TYPES, ...MONITOR_2X_TYPES];
+    if (typeof v !== "string" || !types.includes(v)) {
+      fail(2, `${k} must be one of ${types.join(", ")}`);
     }
     return v;
   },
@@ -677,6 +700,16 @@ const HATCH_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unknow
   jsonPathOperator: (v, k) => {
     if (typeof v !== "string" || !(JSON_PATH_OPERATORS as readonly string[]).includes(v)) {
       fail(2, `${k} must be one of ${JSON_PATH_OPERATORS.join(", ")}`);
+    }
+    return v;
+  },
+  // a manual monitor's check writes manual_status into the heartbeat row.
+  // The server would store any smallint, but the UI only offers Up/Down and
+  // manual.js gives every other value a "Pending" msg, so only the UI's
+  // values are accepted; null is "no status set"
+  manual_status: (v, k) => {
+    if (v !== null && v !== 0 && v !== 1) {
+      fail(2, `${k} must be null, 0 (down), or 1 (up)`);
     }
     return v;
   },
@@ -1044,7 +1077,9 @@ export function registerMonitors(program: Command): void {
     .command("add")
     .description("Add a monitor")
     .addOption(
-      new Option("--type <type>", "monitor type").choices([...MONITOR_TYPES]).makeOptionMandatory(),
+      new Option("--type <type>", "monitor type")
+        .choices([...MONITOR_TYPES, ...MONITOR_2X_TYPES])
+        .makeOptionMandatory(),
     )
     .requiredOption("--name <name>", "monitor name")
     .option("--url <url>", "monitor url")
@@ -1341,6 +1376,7 @@ export function registerMonitors(program: Command): void {
       if (opts.jsonPathOperator !== undefined && type === "json-query") {
         twoXFieldCandidates.push("jsonPathOperator");
       }
+      checkKuma2xType(s, type);
       checkKuma2xFields(s, twoXFieldCandidates);
       checkTailscalePing(s, type);
       checkMonitorTiming(
@@ -1713,7 +1749,10 @@ export function registerMonitors(program: Command): void {
       }
       validateFinalMonitor(s, monitor, { touched, typeChanged });
       checkKuma2Ping(s, monitor);
-      if (typeChanged) checkTailscalePing(s, monitor.type);
+      if (typeChanged) {
+        checkKuma2xType(s, monitor.type);
+        checkTailscalePing(s, monitor.type);
+      }
       if (monitor.type === "gamedig" && (typeChanged || touched.has("game"))) {
         await checkGameId(s, monitor);
       }

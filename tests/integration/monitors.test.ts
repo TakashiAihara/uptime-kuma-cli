@@ -532,4 +532,56 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
       expect(r.stderr).toContain("no tailscale binary");
     }, 120_000);
   });
+
+  test("manual: 2.x beats the set status and an edit keeps it, 1.x refuses the type", async () => {
+    const r = await cliRun(sb, [
+      "monitors",
+      "add",
+      "--type",
+      "manual",
+      "--name",
+      "it-manual",
+      "--set",
+      "manual_status=1",
+      "--interval",
+      "20",
+    ]);
+    if (!on2x) {
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain('type "manual" needs Uptime Kuma 2.x');
+      return;
+    }
+    expect(r.code).toBe(0);
+    const id = r.json().id;
+
+    // a manual monitor's check copies manual_status into the beat
+    const waitBeat = async (afterMs: number) => {
+      for (let i = 0; i < 12; i++) {
+        await new Promise((res) => setTimeout(res, 5_000));
+        const b = await cliRun(sb, ["beats", String(id), "--hours", "1"]);
+        expect(b.code).toBe(0);
+        const beat = b
+          .json()
+          .find(
+            (x: any) =>
+              typeof x.time === "string" && Date.parse(`${x.time.replace(" ", "T")}Z`) >= afterMs,
+          );
+        if (beat) return beat;
+      }
+      throw new Error("no fresh beat");
+    };
+    const first = await waitBeat(Date.now() - 60_000);
+    expect(first).toMatchObject({ status: 1, msg: "Up" });
+
+    // toJSON does not emit manual_status, so the edit payload's undefined key
+    // is dropped from the UPDATE — the stored status survives the restart
+    const e = await cliRun(sb, ["monitors", "edit", String(id), "--set", "description=it"]);
+    expect(e.code).toBe(0);
+    expect(e.json()).not.toHaveProperty("manual_status");
+    const after = await waitBeat(Date.now());
+    expect(after).toMatchObject({ status: 1, msg: "Up" });
+
+    const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
+    expect(del.code).toBe(0);
+  }, 300_000);
 });
