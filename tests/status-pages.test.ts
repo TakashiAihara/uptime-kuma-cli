@@ -680,6 +680,37 @@ describe("status-pages", () => {
         expect(r.stderr).toContain("unexpected getIncidentHistory response");
       });
 
+      test.each([[1.5], [0], [-3]])("a history row id %p exits 70", async (id) => {
+        // ids are autoincrement rowids: a fractional or non-positive one is
+        // malformed like a non-numeric one
+        kuma.state.incidentHistoryResult = {
+          ok: true,
+          incidents: [{ id, title: "x" }],
+          total: 1,
+        };
+        const r = await run(sb, ["status-pages", "incident-history", "status"], creds(kuma.url));
+        expect(r.code).toBe(70);
+        expect(r.stderr).toContain("unexpected getIncidentHistory response");
+      });
+
+      test("fetching more rows than the reported total does not warn", async () => {
+        // an incident posted between page fetches explains the surplus — it
+        // is not the shortfall the warning names
+        kuma.state.incidentHistoryResult = {
+          ok: true,
+          incidents: [
+            { id: 1, title: "i1" },
+            { id: 2, title: "i2" },
+          ],
+          total: 1,
+          hasMore: false,
+        };
+        const r = await run(sb, ["status-pages", "incident-history", "status"], creds(kuma.url));
+        expect(r.code).toBe(0);
+        expect(r.stderr).not.toContain("may be incomplete");
+        expect(r.json().incidents).toHaveLength(2);
+      });
+
       test("exits 2 on a 2.0.x server, where the event does not exist yet", async () => {
         kuma.state.info = { ...kuma.state.info, version: "2.0.2" };
         const r = await run(sb, ["status-pages", "incident-history", "status"], creds(kuma.url));
@@ -925,7 +956,7 @@ describe("status-pages", () => {
         expect(r.json().active).toBe(false);
       });
 
-      test("an empty --title exits 2 without calling editIncident", async () => {
+      test("an empty --title exits 2 before connecting", async () => {
         const r = await run(
           sb,
           ["status-pages", "incident-edit", "status", "5", "--title", ""],
@@ -934,6 +965,7 @@ describe("status-pages", () => {
         expect(r.code).toBe(2);
         expect(r.stderr).toContain("incident title must not be empty");
         expect(callsOf("editIncident")).toHaveLength(0);
+        expect(callsOf("login")).toHaveLength(0);
       });
 
       test("an invalid incident id exits 2", async () => {

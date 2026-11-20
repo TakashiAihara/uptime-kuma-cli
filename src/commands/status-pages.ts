@@ -141,13 +141,13 @@ async function incidentHistory(
       typeof res?.total !== "number" ||
       !Number.isInteger(res.total) ||
       res.total < 0 ||
-      page.some(
-        (i) =>
-          i === null ||
-          typeof i !== "object" ||
-          Array.isArray(i) ||
-          typeof (i as Record<string, unknown>).id !== "number",
-      )
+      page.some((i) => {
+        if (i === null || typeof i !== "object" || Array.isArray(i)) return true;
+        const id = (i as Record<string, unknown>).id;
+        // incident ids are autoincrement rowids, so a NaN, fractional or
+        // non-positive one is as malformed as a non-numeric one
+        return typeof id !== "number" || !Number.isInteger(id) || id <= 0;
+      })
     ) {
       fail(70, "unexpected getIncidentHistory response");
     }
@@ -182,7 +182,9 @@ async function incidentHistory(
     seenCursors.add(next);
     cursor = next;
   }
-  const short = incidents.length !== total;
+  // more rows than the reported total is not a shortfall — an incident
+  // posted between page fetches explains it — so only a deficit warns
+  const short = incidents.length < total;
   if (!found && short) {
     console.error(
       `warning: incident history may be incomplete: got ${incidents.length} of ${total} incidents`,
@@ -777,6 +779,12 @@ export function registerStatusPages(program: Command): void {
           "incident-edit requires at least one of --title, --content, --style, --pin or --unpin",
         );
       }
+      if (opts.title !== undefined && opts.title.trim() === "") {
+        fail(2, "incident title must not be empty");
+      }
+      if (opts.content !== undefined && opts.content.trim() === "") {
+        fail(2, "incident content must not be empty");
+      }
       const s = await connect(["statusPageList"]);
       requireIncidentEvents(s, "incident-edit");
       if (!statusPageBySlug(s, slug)) fail(1, `status page ${slug} not found`);
@@ -799,24 +807,14 @@ export function registerStatusPages(program: Command): void {
       const title = opts.title ?? existing.title;
       const content = opts.content ?? existing.content;
       const style = opts.style ?? existing.style;
-      // a malformed stored row surfaces as the flag's own "must not be empty"
-      // when the flag is omitted — distinguish the protocol violation (70)
-      // from an empty user flag (2)
+      // the flags passed their own empty check before connecting, so an
+      // unusable title or content here came from the stored row — a
+      // protocol violation like a non-object row, not bad input
       if (typeof title !== "string" || title.trim() === "") {
-        fail(
-          opts.title === undefined ? 70 : 2,
-          opts.title === undefined
-            ? "unexpected getIncidentHistory response"
-            : "incident title must not be empty",
-        );
+        fail(70, "unexpected getIncidentHistory response");
       }
       if (typeof content !== "string" || content.trim() === "") {
-        fail(
-          opts.content === undefined ? 70 : 2,
-          opts.content === undefined
-            ? "unexpected getIncidentHistory response"
-            : "incident content must not be empty",
-        );
+        fail(70, "unexpected getIncidentHistory response");
       }
       // a sent pin follows the server's own rule (pin !== false -> pinned);
       // an unstored or absent one pins like the UI's form default does, and a
