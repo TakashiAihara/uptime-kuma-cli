@@ -163,8 +163,8 @@ export async function withKuma2FA<T>(fn: (secret: string) => Promise<T>): Promis
         ? new URLSearchParams(prepared.uri.slice(prepared.uri.indexOf("?"))).get("secret")
         : null;
     if (!secret) throw new Error("prepare2FA uri carries no secret");
-    await ack("save2FA");
     try {
+      await ack("save2FA");
       return await fn(secret);
     } finally {
       await ack("disable2FA");
