@@ -449,9 +449,16 @@ describe("ci.yml integration job", () => {
         jobs: {
           integration: {
             "timeout-minutes"?: number;
+            "continue-on-error"?: boolean;
+            if?: string;
             permissions?: Record<string, string>;
             strategy?: { "fail-fast"?: boolean; matrix?: { image?: string[] } };
-            steps: { run?: string; env?: Record<string, string> }[];
+            steps: {
+              run?: string;
+              env?: Record<string, string>;
+              "continue-on-error"?: boolean;
+              if?: string;
+            }[];
           };
         };
       }
@@ -484,6 +491,18 @@ describe("ci.yml integration job", () => {
   test("the job is time-boxed over the suite's own budget and read-only", () => {
     expect(job()["timeout-minutes"]).toBeGreaterThanOrEqual(20);
     expect(job().permissions).toEqual({ contents: "read" });
+  });
+
+  // Both legs are required checks: a continue-on-error or a false `if` on the
+  // job or the test step would report green without gating — the `mutation`
+  // job's continue-on-error is legitimate because it is report-only
+  test("the job and the test step cannot skip or swallow a failure", () => {
+    const step = job().steps.find((s) => s.run?.includes("test:integration"));
+
+    expect(job()["continue-on-error"]).toBeUndefined();
+    expect(job().if).toBeUndefined();
+    expect(step?.["continue-on-error"]).toBeUndefined();
+    expect(step?.if).toBeUndefined();
   });
 });
 
