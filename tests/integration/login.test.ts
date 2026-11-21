@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { totpToken } from "../../src/lib.ts";
 import { sandbox, writeConfig, type Sandbox } from "../helpers/run";
-import { cliRun, withKuma2FA } from "./helpers";
+import { cliRun, reserveLogins, withKuma2FA } from "./helpers";
 
 // Runs only when scripts/integration.ts provides UPTIME_KUMA_IT_*; a plain
 // `bun test` skips the whole file.
@@ -32,27 +32,32 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("login (real Kuma)", () => {
       // totp_secret_command mints inside the spawned login instead — at use
       // time, through the same resolveTotp a real account would drive.
       writeConfig(sb, `totp_secret_command = "printenv IT_TOTP_SECRET"`);
-      // A 2FA login can spend up to 4 login events — the tokenless probe,
-      // the token, and the two adjacent-counter retries — so the calls
-      // reserve that many slots of the per-minute budget
+      // Both calls' login credits are taken in one block — a pacing wait
+      // between them could push the relogin past the 30 s window — so each
+      // run below spends none of its own (4 each: tokenless probe, token,
+      // the two adjacent-counter retries).
+      await reserveLogins(8);
+      // Landing the pair early in a TOTP window makes the relogin's first
+      // mint the token Kuma just stored, so the exit 0 below is only
+      // reachable through the adjacent-counter retry.
+      const drift = Date.now() % 30_000;
+      if (drift > 10_000) await new Promise((r) => setTimeout(r, 30_000 - drift + 1_000));
       const login = await cliRun(
         sb,
         ["monitors", "list"],
         { IT_TOTP_SECRET: secret },
-        { logins: 4 },
+        { logins: 0 },
       );
       expect(login.code).toBe(0);
 
-      // Inside one 30 s window this login's first mint equals the
-      // twofa_last_token the previous login just stored, so the replay
-      // rejection reaches the adjacent-counter retry only the
-      // secret-command path can mint; a rolled-over window takes the fresh
-      // mint instead. Either way the relogin succeeds.
+      // Same-window replay: this login's first mint equals the
+      // twofa_last_token the previous login stored, so Kuma rejects it and
+      // the secret-command path retries an adjacent counter.
       const relogin = await cliRun(
         sb,
         ["monitors", "list"],
         { IT_TOTP_SECRET: secret },
-        { logins: 4 },
+        { logins: 0 },
       );
       expect(relogin.code).toBe(0);
 
@@ -74,9 +79,10 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("login (real Kuma)", () => {
       expect(denied.stderr).toContain("Invalid Token!");
       expect(denied.stderr + denied.stdout).not.toContain(wrong);
     });
-    // The timeout must outlast the spawn watchdog (360 s) plus the pacing
-    // waits and socket setup a run can legitimately spend: a hung cliRun
-    // has to reject inside fn so the finally's disable2FA still runs
-    // instead of leaving the shared admin token-gated for later files.
-  }, 600_000);
+    // The timeout must outlast the worst settle the test can legitimately
+    // reach — socket setup (~3 min), the reserved-slot wait and each
+    // call's spawn watchdog (360 s) — so a hung cliRun rejects inside fn
+    // and the finally's disable2FA still runs instead of leaving the
+    // shared admin token-gated for later files.
+  }, 780_000);
 });

@@ -49,6 +49,13 @@ const reserved: number[] = [];
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// Reserving several calls' logins as one block lets back-to-back calls
+// spend them without a pacing wait in between — needed when the wait
+// itself would change what is being measured (a TOTP window boundary).
+export async function reserveLogins(logins: number): Promise<void> {
+  await takeLogins(logins);
+}
+
 async function takeLogins(logins: number): Promise<void> {
   for (;;) {
     const now = Date.now();
