@@ -18,10 +18,17 @@ const status = (over: Partial<CommitStatus>): CommitStatus => ({
 });
 
 describe("gateState", () => {
-  test("passes only on Review completed", () => {
+  test("passes on Review completed", () => {
     expect(gateState("Review completed")).toEqual({
       state: "success",
       description: "CodeRabbit review completed",
+    });
+  });
+
+  test("passes when a push leaves CodeRabbit no files to review", () => {
+    expect(gateState("No files to review")).toEqual({
+      state: "success",
+      description: "CodeRabbit found no files to review",
     });
   });
 
@@ -37,6 +44,7 @@ describe("gateState", () => {
     expect(gateState("Review completed — 3 files reviewed").state).toBe("success");
     expect(gateState("Review in progress: scripts/coderabbit-gate.ts").state).toBe("pending");
     expect(gateState("Review queued: waiting for a free slot").state).toBe("pending");
+    expect(gateState("No files to review — all changed files are excluded").state).toBe("success");
   });
 
   test("fails every other outcome and says what to do", () => {
@@ -46,7 +54,6 @@ describe("gateState", () => {
       "Review rate limited",
       "Review failed",
       "Review cancelled",
-      "No files to review",
       "Too many files to review",
       "Incremental review skipped",
       "something CodeRabbit adds later",
