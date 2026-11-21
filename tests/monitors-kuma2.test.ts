@@ -6555,6 +6555,33 @@ describe("sip-options monitors", () => {
     expect(addCalls(k)).toHaveLength(0);
   });
 
+  // 3.0.0-beta.1 put sipsak in the image and dropped the option's
+  // isContainer gate, so a 3.x container takes the add like any host
+  test("add --type sip-options runs on a 3.x container", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      info: { version: "3.0.0", isContainer: true },
+    });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "sip-options",
+        "--name",
+        "sip1",
+        "--hostname",
+        "sip.example.com",
+        "--port",
+        "5060",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "sip1")).toMatchObject({ type: "sip-options", port: 5060 });
+  });
+
   test("add --type sip-options exits 2 on a 1.x server before add", async () => {
     const k = await useFake();
     const r = await run(

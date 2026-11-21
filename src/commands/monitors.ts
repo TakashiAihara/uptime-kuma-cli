@@ -869,16 +869,18 @@ function checkSystemService(s: KumaSession, type: unknown): void {
   }
 }
 
-// The picker hides sip-options on the container image (2.5.11
-// EditMonitor.vue's `v-if="!$root.info.isContainer"` on the option) —
-// sip-options.js spawns the sipsak binary the 2.x image does not ship.
+// The picker hides sip-options on the container image through the whole
+// 2.x line (2.5.11 EditMonitor.vue's `v-if="!$root.info.isContainer"` on
+// the option, still there at 2.5.12) — the 2.x image does not ship the
+// sipsak binary sip-options.js spawns. From 3.0.0-beta.1 the image
+// carries sipsak and the option is ungated, so the refusal is 2.x-only.
 // Checked on the type the merged monitor ends up with — on add always,
 // on edit only when the type changes.
 function checkSipOptions(s: KumaSession, type: unknown): void {
-  if (type === "sip-options" && s.isContainer === true) {
+  if (type === "sip-options" && s.isContainer === true && s.majorVersion === 2) {
     fail(
       2,
-      "sip-options is not available: the picker hides it on a container server, which has no sipsak binary",
+      "sip-options is not available: the picker hides it on a 2.x container server, which has no sipsak binary",
     );
   }
 }
