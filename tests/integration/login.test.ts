@@ -32,16 +32,21 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("login (real Kuma)", () => {
       // totp_secret_command mints inside the spawned login instead — at use
       // time, through the same resolveTotp a real account would drive.
       writeConfig(sb, `totp_secret_command = "printenv IT_TOTP_SECRET"`);
-      // Both calls' login credits are taken in one block — a pacing wait
-      // between them could push the relogin past the 30 s window — so each
-      // run below spends none of its own (4 each: tokenless probe, token,
-      // the two adjacent-counter retries).
-      await reserveLogins(8);
-      // Landing the pair early in a TOTP window makes the relogin's first
-      // mint the token Kuma just stored, so the exit 0 below is only
-      // reachable through the adjacent-counter retry.
-      const drift = Date.now() % 30_000;
-      if (drift > 10_000) await new Promise((r) => setTimeout(r, 30_000 - drift + 1_000));
+      // Both calls' credits are reserved as one block right before they
+      // run: a pacing wait between them could push the relogin past the
+      // 30 s window, and stamping the slots before the alignment wait
+      // would free them ahead of the logins they stand for. A slow
+      // reservation means the window rolled anyway, so re-align. Each run
+      // below spends none of its own (4 each: tokenless probe, token, the
+      // two adjacent-counter retries).
+      for (;;) {
+        const drift = Date.now() % 30_000;
+        if (drift > 8_000) await new Promise((r) => setTimeout(r, 30_000 - drift + 1_000));
+        const at = Date.now();
+        await reserveLogins(8);
+        if (Date.now() - at < 10_000) break;
+      }
+      const c0 = Math.floor(Date.now() / 30_000);
       const login = await cliRun(
         sb,
         ["monitors", "list"],
@@ -60,6 +65,10 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("login (real Kuma)", () => {
         { logins: 0 },
       );
       expect(relogin.code).toBe(0);
+      // The pair staying inside one counter is what makes the relogin's
+      // first mint the stored token — a rolled counter would have let the
+      // fresh mint pass with no retry at all
+      expect(Math.floor(Date.now() / 30_000)).toBe(c0);
 
       // Picked so no counter the pacing-delayed send could still land in
       // verifies it — the env token path has no retries, so the rejection

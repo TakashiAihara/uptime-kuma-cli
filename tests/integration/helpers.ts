@@ -53,10 +53,9 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // spend them without a pacing wait in between — needed when the wait
 // itself would change what is being measured (a TOTP window boundary).
 export async function reserveLogins(logins: number): Promise<void> {
-  await takeLogins(logins);
-}
-
-async function takeLogins(logins: number): Promise<void> {
+  if (logins > MAX_LOGINS_PER_WINDOW) {
+    throw new Error(`cannot reserve ${logins} logins above the per-window budget`);
+  }
   for (;;) {
     const now = Date.now();
     while (reserved.length > 0 && now - reserved[0]! >= WINDOW_MS) reserved.shift();
@@ -83,7 +82,7 @@ export async function cliRun(
   env: Record<string, string> = {},
   opts: { logins?: number } = {},
 ): Promise<Result> {
-  await takeLogins(opts.logins ?? 1);
+  await reserveLogins(opts.logins ?? 1);
   const r = await run(sb, args, { ...itEnv(), ...env });
   // A failing assert only shows the exit code; the CLI's message is the
   // evidence, and the CI log is the only place it can be read afterwards.
@@ -140,7 +139,7 @@ export async function withKuma<T>(
     });
     // The socket login is a login event too; it shares the per-minute
     // budget with cliRun instead of bypassing the limiter
-    await takeLogins(1);
+    await reserveLogins(1);
     const login = await emitAck<{ ok?: boolean; msg?: string }>(socket, "login", [
       {
         username: process.env.UPTIME_KUMA_IT_USERNAME ?? "",
