@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import pkg from "../package.json" with { type: "json" };
 import { CODERABBIT_CONTEXT } from "../scripts/coderabbit-gate.ts";
 import { TAG_SHAPE } from "../scripts/next-tag.ts";
 
@@ -457,6 +458,7 @@ describe("ci.yml integration job", () => {
               run?: string;
               env?: Record<string, string>;
               "continue-on-error"?: boolean;
+              "timeout-minutes"?: number;
               if?: string;
             }[];
           };
@@ -483,15 +485,27 @@ describe("ci.yml integration job", () => {
     expect(step?.env?.UPTIME_KUMA_IT_IMAGE).toBe("${{ matrix.image }}");
   });
 
+  // The step above pins the script name, not what it runs. If
+  // test:integration stopped pointing at scripts/integration.ts (which sets
+  // UPTIME_KUMA_IT_URL), the suite would still run but skip every test, and
+  // both legs would pass without ever checking the image
+  test("test:integration runs the integration runner, not the test files directly", () => {
+    expect(pkg.scripts["test:integration"]).toBe("bun scripts/integration.ts");
+  });
+
   // timeout-minutes must cover the runner's own 18-minute suite bound
   // (TEST_LIMIT_MS in scripts/integration.ts) plus image pull, build, setup
   // and teardown — the 25 the job sets is that documented budget, and a
   // smaller value could kill the suite mid-run and skip the container
-  // teardown. permissions is pinned as the whole object: an added
-  // pull-requests or id-token write would otherwise pass while widening the
-  // token a job that pulls and runs external images gets
+  // teardown; the step keeps no timeout of its own for the same reason.
+  // permissions is pinned as the whole object: an added pull-requests or
+  // id-token write would otherwise pass while widening the token a job that
+  // pulls and runs external images gets
   test("the job is time-boxed over the suite's own budget and read-only", () => {
+    const step = job().steps.find((s) => s.run?.includes("test:integration"));
+
     expect(job()["timeout-minutes"]).toBe(25);
+    expect(step?.["timeout-minutes"]).toBeUndefined();
     expect(job().permissions).toEqual({ contents: "read" });
   });
 
