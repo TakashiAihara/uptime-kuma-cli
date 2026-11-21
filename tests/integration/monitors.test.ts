@@ -10,6 +10,7 @@ import {
   onNtp,
   onOracleDb,
   onPm2,
+  onSftp,
   onSnmpV3,
   onWsUpgrade,
   withKuma,
@@ -1252,6 +1253,49 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
     const g = await cliRun(sb, ["monitors", "get", String(id)]);
     expect(g.code).toBe(0);
     expect(g.json().system_service_name).toBe("it-pm2-proc");
+    const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
+    expect(del.code).toBe(0);
+  }, 120_000);
+
+  // sftp.js first ships in 2.5.4; add only stores the row, so a paused
+  // monitor needs no reachable SSH server — older legs take the type gate
+  test("sftp stores the ssh fields with the secret redacted on get", async () => {
+    const f = join(sb.dir, "sftp-it.json");
+    writeFileSync(f, JSON.stringify({ sshPassword: "it-sftp-secret" }));
+    const r = await cliRun(sb, [
+      "monitors",
+      "add",
+      "--type",
+      "sftp",
+      "--name",
+      "it-sftp",
+      "--hostname",
+      "localhost",
+      "--ssh-username",
+      "it-sftp-user",
+      "--sftp-path",
+      "/tmp",
+      "--config-file",
+      f,
+      "--paused",
+    ]);
+    if (!onSftp) {
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain('type "sftp" needs Uptime Kuma >= 2.5.4');
+      return;
+    }
+    expect(r.code).toBe(0);
+    const id = r.json().id;
+    const g = await cliRun(sb, ["monitors", "get", String(id)]);
+    expect(g.code).toBe(0);
+    expect(g.json()).toMatchObject({
+      type: "sftp",
+      hostname: "localhost",
+      port: 22,
+      sshUsername: "it-sftp-user",
+      sftpPath: "/tmp",
+      sshPassword: "***",
+    });
     const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
     expect(del.code).toBe(0);
   }, 120_000);

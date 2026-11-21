@@ -67,6 +67,7 @@ const MONITOR_2X_TYPES = [
   "system-service",
   "pm2",
   "websocket-upgrade",
+  "sftp",
   "manual",
   "ntp",
   "smtp",
@@ -75,12 +76,12 @@ const MONITOR_2X_TYPES = [
 ] as const;
 
 // server/monitor-types/websocket-upgrade.js, system-service.js, pm2.js,
-// oracledb.js and ntp.js first ship in 2.1.0, 2.1.0, 2.5.0, 2.3.0 and 2.5.0
-// (upstream #5613, #6488, #7114, #7156 and #7214) respectively, so the major
-// gate alone would let an older 2.x store a row whose checks all throw
-// "Unknown Monitor Type" — the failure the type gate exists to prevent. A
-// type absent from the map shipped with 2.0.0 (manual in beta.4, smtp in
-// beta.3, snmp in beta.0) and needs only major 2.
+// oracledb.js, ntp.js and sftp.js first ship in 2.1.0, 2.1.0, 2.5.0, 2.3.0,
+// 2.5.0 and 2.5.4 (upstream #5613, #6488, #7114, #7156, #7214 and #7034)
+// respectively, so the major gate alone would let an older 2.x store a row
+// whose checks all throw "Unknown Monitor Type" — the failure the type
+// gate exists to prevent. A type absent from the map shipped with 2.0.0
+// (manual in beta.4, smtp in beta.3, snmp in beta.0) and needs only major 2.
 
 const KUMA2_0: MinVersion = [2, 0, 0];
 
@@ -88,6 +89,7 @@ const KUMA2_TYPE_MIN_VERSION: Record<string, MinVersion> = {
   "system-service": [2, 1, 0],
   "websocket-upgrade": [2, 1, 0],
   pm2: [2, 5, 0],
+  sftp: [2, 5, 4],
   oracledb: [2, 3, 0],
   ntp: [2, 5, 0],
 };
@@ -186,6 +188,11 @@ const SYSTEM_SERVICE_NAME_PATTERN = /^[a-zA-Z0-9._\-@]+$/;
 // oxlint-disable-next-line no-control-regex
 const PM2_NAME_CONTROL_CHARS = /[\u0000-\u001F\u007F]/;
 
+// The sftp picker's Authentication Method select offers exactly these two;
+// an unset sshAuthMethod reads as the first — monitor.js toJSON's
+// fallback and sftp.js's else branch agree.
+const SSH_AUTH_METHODS = ["password", "privateKey"] as const;
+
 // monitorTypesWithEncodingAllowed of EditMonitor.vue's submit() (1.23.17 and
 // 2.5.11 alike): httpBodyEncoding stays on the monitor only for these types;
 // for every other type the UI sends null.
@@ -215,12 +222,13 @@ const TYPE_FLAGS: { flag: string; opt: string; types: readonly string[] }[] = [
       "ntp",
       "smtp",
       "snmp",
+      "sftp",
     ],
   },
   {
     flag: "--port",
     opt: "port",
-    types: ["port", "dns", "steam", "gamedig", "mqtt", "radius", "ntp", "smtp", "snmp"],
+    types: ["port", "dns", "steam", "gamedig", "mqtt", "radius", "ntp", "smtp", "snmp", "sftp"],
   },
   { flag: "--keyword", opt: "keyword", types: ["keyword", "grpc-keyword"] },
   { flag: "--invert-keyword", opt: "invertKeyword", types: ["keyword", "grpc-keyword"] },
@@ -259,6 +267,9 @@ const TYPE_FLAGS: { flag: string; opt: string; types: readonly string[] }[] = [
   { flag: "--snmp-version", opt: "snmpVersion", types: ["snmp"] },
   { flag: "--snmp-v3-username", opt: "snmpV3Username", types: ["snmp"] },
   { flag: "--system-service-name", opt: "systemServiceName", types: ["system-service", "pm2"] },
+  { flag: "--ssh-username", opt: "sshUsername", types: ["sftp"] },
+  { flag: "--ssh-auth-method", opt: "sshAuthMethod", types: ["sftp"] },
+  { flag: "--sftp-path", opt: "sftpPath", types: ["sftp"] },
 ];
 
 // monitorDefaults of src/pages/EditMonitor.vue in Kuma 1.23.17, minus the fields the CLI always
@@ -321,7 +332,12 @@ const KUMA2_INTERVAL_DEFAULTS: Record<string, number> = { ntp: 300 };
 // leaves the required input blank, but its check() runs `port || 25`. An
 // empty port or another type's well-known default is replaced by it; a
 // port the edit sets wins.
-const TYPE_CHANGE_PORT_DEFAULTS: Record<string, number> = { ntp: 123, smtp: 25, snmp: 161 };
+const TYPE_CHANGE_PORT_DEFAULTS: Record<string, number> = {
+  ntp: 123,
+  smtp: 25,
+  snmp: 161,
+  sftp: 22,
+};
 
 // The ports that read as "another type's default" to the watcher:
 // 22 / 53 / 123 / 1812 are its own list (sftp / dns / ntp / radius), and
@@ -1061,6 +1077,24 @@ const HATCH_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unknow
     }
     return v;
   },
+  // The sftp picker's Authentication Method select; null is the column's
+  // unset value, which toJSON's fallback and the check's else branch both
+  // read as the first method.
+  sshAuthMethod: (v, k) => {
+    if (
+      v !== null &&
+      (typeof v !== "string" || !(SSH_AUTH_METHODS as readonly string[]).includes(v))
+    ) {
+      fail(2, `${k} must be one of ${SSH_AUTH_METHODS.join(", ")}, or null`);
+    }
+    return v;
+  },
+  // sftp.js runs sftp.exists() on a truthy sftpPath; the picker's text
+  // input only produces a string and null/"" skip the check.
+  sftpPath: (v, k) => {
+    if (v !== null && typeof v !== "string") fail(2, `${k} must be a string or null`);
+    return v;
+  },
 };
 
 // Runs before connecting so a bad hatch value exits 2 with nothing sent.
@@ -1229,7 +1263,8 @@ function validateFinalMonitor(
     type === "radius" ||
     type === "ntp" ||
     type === "smtp" ||
-    type === "snmp"
+    type === "snmp" ||
+    type === "sftp"
   ) {
     needString("hostname");
   }
@@ -1241,12 +1276,36 @@ function validateFinalMonitor(
       type === "radius" ||
       type === "ntp" ||
       type === "smtp" ||
-      type === "snmp") &&
+      type === "snmp" ||
+      type === "sftp") &&
     inScope("port")
   ) {
     const port = monitor.port;
     if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535) {
       fail(2, "port must be a port number");
+    }
+  }
+  if (type === "sftp") {
+    needString("sshUsername");
+    // sshAuthMethod picks which credential sftp.js uses; the picker only
+    // offers SSH_AUTH_METHODS and an unset value reads as the first. The
+    // pairing is judged on the merged monitor: a method switch needs the
+    // new method's credential present, stored or supplied by this edit.
+    if (inScope("sshAuthMethod") || inScope("sshPassword") || inScope("sshPrivateKey")) {
+      const method = monitor.sshAuthMethod;
+      const effective =
+        method === undefined || method === null || method === "" ? SSH_AUTH_METHODS[0] : method;
+      if (
+        typeof effective !== "string" ||
+        !(SSH_AUTH_METHODS as readonly string[]).includes(effective)
+      ) {
+        fail(2, `sshAuthMethod must be one of ${SSH_AUTH_METHODS.join(", ")}`);
+      }
+      const credential = effective === "privateKey" ? "sshPrivateKey" : "sshPassword";
+      const value = monitor[credential];
+      if (typeof value !== "string" || value === "") {
+        fail(2, `${credential} must be a non-empty string`);
+      }
     }
   }
   if (type === "mqtt") needString("mqttTopic");
@@ -1623,9 +1682,12 @@ export function registerMonitors(program: Command): void {
     .option("--url <url>", "monitor url")
     .option(
       "--hostname <hostname>",
-      "hostname (port, ping, dns, steam, gamedig, mqtt, radius, tailscale-ping, ntp, smtp, snmp)",
+      "hostname (port, ping, dns, steam, gamedig, mqtt, radius, tailscale-ping, ntp, smtp, snmp, sftp)",
     )
-    .option("--port <port>", "port (port, dns, steam, gamedig, mqtt, radius, ntp, smtp, snmp)")
+    .option(
+      "--port <port>",
+      "port (port, dns, steam, gamedig, mqtt, radius, ntp, smtp, snmp, sftp)",
+    )
     .option("--keyword <keyword>", "keyword (keyword, grpc-keyword types)")
     .option("--json-path <path>", "json path (json-query, snmp types)")
     .addOption(
@@ -1682,6 +1744,13 @@ export function registerMonitors(program: Command): void {
       "--system-service-name <name>",
       "service or PM2 process name (system-service / pm2 type)",
     )
+    .option("--ssh-username <username>", "SSH username (sftp type)")
+    .addOption(
+      new Option("--ssh-auth-method <method>", "SSH auth method (sftp type)").choices([
+        ...SSH_AUTH_METHODS,
+      ]),
+    )
+    .option("--sftp-path <path>", "SFTP path to check (sftp type)")
     .option("--interval <seconds>", "heartbeat interval")
     .option("--retry-interval <seconds>", "retry interval")
     .option("--max-retries <n>", "maximum retries")
@@ -1762,9 +1831,13 @@ export function registerMonitors(program: Command): void {
         type === "radius" ||
         type === "ntp" ||
         type === "smtp" ||
-        type === "snmp"
+        type === "snmp" ||
+        type === "sftp"
       ) {
         if (!opts.hostname) fail(2, `--type ${type} requires --hostname`);
+      }
+      if (type === "sftp" && !opts.sshUsername) {
+        fail(2, "--type sftp requires --ssh-username");
       }
       if (type === "snmp") {
         if (opts.snmpOid === undefined) fail(2, "--type snmp requires --snmp-oid");
@@ -1922,10 +1995,11 @@ export function registerMonitors(program: Command): void {
           : parseTimeoutSeconds(opts.timeout, "--timeout");
       const proxyIdOption =
         opts.proxyId === undefined ? undefined : parseId(opts.proxyId, "--proxy-id");
-      // dns, radius, ntp and snmp get their well-known ports from the UI's
-      // type watcher (53 / 1812 / 123 / 161); smtp's watcher leaves the
-      // required input blank, but the check runs `port || 25`, so 25 is its
-      // own default. The other port types require --port (checked above).
+      // dns, radius, ntp, snmp and sftp get their well-known ports from the
+      // UI's type watcher (53 / 1812 / 123 / 161 / 22); smtp's watcher
+      // leaves the required input blank, but the check runs `port || 25`,
+      // so 25 is its own default. The other port types require --port
+      // (checked above).
       let port: number | undefined;
       if (type === "dns") {
         port = opts.port === undefined ? 53 : parsePort(opts.port, "--port");
@@ -1937,6 +2011,8 @@ export function registerMonitors(program: Command): void {
         port = opts.port === undefined ? 25 : parsePort(opts.port, "--port");
       } else if (type === "snmp") {
         port = opts.port === undefined ? 161 : parsePort(opts.port, "--port");
+      } else if (type === "sftp") {
+        port = opts.port === undefined ? 22 : parsePort(opts.port, "--port");
       } else if (type === "port" || type === "steam" || type === "gamedig" || type === "mqtt") {
         port = parsePort(opts.port, "--port");
       }
@@ -2146,6 +2222,14 @@ export function registerMonitors(program: Command): void {
       if (type === "gamedig") typed.game = opts.game;
       if (type === "system-service" || type === "pm2") {
         typed.system_service_name = opts.systemServiceName.trim();
+      }
+      if (type === "sftp") {
+        typed.sshUsername = opts.sshUsername;
+        // The picker's monitorDefaults carries the first method on every
+        // add; the secrets (sshPassword / sshPrivateKey / sshPassphrase)
+        // only arrive through --config-file.
+        typed.sshAuthMethod = opts.sshAuthMethod ?? SSH_AUTH_METHODS[0];
+        if (opts.sftpPath !== undefined) typed.sftpPath = opts.sftpPath;
       }
       if (type === "push") typed.pushToken = pushToken;
       // The UI's submit() sends httpBodyEncoding null outside http, keyword

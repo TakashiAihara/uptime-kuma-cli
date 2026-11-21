@@ -4379,6 +4379,604 @@ describe("pm2 monitors", () => {
   });
 });
 
+describe("sftp monitors", () => {
+  // the picker's Authentication Method select defaults to its first option,
+  // so an add that names no method stores it like the UI would
+  test("add --type sftp stores hostname, port 22, username and the default method", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const f = join(sb.dir, "sftp.json");
+    writeFileSync(f, JSON.stringify({ sshPassword: "fixture-ssh-secret" }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "sftp",
+        "--name",
+        "sftp1",
+        "--hostname",
+        "sftp.example.com",
+        "--ssh-username",
+        "deploy",
+        "--config-file",
+        f,
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls(k)[0]!.args[0] as Record<string, unknown>;
+    expect(sent).toMatchObject({
+      type: "sftp",
+      hostname: "sftp.example.com",
+      port: 22,
+      sshUsername: "deploy",
+      sshAuthMethod: "password",
+      sshPassword: "fixture-ssh-secret",
+    });
+    expect(stored(k, "sftp1").sshAuthMethod).toBe("password");
+  });
+
+  test("add --type sftp honors --port and --sftp-path", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const f = join(sb.dir, "sftp.json");
+    writeFileSync(f, JSON.stringify({ sshPassword: "fixture-ssh-secret" }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "sftp",
+        "--name",
+        "sftp1",
+        "--hostname",
+        "sftp.example.com",
+        "--port",
+        "2222",
+        "--ssh-username",
+        "deploy",
+        "--sftp-path",
+        "/srv/data",
+        "--config-file",
+        f,
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const m = stored(k, "sftp1");
+    expect(m.port).toBe(2222);
+    expect(m.sftpPath).toBe("/srv/data");
+  });
+
+  // the picker's key-auth branch swaps the password field for a required
+  // private key plus an optional passphrase
+  test("add --type sftp with privateKey auth stores key and passphrase", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const f = join(sb.dir, "sftp.json");
+    writeFileSync(
+      f,
+      JSON.stringify({
+        sshAuthMethod: "privateKey",
+        sshPrivateKey: "fixture-key-material",
+        sshPassphrase: "fixture-key-pass",
+      }),
+    );
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "sftp",
+        "--name",
+        "sftp1",
+        "--hostname",
+        "sftp.example.com",
+        "--ssh-username",
+        "deploy",
+        "--config-file",
+        f,
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const m = stored(k, "sftp1");
+    expect(m.sshAuthMethod).toBe("privateKey");
+    expect(m.sshPrivateKey).toBe("fixture-key-material");
+    expect(m.sshPassphrase).toBe("fixture-key-pass");
+    expect(m.sshPassword).toBeUndefined();
+  });
+
+  test("add --type sftp --ssh-auth-method privateKey needs no password secret", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const f = join(sb.dir, "sftp.json");
+    writeFileSync(f, JSON.stringify({ sshPrivateKey: "fixture-key-material" }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "sftp",
+        "--name",
+        "sftp1",
+        "--hostname",
+        "sftp.example.com",
+        "--ssh-username",
+        "deploy",
+        "--ssh-auth-method",
+        "privateKey",
+        "--config-file",
+        f,
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "sftp1").sshAuthMethod).toBe("privateKey");
+  });
+
+  test("add --type sftp without --hostname exits 2 before connecting", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "sftp", "--name", "sftp1", "--ssh-username", "deploy"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--type sftp requires --hostname");
+    expect(k.calls).toHaveLength(0);
+  });
+
+  test("add --type sftp without --ssh-username exits 2 before connecting", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "sftp", "--name", "sftp1", "--hostname", "sftp.example.com"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--type sftp requires --ssh-username");
+    expect(k.calls).toHaveLength(0);
+  });
+
+  // the password field is required="true" in the picker whenever the
+  // method is not privateKey — the merged monitor is judged the same way
+  test("add --type sftp without a credential exits 2 after connect", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "sftp",
+        "--name",
+        "sftp1",
+        "--hostname",
+        "sftp.example.com",
+        "--ssh-username",
+        "deploy",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("sshPassword must be a non-empty string");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --type sftp --ssh-auth-method privateKey without a key exits 2", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const f = join(sb.dir, "sftp.json");
+    writeFileSync(f, JSON.stringify({ sshPassword: "fixture-ssh-secret" }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "sftp",
+        "--name",
+        "sftp1",
+        "--hostname",
+        "sftp.example.com",
+        "--ssh-username",
+        "deploy",
+        "--ssh-auth-method",
+        "privateKey",
+        "--config-file",
+        f,
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("sshPrivateKey must be a non-empty string");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --set sshAuthMethod outside the picker's options exits 2", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const f = join(sb.dir, "sftp.json");
+    writeFileSync(f, JSON.stringify({ sshPassword: "fixture-ssh-secret" }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "sftp",
+        "--name",
+        "sftp1",
+        "--hostname",
+        "sftp.example.com",
+        "--ssh-username",
+        "deploy",
+        "--set",
+        "sshAuthMethod=keyboard-interactive",
+        "--config-file",
+        f,
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("sshAuthMethod must be one of password, privateKey");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --set sshAuthMethod as a non-string exits 2", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const f = join(sb.dir, "sftp.json");
+    writeFileSync(f, JSON.stringify({ sshPassword: "fixture-ssh-secret" }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "sftp",
+        "--name",
+        "sftp1",
+        "--hostname",
+        "sftp.example.com",
+        "--ssh-username",
+        "deploy",
+        "--set",
+        "sshAuthMethod=3",
+        "--config-file",
+        f,
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("sshAuthMethod must be one of password, privateKey");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --set sftpPath as a non-string exits 2", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const f = join(sb.dir, "sftp.json");
+    writeFileSync(f, JSON.stringify({ sshPassword: "fixture-ssh-secret" }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "sftp",
+        "--name",
+        "sftp1",
+        "--hostname",
+        "sftp.example.com",
+        "--ssh-username",
+        "deploy",
+        "--set",
+        "sftpPath=42",
+        "--config-file",
+        f,
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("sftpPath must be a string or null");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --type sftp exits 2 on a 1.x server after connect", async () => {
+    const k = await useFake();
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "sftp",
+        "--name",
+        "sftp1",
+        "--hostname",
+        "sftp.example.com",
+        "--ssh-username",
+        "deploy",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(
+      'type "sftp" needs Uptime Kuma >= 2.5.4; the server reports 1.23.17',
+    );
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  // sftp.js first ships in 2.5.4 (upstream #7034): on 2.5.3 the row would
+  // store fine but every check would throw "Unknown Monitor Type"
+  test("add --type sftp exits 2 on a 2.5.3 server naming 2.5.4", async () => {
+    const k = await useFake({ profile: "2.x", info: { version: "2.5.3" } });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "sftp",
+        "--name",
+        "sftp1",
+        "--hostname",
+        "sftp.example.com",
+        "--ssh-username",
+        "deploy",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('type "sftp" needs Uptime Kuma >= 2.5.4; the server reports 2.5.3');
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --type sftp runs on 2.5.4, the first release with the type", async () => {
+    const k = await useFake({ profile: "2.x", info: { version: "2.5.4" } });
+    const f = join(sb.dir, "sftp.json");
+    writeFileSync(f, JSON.stringify({ sshPassword: "fixture-ssh-secret" }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "sftp",
+        "--name",
+        "sftp1",
+        "--hostname",
+        "sftp.example.com",
+        "--ssh-username",
+        "deploy",
+        "--config-file",
+        f,
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "sftp1").type).toBe("sftp");
+  });
+
+  test("monitors get redacts the sftp secrets", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const f = join(sb.dir, "sftp.json");
+    writeFileSync(
+      f,
+      JSON.stringify({
+        sshPassword: "fixture-hidden-pass",
+        sshPrivateKey: "fixture-hidden-key",
+      }),
+    );
+    const add = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "sftp",
+        "--name",
+        "sftp1",
+        "--hostname",
+        "sftp.example.com",
+        "--ssh-username",
+        "deploy",
+        "--config-file",
+        f,
+      ],
+      creds(k.url),
+    );
+    expect(add.code).toBe(0);
+    const id = add.json().id as number;
+    const get = await run(sb, ["monitors", "get", String(id)], creds(k.url));
+    expect(get.code).toBe(0);
+    expect(get.stdout).not.toContain("fixture-hidden-pass");
+    expect(get.stdout).not.toContain("fixture-hidden-key");
+    expect(get.json().sshPassword).toBe("***");
+    expect(get.json().sshPrivateKey).toBe("***");
+  });
+
+  test("edit --set type=sftp needs the new type's fields on the merged monitor", async () => {
+    const k = await useFake({ profile: "2.x" });
+    await run(
+      sb,
+      ["monitors", "add", "--type", "http", "--name", "h1", "--url", "https://h.example.com"],
+      creds(k.url),
+    );
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "h1",
+        "--set",
+        "type=sftp",
+        "--set",
+        "hostname=sftp.example.com",
+        "--set",
+        "sshUsername=deploy",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("sshPassword must be a non-empty string");
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set type=sftp stores the fields a config-file supplies", async () => {
+    const k = await useFake({ profile: "2.x" });
+    await run(
+      sb,
+      ["monitors", "add", "--type", "http", "--name", "h1", "--url", "https://h.example.com"],
+      creds(k.url),
+    );
+    const f = join(sb.dir, "sftp.json");
+    writeFileSync(f, JSON.stringify({ sshPassword: "fixture-ssh-secret" }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "h1",
+        "--set",
+        "type=sftp",
+        "--set",
+        "hostname=sftp.example.com",
+        "--set",
+        "sshUsername=deploy",
+        "--config-file",
+        f,
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const m = stored(k, "h1");
+    expect(m.type).toBe("sftp");
+    expect(m.hostname).toBe("sftp.example.com");
+    expect(m.port).toBe(22);
+    expect(m.sshUsername).toBe("deploy");
+    expect(m.sshPassword).toBe("fixture-ssh-secret");
+  });
+
+  // switching the method on an existing monitor needs the new method's
+  // credential in the merged monitor — the stored password does not count
+  test("edit --set sshAuthMethod=privateKey on a password monitor exits 2 without a key", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const f = join(sb.dir, "sftp.json");
+    writeFileSync(f, JSON.stringify({ sshPassword: "fixture-ssh-secret" }));
+    await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "sftp",
+        "--name",
+        "sftp1",
+        "--hostname",
+        "sftp.example.com",
+        "--ssh-username",
+        "deploy",
+        "--config-file",
+        f,
+      ],
+      creds(k.url),
+    );
+    const r = await run(
+      sb,
+      ["monitors", "edit", "sftp1", "--set", "sshAuthMethod=privateKey"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("sshPrivateKey must be a non-empty string");
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set sshAuthMethod=privateKey with a key via config-file stores it", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const f = join(sb.dir, "sftp.json");
+    writeFileSync(f, JSON.stringify({ sshPassword: "fixture-ssh-secret" }));
+    await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "sftp",
+        "--name",
+        "sftp1",
+        "--hostname",
+        "sftp.example.com",
+        "--ssh-username",
+        "deploy",
+        "--config-file",
+        f,
+      ],
+      creds(k.url),
+    );
+    const g = join(sb.dir, "sftp-key.json");
+    writeFileSync(g, JSON.stringify({ sshPrivateKey: "fixture-key-material" }));
+    const r = await run(
+      sb,
+      ["monitors", "edit", "sftp1", "--set", "sshAuthMethod=privateKey", "--config-file", g],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const m = stored(k, "sftp1");
+    expect(m.sshAuthMethod).toBe("privateKey");
+    expect(m.sshPrivateKey).toBe("fixture-key-material");
+    // the stored password survives the switch, like the picker's hidden
+    // fields do — sftp.js only reads the key under privateKey
+    expect(m.sshPassword).toBe("fixture-ssh-secret");
+  });
+
+  // an unrelated edit keeps the stored credentials: the pairing is only
+  // judged when an auth field or the type is touched
+  test("edit of an unrelated field keeps the stored sftp credentials", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const f = join(sb.dir, "sftp.json");
+    writeFileSync(f, JSON.stringify({ sshPassword: "fixture-ssh-secret" }));
+    await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "sftp",
+        "--name",
+        "sftp1",
+        "--hostname",
+        "sftp.example.com",
+        "--ssh-username",
+        "deploy",
+        "--config-file",
+        f,
+      ],
+      creds(k.url),
+    );
+    const r = await run(sb, ["monitors", "edit", "sftp1", "--set", "interval=120"], creds(k.url));
+    expect(r.code).toBe(0);
+    const m = stored(k, "sftp1");
+    expect(m.interval).toBe(120);
+    expect(m.sshPassword).toBe("fixture-ssh-secret");
+    expect(m.sshUsername).toBe("deploy");
+  });
+
+  test("edit --set type=sftp exits 2 on a 1.x server before editMonitor", async () => {
+    const k = await useFake();
+    await run(
+      sb,
+      ["monitors", "add", "--type", "http", "--name", "h1", "--url", "https://h.example.com"],
+      creds(k.url),
+    );
+    const r = await run(sb, ["monitors", "edit", "h1", "--set", "type=sftp"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(
+      'type "sftp" needs Uptime Kuma >= 2.5.4; the server reports 1.23.17',
+    );
+    expect(editCalls(k)).toHaveLength(0);
+  });
+});
+
 describe("monitor timing on Kuma 2.x", () => {
   test("edit of a 2.x ping to a short interval keeps its timeout (no 80% cap)", async () => {
     const k = await useFake({
