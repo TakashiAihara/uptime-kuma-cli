@@ -60,6 +60,12 @@ export const onSipOptions =
   parseMajorVersion(itVersion) > 2 ||
   (parseMajorVersion(itVersion) === 2 && parseMinorVersion(itVersion) >= 1);
 
+// the container refusal is 2.x-only: the official 2.x image ships no sipsak
+// while 3.0.0-beta.1 added it and dropped the picker's isContainer gate —
+// the integration server is always the container image
+export const sipOptionsContainerHidden =
+  parseMajorVersion(itVersion) === 2 && parseMinorVersion(itVersion) >= 1;
+
 // deleteChildren and the incident events (getIncidentHistory / editIncident /
 // resolveIncident / deleteIncident) first ship in 2.1.0 — 1.x and 2.0.x legs
 // take the refusal branch for `delete --children` and the incident commands.
