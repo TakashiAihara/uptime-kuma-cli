@@ -509,14 +509,17 @@ describe("ci.yml integration job", () => {
   // teardown — the 25 the job sets is that documented budget, and a smaller
   // value could kill the suite mid-run and lose the runner's own timeout
   // message and the container logs it dumps; the step keeps no timeout of
-  // its own for the same reason. permissions is pinned as the whole object:
-  // an added pull-requests or id-token write would otherwise pass while
-  // widening the token a job that pulls and runs external images gets
+  // its own for the same reason. The pin against TEST_LIMIT_MS requires at
+  // least 5 minutes of slack over the bound — a bare `>` would still pass
+  // if the bound grew to 24 while setup alone pushes the total past 25.
+  // permissions is pinned as the whole object: an added
+  // pull-requests or id-token write would otherwise pass while widening
+  // the token a job that pulls and runs external images gets
   test("the job is time-boxed over the suite's own budget and read-only", () => {
     const step = testStep();
 
     expect(job()["timeout-minutes"]).toBe(25);
-    expect(job()["timeout-minutes"]! * 60_000).toBeGreaterThan(TEST_LIMIT_MS);
+    expect(job()["timeout-minutes"]! * 60_000).toBeGreaterThanOrEqual(TEST_LIMIT_MS + 5 * 60_000);
     expect(step["timeout-minutes"]).toBeUndefined();
     expect(job().permissions).toEqual({ contents: "read" });
   });
