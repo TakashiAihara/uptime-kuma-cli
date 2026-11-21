@@ -483,13 +483,14 @@ describe("ci.yml integration job", () => {
   });
 
   // timeout-minutes must cover the runner's own 18-minute suite bound
-  // (TEST_LIMIT_MS in scripts/integration.ts) plus image pull, setup and
-  // teardown — a smaller budget would kill the suite mid-run and skip the
-  // container teardown. permissions is pinned as the whole object: an added
+  // (TEST_LIMIT_MS in scripts/integration.ts) plus image pull, build, setup
+  // and teardown — the 25 the job sets is that documented budget, and a
+  // smaller value could kill the suite mid-run and skip the container
+  // teardown. permissions is pinned as the whole object: an added
   // pull-requests or id-token write would otherwise pass while widening the
   // token a job that pulls and runs external images gets
   test("the job is time-boxed over the suite's own budget and read-only", () => {
-    expect(job()["timeout-minutes"]).toBeGreaterThanOrEqual(20);
+    expect(job()["timeout-minutes"]).toBe(25);
     expect(job().permissions).toEqual({ contents: "read" });
   });
 
