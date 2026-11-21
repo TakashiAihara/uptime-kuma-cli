@@ -466,12 +466,13 @@ describe("ci.yml integration job", () => {
 
   // README promises both legs and branch protection requires both
   // `integration (<image>)` checks; a matrix change also renames them, so the
-  // failure would otherwise surface as stuck merges, not a red test
+  // failure would otherwise surface as stuck merges, not a red test. The
+  // whole matrix is pinned — an `exclude`/`include` key could otherwise drop
+  // or rename a leg while keeping the image list green
   test("the matrix runs the suite against both Kuma 1.x and 2.x, and a failing leg cannot cancel the other", () => {
-    expect(job().strategy?.matrix?.image).toEqual([
-      "louislam/uptime-kuma:1.23.17",
-      "louislam/uptime-kuma:2.5.11",
-    ]);
+    expect(job().strategy?.matrix).toEqual({
+      image: ["louislam/uptime-kuma:1.23.17", "louislam/uptime-kuma:2.5.11"],
+    });
     expect(job().strategy?.["fail-fast"]).toBe(false);
   });
 
