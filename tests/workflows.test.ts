@@ -579,11 +579,11 @@ describe("release.yml: publish the checked commit and artifact as is (second rou
     }
   });
 
-  // timeout-minutes counts the wait for a runner too, not just run time: a leg sat
-  // queued ~25 min under macOS runner starvation and the 15-minute cap cancelled it
-  // before its first step, so publish was skipped (#98). The budget must absorb a
-  // long queue wait — the smoke run itself takes well under a minute — while still
-  // capping a hung binary, so the pin is exact rather than "raised or removed"
+  // timeout-minutes counts the wait for a runner too, not just run time: at 15
+  // minutes a starved leg was cancelled before its first step and publish was
+  // skipped (#98). The smoke run takes well under a minute, so the budget is
+  // mostly queue headroom; the pin is exact because the value is the trade-off
+  // the issue picked between surviving starvation and capping a hung binary
   test("verify's time limit leaves room for runner queueing and still caps a hung binary", () => {
     expect(jobs().verify!["timeout-minutes"]).toBe(45);
   });
