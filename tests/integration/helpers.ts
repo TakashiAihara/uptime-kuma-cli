@@ -39,14 +39,35 @@ export const on21 =
   parseMajorVersion(itVersion) > 2 ||
   (parseMajorVersion(itVersion) === 2 && parseMinorVersion(itVersion) >= 1);
 
-// Every CLI invocation logs in once (the integration admin has no 2FA) and
-// Kuma 1.23 allows 20 logins per minute for the whole instance, so
-// invocation starts are paced to stay under it.
+// Kuma allows 20 logins per minute for the whole instance, and a single
+// invocation can spend several (a 2FA login sends a tokenless probe plus
+// the token and up to two adjacent retries), so calls reserve the login
+// count they can spend and the per-minute total is paced under the limit.
 const WINDOW_MS = 60_000;
-const MAX_STARTS_PER_WINDOW = 15;
-const starts: number[] = [];
+const MAX_LOGINS_PER_WINDOW = 15;
+const reserved: number[] = [];
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Reserving several calls' logins as one block lets back-to-back calls
+// spend them without a pacing wait in between — needed when the wait
+// itself would change what is being measured (a TOTP window boundary).
+export async function reserveLogins(logins: number): Promise<void> {
+  if (!Number.isInteger(logins) || logins < 0 || logins > MAX_LOGINS_PER_WINDOW) {
+    throw new Error(
+      `cannot reserve ${logins} logins; allowed: integer 0..${MAX_LOGINS_PER_WINDOW}`,
+    );
+  }
+  for (;;) {
+    const now = Date.now();
+    while (reserved.length > 0 && now - reserved[0]! >= WINDOW_MS) reserved.shift();
+    if (reserved.length + logins <= MAX_LOGINS_PER_WINDOW) {
+      reserved.push(...Array<number>(logins).fill(now));
+      break;
+    }
+    await sleep(reserved[0]! + WINDOW_MS - now + 20);
+  }
+}
 
 function itEnv(): Record<string, string> {
   return {
@@ -61,16 +82,9 @@ export async function cliRun(
   sb: Sandbox,
   args: string[],
   env: Record<string, string> = {},
+  opts: { logins?: number } = {},
 ): Promise<Result> {
-  for (;;) {
-    const now = Date.now();
-    while (starts.length > 0 && now - starts[0]! >= WINDOW_MS) starts.shift();
-    if (starts.length < MAX_STARTS_PER_WINDOW) {
-      starts.push(now);
-      break;
-    }
-    await sleep(starts[0]! + WINDOW_MS - now + 20);
-  }
+  await reserveLogins(opts.logins ?? 1);
   const r = await run(sb, args, { ...itEnv(), ...env });
   // A failing assert only shows the exit code; the CLI's message is the
   // evidence, and the CI log is the only place it can be read afterwards.
@@ -125,6 +139,9 @@ export async function withKuma<T>(
         resolve();
       });
     });
+    // The socket login is a login event too; it shares the per-minute
+    // budget with cliRun instead of bypassing the limiter
+    await reserveLogins(1);
     const login = await emitAck<{ ok?: boolean; msg?: string }>(socket, "login", [
       {
         username: process.env.UPTIME_KUMA_IT_USERNAME ?? "",
@@ -139,4 +156,37 @@ export async function withKuma<T>(
   } finally {
     socket.disconnect();
   }
+}
+
+// The integration admin is the only account, so 2FA coverage toggles it for
+// the length of fn: prepare2FA mints a secret and returns it inside the
+// otpauth uri, save2FA flips twofa_status (the emits the UI's enable-2FA
+// dialog makes), and fn runs with that secret. The finally's disable2FA
+// restores the tokenless login the rest of the suite needs — a left-on 2FA
+// would fail every later login, so a refused answer here is rethrown over
+// whatever fn itself produced. The disable rides the same socket; if that
+// socket is dead the suite is poisoned for the run (a retry would need a
+// second socket re-login, which now also needs a token).
+export async function withKuma2FA<T>(fn: (secret: string) => Promise<T>): Promise<T> {
+  return withKuma(async (call) => {
+    const password = itEnv().UPTIME_KUMA_PASSWORD;
+    const ack = async (event: "prepare2FA" | "save2FA" | "disable2FA") => {
+      const res = await call<{ ok?: boolean; uri?: string; msg?: string }>(event, [password]);
+      if (res?.ok !== true) throw new Error(`${event} failed: ${res?.msg ?? "no answer"}`);
+      return res;
+    };
+
+    const prepared = await ack("prepare2FA");
+    const secret =
+      typeof prepared.uri === "string"
+        ? new URLSearchParams(prepared.uri.slice(prepared.uri.indexOf("?"))).get("secret")
+        : null;
+    if (!secret) throw new Error("prepare2FA uri carries no secret");
+    try {
+      await ack("save2FA");
+      return await fn(secret);
+    } finally {
+      await ack("disable2FA");
+    }
+  });
 }
