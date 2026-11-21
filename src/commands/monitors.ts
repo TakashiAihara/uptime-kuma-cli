@@ -806,15 +806,19 @@ async function checkPm2Process(s: KumaSession, monitor: Record<string, unknown>)
     fail(70, "unexpected getPM2ProcessList response");
   }
   const list = res.processList as { id?: unknown; name?: unknown }[];
-  if (list.length === 0) return;
+  if (list.length === 0) {
+    console.error("warning: the server's PM2 process list is empty; the name is stored unverified");
+    return;
+  }
+  // Every row is judged before the match: a malformed entry anywhere in the
+  // answer means the response is not the picker's shape, match or not.
   for (const entry of list) {
-    if (typeof entry !== "object" || entry === null) {
+    if (typeof entry !== "object" || entry === null || typeof entry.name !== "string") {
       fail(70, "unexpected getPM2ProcessList response");
     }
+  }
+  for (const entry of list) {
     if (entry.name !== name && entry.id !== name) continue;
-    if (typeof entry.name !== "string") {
-      fail(70, "unexpected getPM2ProcessList response");
-    }
     monitor.system_service_name = entry.name;
     return;
   }

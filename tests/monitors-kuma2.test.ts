@@ -4165,6 +4165,7 @@ describe("pm2 monitors", () => {
     );
     expect(r.code).toBe(0);
     expect(stored(k, "pm1").system_service_name).toBe("later-process");
+    expect(r.stderr).toContain("process list is empty");
   });
 
   test("add --type pm2 without --system-service-name exits 2 before connecting", async () => {
@@ -4274,6 +4275,27 @@ describe("pm2 monitors", () => {
     const k = await useFake({
       profile: "2.x",
       getPM2ProcessListResult: { ok: true, processList: "nope" },
+    });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "pm2", "--name", "pm1", "--system-service-name", "api"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(70);
+    expect(r.stderr).toContain("unexpected getPM2ProcessList response");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --type pm2 exits 70 on a malformed row even when another row matches", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      getPM2ProcessListResult: {
+        ok: true,
+        processList: [
+          { id: "0", name: "api", status: "online" },
+          { id: "1", name: 42, status: "online" },
+        ],
+      },
     });
     const r = await run(
       sb,
