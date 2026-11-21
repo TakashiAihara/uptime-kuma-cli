@@ -164,7 +164,9 @@ export async function withKuma<T>(
 // dialog makes), and fn runs with that secret. The finally's disable2FA
 // restores the tokenless login the rest of the suite needs — a left-on 2FA
 // would fail every later login, so a refused answer here is rethrown over
-// whatever fn itself produced.
+// whatever fn itself produced. The disable rides the same socket; if that
+// socket is dead the suite is poisoned for the run (a retry would need a
+// second socket re-login, which now also needs a token).
 export async function withKuma2FA<T>(fn: (secret: string) => Promise<T>): Promise<T> {
   return withKuma(async (call) => {
     const password = itEnv().UPTIME_KUMA_PASSWORD;

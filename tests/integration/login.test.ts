@@ -87,9 +87,10 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("login (real Kuma)", () => {
       expect(denied.stderr + denied.stdout).not.toContain(wrong);
     });
     // The timeout must outlast the worst settle the test can legitimately
-    // reach — socket setup (~3 min), the reserved-slot wait and each
-    // call's spawn watchdog (360 s) — so a hung cliRun rejects inside fn
-    // and the finally's disable2FA still runs instead of leaving the
-    // shared admin token-gated for later files.
+    // reach — socket setup (~3 min), the reserved-slot waits, the pair
+    // (bounded to ~30 s by the c0 assertion) and each call's spawn
+    // watchdog (360 s) — so a hung cliRun rejects inside fn and the
+    // finally's disable2FA still runs instead of leaving the shared admin
+    // token-gated for later files.
   }, 780_000);
 });
