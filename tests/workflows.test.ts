@@ -452,6 +452,7 @@ describe("ci.yml integration job", () => {
             "timeout-minutes"?: number;
             "continue-on-error"?: boolean;
             if?: string;
+            needs?: string | string[];
             permissions?: Record<string, string>;
             strategy?: { "fail-fast"?: boolean; matrix?: { image?: string[] } };
             steps: {
@@ -466,7 +467,16 @@ describe("ci.yml integration job", () => {
       }
     ).jobs.integration;
 
-  // README promises both legs and branch protection requires both
+  // Exactly one step must mention the runner: without this the assertions
+  // below on step fields pass vacuously when the step is renamed or dropped
+  const testStep = () => {
+    const matches = job().steps.filter((s) => s.run?.includes("test:integration"));
+
+    expect(matches.length).toBe(1);
+    return matches[0]!;
+  };
+
+  // README promises both legs and the main ruleset requires both
   // `integration (<image>)` checks; a matrix change also renames them, so the
   // failure would otherwise surface as stuck merges, not a red test. The
   // whole matrix is pinned — an `exclude`/`include` key could otherwise drop
@@ -479,10 +489,10 @@ describe("ci.yml integration job", () => {
   });
 
   test("the matrix image reaches the runner through UPTIME_KUMA_IT_IMAGE", () => {
-    const step = job().steps.find((s) => s.run?.includes("test:integration"));
+    const step = testStep();
 
-    expect(step?.run?.trim()).toBe("bun run test:integration");
-    expect(step?.env?.UPTIME_KUMA_IT_IMAGE).toBe("${{ matrix.image }}");
+    expect(step.run?.trim()).toBe("bun run test:integration");
+    expect(step.env?.UPTIME_KUMA_IT_IMAGE).toBe("${{ matrix.image }}");
   });
 
   // The step above pins the script name, not what it runs. If
@@ -496,29 +506,33 @@ describe("ci.yml integration job", () => {
   // timeout-minutes must cover the runner's own 18-minute suite bound
   // (TEST_LIMIT_MS in scripts/integration.ts) plus image pull, build, setup
   // and teardown — the 25 the job sets is that documented budget, and a
-  // smaller value could kill the suite mid-run and skip the container
-  // teardown; the step keeps no timeout of its own for the same reason.
-  // permissions is pinned as the whole object: an added pull-requests or
-  // id-token write would otherwise pass while widening the token a job that
-  // pulls and runs external images gets
+  // smaller value could kill the suite mid-run and lose the runner's own
+  // timeout message and the container logs it dumps; the step keeps no
+  // timeout of its own for the same reason. permissions is pinned as the
+  // whole object: an added pull-requests or id-token write would otherwise
+  // pass while widening the token a job that pulls and runs external images
+  // gets
   test("the job is time-boxed over the suite's own budget and read-only", () => {
-    const step = job().steps.find((s) => s.run?.includes("test:integration"));
+    const step = testStep();
 
     expect(job()["timeout-minutes"]).toBe(25);
-    expect(step?.["timeout-minutes"]).toBeUndefined();
+    expect(step["timeout-minutes"]).toBeUndefined();
     expect(job().permissions).toEqual({ contents: "read" });
   });
 
-  // Both legs are required checks: a continue-on-error or a false `if` on the
-  // job or the test step would report green without gating — the `mutation`
-  // job's continue-on-error is legitimate because it is report-only
+  // Both legs are required checks, and a skipped required check counts as
+  // passing: a continue-on-error or a false `if` would report green without
+  // gating, and a `needs` chain would skip the job when the dependency
+  // fails. The `mutation` job's continue-on-error is legitimate because it
+  // is report-only
   test("the job and the test step cannot skip or swallow a failure", () => {
-    const step = job().steps.find((s) => s.run?.includes("test:integration"));
+    const step = testStep();
 
+    expect(job().needs).toBeUndefined();
     expect(job()["continue-on-error"]).toBeUndefined();
     expect(job().if).toBeUndefined();
-    expect(step?.["continue-on-error"]).toBeUndefined();
-    expect(step?.if).toBeUndefined();
+    expect(step["continue-on-error"]).toBeUndefined();
+    expect(step.if).toBeUndefined();
   });
 });
 
