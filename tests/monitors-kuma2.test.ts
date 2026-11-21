@@ -4977,6 +4977,748 @@ describe("sftp monitors", () => {
   });
 });
 
+describe("globalping monitors", () => {
+  // the picker's watcher chain on add: subtype defaults to ping, the
+  // transient ping state leaves port 80, the first-selection protocol
+  // pick is ICMP, location is monitorDefaults' "world" and the resolver
+  // stays empty like the 2.x defaults (globalping.js only sets a
+  // resolver for a truthy value)
+  test("add --type globalping stores the picker's ping defaults", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "globalping", "--name", "gp1", "--hostname", "example.com"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls(k)[0]!.args[0] as Record<string, unknown>;
+    expect(sent).toMatchObject({
+      type: "globalping",
+      subtype: "ping",
+      location: "world",
+      protocol: "ICMP",
+      port: 80,
+      hostname: "example.com",
+      dns_resolve_server: "",
+    });
+    expect(stored(k, "gp1").subtype).toBe("ping");
+  });
+
+  // the dns subtype's watcher picks UDP and port 53, and its RR-type
+  // select offers the wider globalping list (HTTPS is dns-type-invalid)
+  test("add --type globalping --subtype dns picks UDP/53 and the GP RR list", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "globalping",
+        "--name",
+        "gp1",
+        "--subtype",
+        "dns",
+        "--hostname",
+        "example.com",
+        "--dns-resolve-type",
+        "HTTPS",
+        "--location",
+        "amazon+germany",
+        "--ip-family",
+        "ipv4",
+        "--dns-resolve-server",
+        "9.9.9.9",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const m = stored(k, "gp1");
+    expect(m).toMatchObject({
+      subtype: "dns",
+      protocol: "UDP",
+      port: 53,
+      hostname: "example.com",
+      dns_resolve_type: "HTTPS",
+      dns_resolve_server: "9.9.9.9",
+      location: "amazon+germany",
+      ipFamily: "ipv4",
+    });
+  });
+
+  // the http subtype reads url, not hostname; its protocol pick is the
+  // null auto-select so the column stays unset, and port keeps the
+  // transient ping state's 80 like the picker stores it
+  test("add --type globalping --subtype http stores the url and no protocol", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "globalping",
+        "--name",
+        "gp1",
+        "--subtype",
+        "http",
+        "--url",
+        "https://example.com/health",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls(k)[0]!.args[0] as Record<string, unknown>;
+    expect(sent).toMatchObject({
+      subtype: "http",
+      url: "https://example.com/health",
+      port: 80,
+      location: "world",
+    });
+    expect(sent.hostname).toBeUndefined();
+    expect(sent.protocol).toBeUndefined();
+  });
+
+  test("add --type globalping --subtype http without --url exits 2", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "globalping", "--name", "gp1", "--subtype", "http"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("url must be a non-empty string");
+  });
+
+  // the url input's https?://.+ pattern is the picker's only scheme gate
+  test("add --type globalping --subtype http refuses a non-http url", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "globalping",
+        "--name",
+        "gp1",
+        "--subtype",
+        "http",
+        "--url",
+        "ftp://example.com/file",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("url must be a http:// or https:// url");
+  });
+
+  test("add --type globalping without --hostname exits 2 for the ping subtype", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "globalping", "--name", "gp1"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("hostname must be a non-empty string");
+  });
+
+  test("add --type globalping --subtype dns without --hostname exits 2", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "globalping", "--name", "gp1", "--subtype", "dns"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("hostname must be a non-empty string");
+  });
+
+  // isInputValid refuses a comma — one probe region per monitor
+  test("add --type globalping refuses a comma in --location", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "globalping",
+        "--name",
+        "gp1",
+        "--hostname",
+        "example.com",
+        "--location",
+        "world,aws+eu-west",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("location cannot contain multiple locations");
+  });
+
+  test("add --type globalping --set subtype=bogus exits 2 before connecting", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "globalping",
+        "--name",
+        "gp1",
+        "--hostname",
+        "example.com",
+        "--set",
+        "subtype=bogus",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("subtype must be one of ping, http, dns");
+    expect(k.calls).toHaveLength(0);
+  });
+
+  // the Protocol select offers ICMP/TCP for ping, UDP/TCP for dns and
+  // only unset/HTTP2 for http — a value outside the merged subtype's
+  // options is a monitor that can never check
+  test("add --type globalping refuses a protocol its subtype does not offer", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "globalping",
+        "--name",
+        "gp1",
+        "--subtype",
+        "ping",
+        "--hostname",
+        "example.com",
+        "--protocol",
+        "UDP",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("protocol must be ICMP or TCP");
+  });
+
+  test("add --type globalping --subtype http accepts --protocol HTTP2", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "globalping",
+        "--name",
+        "gp1",
+        "--subtype",
+        "http",
+        "--url",
+        "https://example.com",
+        "--protocol",
+        "HTTP2",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "gp1").protocol).toBe("HTTP2");
+  });
+
+  // expectedValue switches the http check to json-query, which reads
+  // jsonPath — without one every beat can only fail
+  test("add --type globalping --subtype http --expected-value without --json-path exits 2", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "globalping",
+        "--name",
+        "gp1",
+        "--subtype",
+        "http",
+        "--url",
+        "https://example.com",
+        "--expected-value",
+        "200",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("jsonPath must be a non-empty string");
+  });
+
+  // the dns subtype's RR select lacks CAA while the dns type's lacks
+  // HTTPS — the merged monitor is judged against its own list
+  test("add --type globalping --subtype dns refuses a dns-only RR type", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "globalping",
+        "--name",
+        "gp1",
+        "--subtype",
+        "dns",
+        "--hostname",
+        "example.com",
+        "--dns-resolve-type",
+        "CAA",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("dns_resolve_type must be one of");
+  });
+
+  test("add --type dns refuses a globalping-only RR type", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "dns",
+        "--name",
+        "d1",
+        "--hostname",
+        "example.com",
+        "--dns-resolve-type",
+        "HTTPS",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("dns_resolve_type must be one of");
+  });
+
+  // the port input is required for dns always and for ping only under
+  // TCP; under ICMP a stored null port is as good as the picker's blank.
+  // --set cannot write a null port (the hatch wants a number), so the
+  // states come from a stored row like a pre-CLI monitor would have
+  const gpSeed = (id: number, name: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    name,
+    type: "globalping",
+    active: true,
+    subtype: "ping",
+    location: "world",
+    protocol: "ICMP",
+    hostname: "example.com",
+    port: null,
+    url: null,
+    interval: 60,
+    retryInterval: 60,
+    timeout: 48,
+    proxyId: null,
+    docker_host: null,
+    dns_resolve_server: "",
+    parent: null,
+    maxretries: 0,
+    notificationIDList: {},
+    accepted_statuscodes: ["200-299"],
+    ...extra,
+  });
+
+  test("edit --set protocol=TCP on a port-less ping monitor exits 2", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [gpSeed(7, "gp")] });
+    const r = await run(sb, ["monitors", "edit", "gp", "--set", "protocol=TCP"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("port must be a port number");
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set protocol=ICMP keeps a stored null port", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [gpSeed(7, "gp")] });
+    const r = await run(sb, ["monitors", "edit", "gp", "--set", "protocol=ICMP"], creds(k.url));
+    expect(r.code).toBe(0);
+    expect(stored(k, "gp").port).toBeNull();
+  });
+
+  test("add --type globalping exits 2 on a 1.x server before add", async () => {
+    const k = await useFake();
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "globalping", "--name", "gp1", "--hostname", "example.com"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(
+      'type "globalping" needs Uptime Kuma >= 2.1.0; the server reports 1.23.17',
+    );
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  // globalping.js first ships in 2.1.0 — the patch-level gates the other
+  // 2.x types use cannot express that, so the type map carries it
+  test("add --type globalping exits 2 on a 2.0.x server naming 2.1.0", async () => {
+    const k = await useFake({ profile: "2.x", info: { version: "2.0.2" } });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "globalping", "--name", "gp1", "--hostname", "example.com"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(
+      'type "globalping" needs Uptime Kuma >= 2.1.0; the server reports 2.0.2',
+    );
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --type globalping runs on a 2.1.0 server", async () => {
+    const k = await useFake({ profile: "2.x", info: { version: "2.1.0" } });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "globalping", "--name", "gp1", "--hostname", "example.com"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "gp1").subtype).toBe("ping");
+  });
+
+  test("edit keeps the stored globalping fields on an unrelated change", async () => {
+    const k = await useFake({ profile: "2.x" });
+    await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "globalping",
+        "--name",
+        "gp1",
+        "--subtype",
+        "dns",
+        "--hostname",
+        "example.com",
+        "--dns-resolve-type",
+        "MX",
+        "--location",
+        "aws+us-east",
+      ],
+      creds(k.url),
+    );
+    const r = await run(sb, ["monitors", "edit", "gp1", "--set", "interval=120"], creds(k.url));
+    expect(r.code).toBe(0);
+    const m = stored(k, "gp1");
+    expect(m.interval).toBe(120);
+    expect(m).toMatchObject({
+      subtype: "dns",
+      protocol: "UDP",
+      port: 53,
+      hostname: "example.com",
+      dns_resolve_type: "MX",
+      location: "aws+us-east",
+    });
+  });
+
+  // the subtype watcher's change branch re-picks protocol and port
+  // unconditionally — a stored custom protocol or port does not survive
+  // the subtype switch unless this edit sets it
+  test("edit --set subtype=dns on a ping monitor re-picks UDP and 53", async () => {
+    const k = await useFake({ profile: "2.x" });
+    await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "globalping",
+        "--name",
+        "gp1",
+        "--hostname",
+        "example.com",
+        "--set",
+        "protocol=TCP",
+        "--set",
+        "port=8080",
+      ],
+      creds(k.url),
+    );
+    const r = await run(sb, ["monitors", "edit", "gp1", "--set", "subtype=dns"], creds(k.url));
+    expect(r.code).toBe(0);
+    const m = stored(k, "gp1");
+    expect(m.protocol).toBe("UDP");
+    expect(m.port).toBe(53);
+  });
+
+  test("edit --set subtype=http keeps the stored port like the watcher", async () => {
+    const k = await useFake({ profile: "2.x" });
+    await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "globalping",
+        "--name",
+        "gp1",
+        "--subtype",
+        "dns",
+        "--hostname",
+        "example.com",
+        "--set",
+        "port=5353",
+      ],
+      creds(k.url),
+    );
+    // the http subtype's url input appears required-empty like the
+    // picker's, so the switch needs one supplied in the same edit
+    const r = await run(
+      sb,
+      ["monitors", "edit", "gp1", "--set", "subtype=http", "--set", "url=https://example.com"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const m = stored(k, "gp1");
+    expect(m.subtype).toBe("http");
+    expect(m.protocol).toBeNull();
+    expect(m.port).toBe(5353);
+  });
+
+  // a value the same edit sets wins over the subtype watcher's pick
+  test("edit --set subtype=dns --set protocol=TCP keeps the explicit protocol", async () => {
+    const k = await useFake({ profile: "2.x" });
+    await run(
+      sb,
+      ["monitors", "add", "--type", "globalping", "--name", "gp1", "--hostname", "example.com"],
+      creds(k.url),
+    );
+    const r = await run(
+      sb,
+      ["monitors", "edit", "gp1", "--set", "subtype=dns", "--set", "protocol=TCP"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const m = stored(k, "gp1");
+    expect(m.protocol).toBe("TCP");
+    expect(m.port).toBe(53);
+  });
+
+  // the picker shows an empty required location input on a type change —
+  // the merged check refuses the same blank
+  test("edit --set type=globalping without location exits 2", async () => {
+    const k = await useFake({ profile: "2.x" });
+    await run(
+      sb,
+      ["monitors", "add", "--type", "http", "--name", "h1", "--url", "https://h.example.com"],
+      creds(k.url),
+    );
+    const r = await run(
+      sb,
+      ["monitors", "edit", "h1", "--set", "type=globalping", "--set", "hostname=example.com"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("location must be a non-empty string");
+  });
+
+  test("edit --set type=globalping applies the ping defaults", async () => {
+    const k = await useFake({ profile: "2.x" });
+    await run(
+      sb,
+      ["monitors", "add", "--type", "http", "--name", "h1", "--url", "https://h.example.com"],
+      creds(k.url),
+    );
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "h1",
+        "--set",
+        "type=globalping",
+        "--set",
+        "location=world",
+        "--set",
+        "hostname=example.com",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const m = stored(k, "h1");
+    expect(m).toMatchObject({
+      type: "globalping",
+      subtype: "ping",
+      protocol: "ICMP",
+      port: 80,
+      location: "world",
+      hostname: "example.com",
+    });
+  });
+
+  // the type watcher runs under the transient "ping" before the user
+  // picks dns, whose own change-branch pick is unconditional — one edit
+  // naming both lands on the dns picks
+  test("edit --set type=globalping --set subtype=dns lands on the dns picks", async () => {
+    const k = await useFake({ profile: "2.x" });
+    await run(
+      sb,
+      ["monitors", "add", "--type", "http", "--name", "h1", "--url", "https://h.example.com"],
+      creds(k.url),
+    );
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "h1",
+        "--set",
+        "type=globalping",
+        "--set",
+        "subtype=dns",
+        "--set",
+        "location=world",
+        "--set",
+        "hostname=example.com",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const m = stored(k, "h1");
+    expect(m).toMatchObject({
+      subtype: "dns",
+      protocol: "UDP",
+      port: 53,
+    });
+  });
+
+  test("edit --set type=globalping exits 2 on a 1.x server before editMonitor", async () => {
+    const k = await useFake();
+    await run(
+      sb,
+      ["monitors", "add", "--type", "http", "--name", "h1", "--url", "https://h.example.com"],
+      creds(k.url),
+    );
+    const r = await run(sb, ["monitors", "edit", "h1", "--set", "type=globalping"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(
+      'type "globalping" needs Uptime Kuma >= 2.1.0; the server reports 1.23.17',
+    );
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  // the http subtype's change pick nulls the protocol but leaves the port
+  // the transient ping state stored — the picker's own leftovers
+  test("edit --set type=globalping --set subtype=http keeps the transient port", async () => {
+    const k = await useFake({ profile: "2.x" });
+    await run(
+      sb,
+      ["monitors", "add", "--type", "http", "--name", "h1", "--url", "https://h.example.com"],
+      creds(k.url),
+    );
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "h1",
+        "--set",
+        "type=globalping",
+        "--set",
+        "subtype=http",
+        "--set",
+        "location=world",
+        "--set",
+        "url=https://probe.example.com",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const m = stored(k, "h1");
+    expect(m).toMatchObject({
+      subtype: "http",
+      protocol: null,
+      port: 80,
+      location: "world",
+      url: "https://probe.example.com",
+    });
+  });
+
+  // ipFamily's select shows on the http family too, so the flag accepts
+  // those types — a 2.x-only field, so a 1.x server refuses it after
+  // connect like any other 2.x field
+  test("add --type http --ip-family ipv4 stores it on 2.x", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "h1",
+        "--url",
+        "https://h.example.com",
+        "--ip-family",
+        "ipv4",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "h1").ipFamily).toBe("ipv4");
+  });
+
+  test("add --type http --ip-family ipv4 exits 2 on a 1.x server", async () => {
+    const k = await useFake();
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "h1",
+        "--url",
+        "https://h.example.com",
+        "--ip-family",
+        "ipv4",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('"ipFamily" needs Uptime Kuma 2.x');
+  });
+
+  test("add --type dns --ip-family ipv4 exits 2 before connecting", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "dns",
+        "--name",
+        "d1",
+        "--hostname",
+        "example.com",
+        "--ip-family",
+        "ipv4",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--ip-family only applies to --type");
+  });
+});
+
 describe("monitor timing on Kuma 2.x", () => {
   test("edit of a 2.x ping to a short interval keeps its timeout (no 80% cap)", async () => {
     const k = await useFake({

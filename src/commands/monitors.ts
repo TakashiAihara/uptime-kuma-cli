@@ -73,15 +73,17 @@ const MONITOR_2X_TYPES = [
   "smtp",
   "snmp",
   "oracledb",
+  "globalping",
 ] as const;
 
 // server/monitor-types/websocket-upgrade.js, system-service.js, pm2.js,
-// oracledb.js, ntp.js and sftp.js first ship in 2.1.0, 2.1.0, 2.5.0, 2.3.0,
-// 2.5.0 and 2.5.4 (upstream #5613, #6488, #7114, #7156, #7214 and #7034)
-// respectively, so the major gate alone would let an older 2.x store a row
-// whose checks all throw "Unknown Monitor Type" — the failure the type
-// gate exists to prevent. A type absent from the map shipped with 2.0.0
-// (manual in beta.4, smtp in beta.3, snmp in beta.0) and needs only major 2.
+// oracledb.js, ntp.js, sftp.js and globalping.js first ship in 2.1.0,
+// 2.1.0, 2.5.0, 2.3.0, 2.5.0, 2.5.4 and 2.1.0 (upstream #5613, #6488,
+// #7114, #7156, #7214, #7034 and the globalping addition) respectively, so
+// the major gate alone would let an older 2.x store a row whose checks all
+// throw "Unknown Monitor Type" — the failure the type gate exists to
+// prevent. A type absent from the map shipped with 2.0.0 (manual in
+// beta.4, smtp in beta.3, snmp in beta.0) and needs only major 2.
 
 const KUMA2_0: MinVersion = [2, 0, 0];
 
@@ -92,6 +94,7 @@ const KUMA2_TYPE_MIN_VERSION: Record<string, MinVersion> = {
   sftp: [2, 5, 4],
   oracledb: [2, 3, 0],
   ntp: [2, 5, 0],
+  globalping: [2, 1, 0],
 };
 
 // A 2.x-only field whose column postdates 2.0.0 is silently dropped by
@@ -193,6 +196,39 @@ const PM2_NAME_CONTROL_CHARS = /[\u0000-\u001F\u007F]/;
 // fallback and sftp.js's else branch agree.
 const SSH_AUTH_METHODS = ["password", "privateKey"] as const;
 
+// The globalping picker's Subtype select (2.5.11 EditMonitor.vue).
+const GLOBALPING_SUBTYPES = ["ping", "http", "dns"] as const;
+
+// globalpingdnsresolvetypeoptions of EditMonitor.vue — wider than the dns
+// type's dnsresolvetypeOptions (no CAA/SOA-less set, adds ANY/DNSKEY/DS/
+// HTTPS/NSEC/RRSIG/SVCB).
+const GLOBALPING_DNS_RESOLVE_TYPES = [
+  "A",
+  "AAAA",
+  "ANY",
+  "CNAME",
+  "DNSKEY",
+  "DS",
+  "HTTPS",
+  "MX",
+  "NS",
+  "NSEC",
+  "PTR",
+  "RRSIG",
+  "SOA",
+  "SRV",
+  "SVCB",
+  "TXT",
+] as const;
+
+// The Protocol select's options per subtype; http's first option is the
+// null "auto-select", so its pick is null — the column stays unset.
+const GLOBALPING_PROTOCOL_BY_SUBTYPE: Record<string, string | null> = {
+  ping: "ICMP",
+  http: null,
+  dns: "UDP",
+};
+
 // monitorTypesWithEncodingAllowed of EditMonitor.vue's submit() (1.23.17 and
 // 2.5.11 alike): httpBodyEncoding stays on the monitor only for these types;
 // for every other type the UI sends null.
@@ -206,7 +242,10 @@ const URL_TYPES = ["http", "keyword", "json-query", "real-browser", "websocket-u
 // commander's camel-case of the flag. A flag given for another type is stored
 // ignored — refused below so a mistyped --type does not silently drop it.
 const TYPE_FLAGS: { flag: string; opt: string; types: readonly string[] }[] = [
-  { flag: "--url", opt: "url", types: URL_TYPES },
+  // --url also applies to globalping: only its http subtype reads it, but
+  // the picker cannot express a subtype at flag-check time, so the merged
+  // monitor judges the pairing like every other conditional field.
+  { flag: "--url", opt: "url", types: [...URL_TYPES, "globalping"] },
   {
     flag: "--hostname",
     opt: "hostname",
@@ -223,21 +262,42 @@ const TYPE_FLAGS: { flag: string; opt: string; types: readonly string[] }[] = [
       "smtp",
       "snmp",
       "sftp",
+      "globalping",
     ],
   },
   {
     flag: "--port",
     opt: "port",
-    types: ["port", "dns", "steam", "gamedig", "mqtt", "radius", "ntp", "smtp", "snmp", "sftp"],
+    types: [
+      "port",
+      "dns",
+      "steam",
+      "gamedig",
+      "mqtt",
+      "radius",
+      "ntp",
+      "smtp",
+      "snmp",
+      "sftp",
+      "globalping",
+    ],
   },
-  { flag: "--keyword", opt: "keyword", types: ["keyword", "grpc-keyword"] },
-  { flag: "--invert-keyword", opt: "invertKeyword", types: ["keyword", "grpc-keyword"] },
-  { flag: "--json-path", opt: "jsonPath", types: ["json-query", "snmp"] },
-  { flag: "--json-path-operator", opt: "jsonPathOperator", types: ["json-query", "snmp"] },
-  { flag: "--expected-value", opt: "expectedValue", types: ["json-query", "snmp"] },
+  { flag: "--keyword", opt: "keyword", types: ["keyword", "grpc-keyword", "globalping"] },
+  {
+    flag: "--invert-keyword",
+    opt: "invertKeyword",
+    types: ["keyword", "grpc-keyword", "globalping"],
+  },
+  { flag: "--json-path", opt: "jsonPath", types: ["json-query", "snmp", "globalping"] },
+  {
+    flag: "--json-path-operator",
+    opt: "jsonPathOperator",
+    types: ["json-query", "snmp", "globalping"],
+  },
+  { flag: "--expected-value", opt: "expectedValue", types: ["json-query", "snmp", "globalping"] },
   { flag: "--packet-size", opt: "packetSize", types: ["ping"] },
-  { flag: "--dns-resolve-server", opt: "dnsResolveServer", types: ["dns"] },
-  { flag: "--dns-resolve-type", opt: "dnsResolveType", types: ["dns"] },
+  { flag: "--dns-resolve-server", opt: "dnsResolveServer", types: ["dns", "globalping"] },
+  { flag: "--dns-resolve-type", opt: "dnsResolveType", types: ["dns", "globalping"] },
   { flag: "--docker-container", opt: "dockerContainer", types: ["docker"] },
   { flag: "--docker-host", opt: "dockerHost", types: ["docker"] },
   { flag: "--game", opt: "game", types: ["gamedig"] },
@@ -270,6 +330,17 @@ const TYPE_FLAGS: { flag: string; opt: string; types: readonly string[] }[] = [
   { flag: "--ssh-username", opt: "sshUsername", types: ["sftp"] },
   { flag: "--ssh-auth-method", opt: "sshAuthMethod", types: ["sftp"] },
   { flag: "--sftp-path", opt: "sftpPath", types: ["sftp"] },
+  { flag: "--subtype", opt: "subtype", types: ["globalping"] },
+  { flag: "--location", opt: "location", types: ["globalping"] },
+  { flag: "--protocol", opt: "protocol", types: ["globalping"] },
+  // ipFamily is the picker's shared HTTP-family field as well as
+  // globalping's — the same select shows on http / keyword / json-query /
+  // grpc-keyword (EditMonitor.vue's HTTP Options block).
+  {
+    flag: "--ip-family",
+    opt: "ipFamily",
+    types: ["http", "keyword", "json-query", "grpc-keyword", "globalping"],
+  },
 ];
 
 // monitorDefaults of src/pages/EditMonitor.vue in Kuma 1.23.17, minus the fields the CLI always
@@ -942,9 +1013,13 @@ const HATCH_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unknow
     return v;
   },
   docker_host: (v, k) => (v === null ? null : hatchNumber(v, k, parseId)),
+  // The dns type and globalping's dns subtype draw from different RR-type
+  // lists, so the hatch takes their union and validateFinalMonitor judges
+  // the merged value against the list its type/subtype actually offers.
   dns_resolve_type: (v, k) => {
-    if (typeof v !== "string" || !(DNS_RESOLVE_TYPES as readonly string[]).includes(v)) {
-      fail(2, `${k} must be one of ${DNS_RESOLVE_TYPES.join(", ")}`);
+    const all: readonly string[] = [...DNS_RESOLVE_TYPES, ...GLOBALPING_DNS_RESOLVE_TYPES];
+    if (typeof v !== "string" || !all.includes(v)) {
+      fail(2, `${k} must be one of ${all.join(", ")}`);
     }
     return v;
   },
@@ -1095,6 +1170,33 @@ const HATCH_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unknow
     if (v !== null && typeof v !== "string") fail(2, `${k} must be a string or null`);
     return v;
   },
+  // The globalping picker's selects; subtype's unset value reads as the
+  // watcher's "ping" default, protocol's null is the http subtype's
+  // auto-select, and ipFamily's null is its own auto-select — the merged
+  // monitor judges which of those a subtype actually allows.
+  subtype: (v, k) => {
+    if (
+      v !== null &&
+      (typeof v !== "string" || !(GLOBALPING_SUBTYPES as readonly string[]).includes(v))
+    ) {
+      fail(2, `${k} must be one of ${GLOBALPING_SUBTYPES.join(", ")}, or null`);
+    }
+    return v;
+  },
+  location: (v, k) => {
+    if (v !== null && typeof v !== "string") fail(2, `${k} must be a string or null`);
+    return v;
+  },
+  protocol: (v, k) => {
+    if (v !== null && typeof v !== "string") fail(2, `${k} must be a string or null`);
+    return v;
+  },
+  ipFamily: (v, k) => {
+    if (v !== null && v !== "ipv4" && v !== "ipv6") {
+      fail(2, `${k} must be ipv4, ipv6, or null`);
+    }
+    return v;
+  },
 };
 
 // Runs before connecting so a bad hatch value exits 2 with nothing sent.
@@ -1175,6 +1277,10 @@ function validateFinalMonitor(
   const type = typeof monitor.type === "string" ? monitor.type : "";
   const inScope = (field: string): boolean =>
     edit === undefined || edit.touched.has(field) || edit.typeChanged;
+  // Optional selects the picker may leave unset are judged only when the
+  // edit carries the field — a type change must not re-judge a stored
+  // null the picker itself could have produced.
+  const fieldTouched = (field: string): boolean => edit === undefined || edit.touched.has(field);
   const needString = (field: string): void => {
     if (!inScope(field)) return;
     const v = monitor[field];
@@ -1305,6 +1411,129 @@ function validateFinalMonitor(
       const value = monitor[credential];
       if (typeof value !== "string" || value === "") {
         fail(2, `${credential} must be a non-empty string`);
+      }
+    }
+  }
+  if (type === "dns" && fieldTouched("dns_resolve_type")) {
+    // The hatch takes the union of the dns and globalping RR-type lists;
+    // the dns type's picker offers only DNS_RESOLVE_TYPES. A null stays
+    // allowed — the picker's select can sit unset on a type change.
+    const rrtype = monitor.dns_resolve_type;
+    if (
+      rrtype !== null &&
+      rrtype !== undefined &&
+      (typeof rrtype !== "string" || !(DNS_RESOLVE_TYPES as readonly string[]).includes(rrtype))
+    ) {
+      fail(2, `dns_resolve_type must be one of ${DNS_RESOLVE_TYPES.join(", ")}`);
+    }
+  }
+  if (type === "globalping") {
+    // Every requirement below is subtype-conditional, and the subtype
+    // itself arrives through --set/--config-file on edit, so all of it is
+    // judged on the merged monitor — scoped like every other field so a
+    // stored value an unrelated edit does not touch is not re-judged. A
+    // subtype switch re-judges the fields the new subtype reads, like
+    // the picker's conditional inputs appearing empty and required.
+    const subtype = monitor.subtype;
+    const validSubtype =
+      typeof subtype === "string" && (GLOBALPING_SUBTYPES as readonly string[]).includes(subtype)
+        ? subtype
+        : undefined;
+    const subtypeTouched = inScope("subtype");
+    const needMerged = (field: string): boolean => inScope(field) || subtypeTouched;
+    const needStringMerged = (field: string): void => {
+      if (!needMerged(field)) return;
+      const v = monitor[field];
+      if (typeof v !== "string" || v === "") fail(2, `${field} must be a non-empty string`);
+    };
+    if (subtypeTouched && validSubtype === undefined) {
+      fail(2, `subtype must be one of ${GLOBALPING_SUBTYPES.join(", ")}`);
+    }
+    if (inScope("location")) {
+      const location = monitor.location;
+      if (typeof location !== "string" || location === "") {
+        fail(2, "location must be a non-empty string");
+      } else if (location.includes(",")) {
+        // the picker's isInputValid refuses a comma — one probe region
+        // per monitor (EditMonitor.vue GlobalpingMultipleLocationsError)
+        fail(2, "location cannot contain multiple locations separated by commas");
+      }
+    }
+    if (validSubtype === "ping" || validSubtype === "dns") {
+      needStringMerged("hostname");
+    }
+    if (validSubtype === "http") {
+      needStringMerged("url");
+      // The url input's `https?://.+` pattern is the picker's only scheme
+      // gate — submit()'s acceptList has no globalping entry.
+      if (needMerged("url") && typeof monitor.url === "string" && monitor.url !== "") {
+        let parsed: URL | undefined;
+        try {
+          parsed = new URL(monitor.url);
+        } catch {
+          // unparseable urls fail the same refusal below
+        }
+        if (
+          parsed === undefined ||
+          parsed.host === "" ||
+          (parsed.protocol !== "http:" && parsed.protocol !== "https:")
+        ) {
+          fail(
+            2,
+            `url must be a http:// or https:// url for type globalping, got "${String(redactUrl(monitor.url))}"`,
+          );
+        }
+      }
+      // expectedValue switches the check to json-query, which reads
+      // jsonPath — the picker shows the fields together, so a value
+      // without a path can only fail every beat.
+      if (
+        needMerged("expectedValue") &&
+        typeof monitor.expectedValue === "string" &&
+        monitor.expectedValue !== "" &&
+        (typeof monitor.jsonPath !== "string" || monitor.jsonPath === "")
+      ) {
+        fail(2, "jsonPath must be a non-empty string when expectedValue is set");
+      }
+    }
+    if (validSubtype === "dns" && fieldTouched("dns_resolve_type")) {
+      const rrtype = monitor.dns_resolve_type;
+      if (
+        rrtype !== null &&
+        rrtype !== undefined &&
+        (typeof rrtype !== "string" ||
+          !(GLOBALPING_DNS_RESOLVE_TYPES as readonly string[]).includes(rrtype))
+      ) {
+        fail(2, `dns_resolve_type must be one of ${GLOBALPING_DNS_RESOLVE_TYPES.join(", ")}`);
+      }
+    }
+    if ((inScope("protocol") || subtypeTouched) && validSubtype !== undefined) {
+      // null stands in for the http subtype's unset "auto-select"; the
+      // ping/dns selects have no null option.
+      const proto = monitor.protocol === undefined ? null : monitor.protocol;
+      const allowed =
+        validSubtype === "ping"
+          ? ["ICMP", "TCP"]
+          : validSubtype === "dns"
+            ? ["UDP", "TCP"]
+            : [null, "HTTP2"];
+      if (!(allowed as readonly unknown[]).includes(proto)) {
+        fail(
+          2,
+          `protocol must be ${allowed.map((p) => (p === null ? "unset" : p)).join(" or ")} for globalping subtype ${validSubtype}`,
+        );
+      }
+    }
+    if ((inScope("port") || inScope("protocol") || subtypeTouched) && validSubtype !== undefined) {
+      const port = monitor.port;
+      const portRequired =
+        validSubtype === "dns" || (validSubtype === "ping" && monitor.protocol === "TCP");
+      const portPresent = port !== undefined && port !== null && port !== "";
+      if (
+        (portRequired || portPresent) &&
+        (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535)
+      ) {
+        fail(2, "port must be a port number");
       }
     }
   }
@@ -1682,26 +1911,26 @@ export function registerMonitors(program: Command): void {
     .option("--url <url>", "monitor url")
     .option(
       "--hostname <hostname>",
-      "hostname (port, ping, dns, steam, gamedig, mqtt, radius, tailscale-ping, ntp, smtp, snmp, sftp)",
+      "hostname (port, ping, dns, steam, gamedig, mqtt, radius, tailscale-ping, ntp, smtp, snmp, sftp, globalping)",
     )
     .option(
       "--port <port>",
-      "port (port, dns, steam, gamedig, mqtt, radius, ntp, smtp, snmp, sftp)",
+      "port (port, dns, steam, gamedig, mqtt, radius, ntp, smtp, snmp, sftp, globalping)",
     )
-    .option("--keyword <keyword>", "keyword (keyword, grpc-keyword types)")
-    .option("--json-path <path>", "json path (json-query, snmp types)")
+    .option("--keyword <keyword>", "keyword (keyword, grpc-keyword, globalping types)")
+    .option("--json-path <path>", "json path (json-query, snmp, globalping types)")
     .addOption(
       new Option(
         "--json-path-operator <op>",
-        "json query operator (json-query, snmp types)",
+        "json query operator (json-query, snmp, globalping types)",
       ).choices([...JSON_PATH_OPERATORS]),
     )
-    .option("--expected-value <value>", "expected value (json-query, snmp types)")
+    .option("--expected-value <value>", "expected value (json-query, snmp, globalping types)")
     .option("--packet-size <bytes>", "ping packet size")
     .option("--dns-resolve-server <server>", "DNS resolver server")
     .addOption(
       new Option("--dns-resolve-type <type>", "DNS resource record type").choices([
-        ...DNS_RESOLVE_TYPES,
+        ...new Set([...DNS_RESOLVE_TYPES, ...GLOBALPING_DNS_RESOLVE_TYPES]),
       ]),
     )
     .option("--docker-container <name>", "docker container name or id")
@@ -1712,7 +1941,10 @@ export function registerMonitors(program: Command): void {
     .option("--grpc-method <method>", "gRPC method (grpc-keyword type)")
     .option("--grpc-protobuf <path>", "proto file path (grpc-keyword type)")
     .option("--grpc-enable-tls", "enable TLS for gRPC (grpc-keyword type)")
-    .option("--invert-keyword", "invert the keyword match (keyword, grpc-keyword types)")
+    .option(
+      "--invert-keyword",
+      "invert the keyword match (keyword, grpc-keyword, globalping types)",
+    )
     .option("--mqtt-topic <topic>", "MQTT topic (mqtt type)")
     .option("--mqtt-username <username>", "MQTT username (mqtt type)")
     .option("--mqtt-success-message <message>", "MQTT success message (mqtt type)")
@@ -1751,6 +1983,17 @@ export function registerMonitors(program: Command): void {
       ]),
     )
     .option("--sftp-path <path>", "SFTP path to check (sftp type)")
+    .addOption(
+      new Option("--subtype <subtype>", "globalping subtype").choices([...GLOBALPING_SUBTYPES]),
+    )
+    .option("--location <location>", "globalping probe location")
+    .option("--protocol <protocol>", "globalping protocol (per subtype)")
+    .addOption(
+      new Option("--ip-family <family>", "IP family (http family, globalping)").choices([
+        "ipv4",
+        "ipv6",
+      ]),
+    )
     .option("--interval <seconds>", "heartbeat interval")
     .option("--retry-interval <seconds>", "retry interval")
     .option("--max-retries <n>", "maximum retries")
@@ -2013,6 +2256,10 @@ export function registerMonitors(program: Command): void {
         port = opts.port === undefined ? 161 : parsePort(opts.port, "--port");
       } else if (type === "sftp") {
         port = opts.port === undefined ? 22 : parsePort(opts.port, "--port");
+      } else if (type === "globalping") {
+        // the picker's port pick is subtype-dependent (dns 53, ping 80),
+        // resolved on the merged monitor once subtype is known
+        port = opts.port === undefined ? undefined : parsePort(opts.port, "--port");
       } else if (type === "port" || type === "steam" || type === "gamedig" || type === "mqtt") {
         port = parsePort(opts.port, "--port");
       }
@@ -2063,6 +2310,12 @@ export function registerMonitors(program: Command): void {
       // hatch merge to count.
       if (opts.snmpV3Username !== undefined && type === "snmp") {
         twoXFieldCandidates.push("snmpV3Username");
+      }
+      // ipFamily is a typed flag on the 1.x-capable http family too, so
+      // unlike the globalping-only flags its 2.x-ness cannot ride the
+      // type gate — the field gate must see it.
+      if (opts.ipFamily !== undefined) {
+        twoXFieldCandidates.push("ipFamily");
       }
       checkKuma2xType(s, type);
       checkKuma2xFields(s, twoXFieldCandidates);
@@ -2143,11 +2396,16 @@ export function registerMonitors(program: Command): void {
       if (retryInterval !== undefined) typed.retryInterval = retryInterval;
       if (timeout !== undefined) typed.timeout = timeout;
       if (parentId !== undefined) typed.parent = parentId;
-      if (urlTypes) typed.url = opts.url;
-      if (type === "keyword" || type === "grpc-keyword") {
+      // globalping's http subtype reads url like the url types do; its
+      // ping/dns subtypes leave the flag's value stored and unused.
+      if (urlTypes || type === "globalping") typed.url = opts.url;
+      if (type === "keyword" || type === "grpc-keyword" || type === "globalping") {
         typed.keyword = opts.keyword;
         if (opts.invertKeyword) typed.invertKeyword = true;
       }
+      // ipFamily's select shows on the HTTP family and on every globalping
+      // subtype; the flag's type list already refused every other type.
+      if (opts.ipFamily !== undefined) typed.ipFamily = opts.ipFamily;
       if (type === "grpc-keyword") {
         typed.grpcUrl = opts.grpcUrl;
         typed.grpcServiceName = opts.grpcServiceName;
@@ -2231,6 +2489,21 @@ export function registerMonitors(program: Command): void {
         typed.sshAuthMethod = opts.sshAuthMethod ?? SSH_AUTH_METHODS[0];
         if (opts.sftpPath !== undefined) typed.sftpPath = opts.sftpPath;
       }
+      if (type === "globalping") {
+        // hostname serves the ping/dns subtypes only, so it cannot ride
+        // the port-gated assignment the port types share.
+        typed.hostname = opts.hostname;
+        if (opts.subtype !== undefined) typed.subtype = opts.subtype;
+        if (opts.location !== undefined) typed.location = opts.location;
+        if (opts.protocol !== undefined) typed.protocol = opts.protocol;
+        if (opts.dnsResolveServer !== undefined) typed.dns_resolve_server = opts.dnsResolveServer;
+        if (opts.dnsResolveType !== undefined) typed.dns_resolve_type = opts.dnsResolveType;
+        // the http subtype's json-query fields; "==" like the other 2.x
+        // json-query consumers since the column has no default
+        typed.jsonPath = opts.jsonPath;
+        typed.expectedValue = opts.expectedValue;
+        typed.jsonPathOperator = opts.jsonPathOperator ?? "==";
+      }
       if (type === "push") typed.pushToken = pushToken;
       // The UI's submit() sends httpBodyEncoding null outside http, keyword
       // and json-query; the MONITOR_DEFAULTS "json" only reaches those types.
@@ -2268,6 +2541,47 @@ export function registerMonitors(program: Command): void {
         isDefaultStatusCodes(monitor.accepted_statuscodes, HTTP_STATUS_DEFAULT)
       ) {
         monitor.accepted_statuscodes = WS_UPGRADE_STATUS_DEFAULT;
+      }
+      if (type === "globalping") {
+        // The picker's watcher chain on a fresh monitor: the type watcher
+        // defaults subtype to "ping", then the subtype watcher's
+        // first-selection picks protocol only while it is unset — but the
+        // type watcher's port branch has already run under the transient
+        // "ping", so every subtype keeps port 80 unless dns's own pick
+        // replaces it. location's "world" is monitorDefaults, which the
+        // CLI's shared defaults deliberately lack (it is a 2.1.0 column).
+        // A value the command supplies — flag, --config-file or --set —
+        // wins over every pick, and an explicit null stays null so the
+        // merged checks below refuse it where the picker would.
+        const gpSupplied = (key: string, opt?: string): boolean =>
+          sets[key] !== undefined ||
+          fileConfig[key] !== undefined ||
+          (opt !== undefined && opts[opt] !== undefined);
+        if (!gpSupplied("subtype", "subtype") && !monitor.subtype) {
+          monitor.subtype = "ping";
+        }
+        if (!gpSupplied("location", "location") && monitor.location === undefined) {
+          monitor.location = "world";
+        }
+        if (
+          !gpSupplied("protocol", "protocol") &&
+          (monitor.protocol === undefined || monitor.protocol === null)
+        ) {
+          const pick = GLOBALPING_PROTOCOL_BY_SUBTYPE[monitor.subtype as string];
+          if (pick !== undefined && pick !== null) monitor.protocol = pick;
+        }
+        if (
+          !gpSupplied("port", "port") &&
+          (monitor.port === undefined || monitor.port === null || monitor.port === "")
+        ) {
+          monitor.port = monitor.subtype === "dns" ? 53 : 80;
+        }
+        // 1.23's monitorDefaults carries "1.1.1.1" where 2.x's carries "";
+        // globalping.js only sets a resolver for a truthy value, so the
+        // picker's empty default must reach the wire as empty.
+        if (!gpSupplied("dns_resolve_server", "dnsResolveServer")) {
+          monitor.dns_resolve_server = "";
+        }
       }
       deriveMonitorTiming(monitor, defaultTimeoutSeconds(s, type), capsTimeout(s, type));
       validateFinalMonitor(s, monitor);
@@ -2322,9 +2636,10 @@ export function registerMonitors(program: Command): void {
     .description("Edit a monitor")
     .option("--set <key=value>", "set a field (repeatable)", collect, [])
     .addOption(
-      new Option("--json-path-operator <op>", "json query operator (json-query type)").choices([
-        ...JSON_PATH_OPERATORS,
-      ]),
+      new Option(
+        "--json-path-operator <op>",
+        "json query operator (json-query, snmp, globalping types)",
+      ).choices([...JSON_PATH_OPERATORS]),
     )
     .option("--parent <groupId|name>", "parent group monitor id or name ('none' clears it)")
     .option("--config-file <path>", "JSON file of monitor fields")
@@ -2406,11 +2721,17 @@ export function registerMonitors(program: Command): void {
       if (
         opts.jsonPathOperator !== undefined &&
         monitor.type !== "json-query" &&
-        monitor.type !== "snmp"
+        monitor.type !== "snmp" &&
+        monitor.type !== "globalping"
       ) {
-        fail(2, "--json-path-operator only applies to --type json-query or snmp");
+        fail(2, "--json-path-operator only applies to --type json-query, snmp or globalping");
       }
-      if ((monitor.type === "json-query" || monitor.type === "snmp") && s.majorVersion >= 2) {
+      if (
+        (monitor.type === "json-query" ||
+          monitor.type === "snmp" ||
+          monitor.type === "globalping") &&
+        s.majorVersion >= 2
+      ) {
         // Like add's typed flags, the flag sits below --config-file and --set;
         // a monitor turned into json-query needs an operator like a new one.
         if (
@@ -2530,6 +2851,89 @@ export function registerMonitors(program: Command): void {
           // oracledb's context would throw "Variable missing in context"
           // every check. An explicit conditions list wins like everywhere.
           if (!touched.has("conditions")) monitor.conditions = [];
+        }
+      }
+      if (type === "globalping") {
+        if (typeChanged) {
+          // The picker runs its watchers in sequence: the type watcher
+          // defaults a falsy subtype to "ping" — the transient value its
+          // port branch then sees — and fires the subtype watcher's
+          // first-selection picks; a subtype the user then picks takes
+          // the change branch. An explicit --set subtype plays the
+          // user's post-change pick, so the port branch judges the
+          // stored-derived subtype, not the final one. A stored truthy
+          // subtype fires no watcher at all — only the port branch.
+          const storedFalsy =
+            fetched.subtype === undefined || fetched.subtype === null || fetched.subtype === "";
+          const branchSubtype = storedFalsy ? "ping" : fetched.subtype;
+          if (!monitor.subtype) {
+            monitor.subtype = "ping";
+          }
+          if (
+            storedFalsy &&
+            monitor.subtype === "ping" &&
+            !touched.has("protocol") &&
+            !monitor.protocol
+          ) {
+            monitor.protocol = GLOBALPING_PROTOCOL_BY_SUBTYPE.ping;
+          }
+          if (!touched.has("port")) {
+            const storedPort = monitor.port;
+            const portKnown =
+              storedPort === undefined ||
+              storedPort === null ||
+              storedPort === "" ||
+              (typeof storedPort === "number" && TYPE_CHANGE_KNOWN_PORTS.has(storedPort));
+            if (portKnown) {
+              monitor.port = branchSubtype === "ping" ? 80 : undefined;
+            }
+          }
+          const newSubtype = monitor.subtype;
+          if (
+            touched.has("subtype") &&
+            newSubtype !== branchSubtype &&
+            typeof newSubtype === "string" &&
+            (GLOBALPING_SUBTYPES as readonly string[]).includes(newSubtype)
+          ) {
+            if (!touched.has("protocol")) {
+              monitor.protocol = GLOBALPING_PROTOCOL_BY_SUBTYPE[newSubtype] ?? null;
+            }
+            if (newSubtype === "ping" && !touched.has("port")) monitor.port = 80;
+            if (newSubtype === "dns" && !touched.has("port")) monitor.port = 53;
+          }
+        } else if (monitor.subtype !== fetched.subtype) {
+          // A subtype change re-picks protocol and port like the subtype
+          // watcher. A falsy stored subtype takes its first-selection
+          // branch (picks only while the field is unset, dns's port pick
+          // needs port === undefined); a truthy one takes the change
+          // branch, which is unconditional upstream — only a value this
+          // edit sets wins.
+          const newSubtype = monitor.subtype;
+          const validNew =
+            typeof newSubtype === "string" &&
+            (GLOBALPING_SUBTYPES as readonly string[]).includes(newSubtype);
+          const storedFalsy =
+            fetched.subtype === undefined || fetched.subtype === null || fetched.subtype === "";
+          if (storedFalsy) {
+            if (validNew && !touched.has("protocol") && !monitor.protocol) {
+              const pick = GLOBALPING_PROTOCOL_BY_SUBTYPE[newSubtype];
+              monitor.protocol = pick === undefined ? monitor.protocol : pick;
+            }
+            if (
+              validNew &&
+              newSubtype === "dns" &&
+              !touched.has("port") &&
+              monitor.port === undefined
+            ) {
+              monitor.port = 53;
+            }
+          } else if (validNew) {
+            if (!touched.has("protocol")) {
+              monitor.protocol = GLOBALPING_PROTOCOL_BY_SUBTYPE[newSubtype] ?? null;
+            }
+            if (newSubtype === "ping" && !touched.has("port")) monitor.port = 80;
+            if (newSubtype === "dns" && !touched.has("port")) monitor.port = 53;
+          }
         }
       }
       // The UI's interval watcher moves retryInterval only while the two

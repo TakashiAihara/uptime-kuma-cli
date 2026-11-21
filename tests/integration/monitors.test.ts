@@ -7,6 +7,7 @@ import {
   cliRun,
   on21,
   on2x,
+  onGlobalping,
   onNtp,
   onOracleDb,
   onPm2,
@@ -1295,6 +1296,44 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
       sshUsername: "it-sftp-user",
       sftpPath: "/tmp",
       sshPassword: "***",
+    });
+    const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
+    expect(del.code).toBe(0);
+  }, 120_000);
+
+  // globalping.js first ships in 2.1.0; add only stores the row, so a
+  // paused monitor needs no reachable globalping API — older legs take
+  // the type gate
+  test("globalping stores the subtype fields on get", async () => {
+    const r = await cliRun(sb, [
+      "monitors",
+      "add",
+      "--type",
+      "globalping",
+      "--name",
+      "it-globalping",
+      "--hostname",
+      "localhost",
+      "--location",
+      "world",
+      "--paused",
+    ]);
+    if (!onGlobalping) {
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain('type "globalping" needs Uptime Kuma >= 2.1.0');
+      return;
+    }
+    expect(r.code).toBe(0);
+    const id = r.json().id;
+    const g = await cliRun(sb, ["monitors", "get", String(id)]);
+    expect(g.code).toBe(0);
+    expect(g.json()).toMatchObject({
+      type: "globalping",
+      subtype: "ping",
+      location: "world",
+      protocol: "ICMP",
+      port: 80,
+      hostname: "localhost",
     });
     const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
     expect(del.code).toBe(0);
