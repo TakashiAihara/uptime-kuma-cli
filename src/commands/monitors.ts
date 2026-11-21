@@ -64,6 +64,7 @@ const MONITOR_TYPES = [
 // a 1.x server — 1.23's `add` would store the row and every check would throw
 // "Unknown Monitor Type" — so the pre-connect choices list takes the union.
 const MONITOR_2X_TYPES = [
+  "system-service",
   "websocket-upgrade",
   "manual",
   "ntp",
@@ -72,17 +73,18 @@ const MONITOR_2X_TYPES = [
   "oracledb",
 ] as const;
 
-// server/monitor-types/websocket-upgrade.js, oracledb.js and ntp.js first
-// ship in 2.1.0, 2.3.0 and 2.5.0 (upstream #5613, #7156 and #7214)
-// respectively, so the major gate alone would let an older 2.x store a
-// row whose checks all throw "Unknown Monitor Type" — the failure the
-// type gate exists to prevent. A type absent from the map shipped with
-// 2.0.0 (manual in beta.4, smtp in beta.3, snmp in beta.0) and needs only
-// major 2.
+// server/monitor-types/websocket-upgrade.js, system-service.js, oracledb.js
+// and ntp.js first ship in 2.1.0, 2.1.0, 2.3.0 and 2.5.0 (upstream #5613,
+// #6488, #7156 and #7214) respectively, so the major gate alone would let
+// an older 2.x store a row whose checks all throw "Unknown Monitor Type" —
+// the failure the type gate exists to prevent. A type absent from the map
+// shipped with 2.0.0 (manual in beta.4, smtp in beta.3, snmp in beta.0)
+// and needs only major 2.
 
 const KUMA2_0: MinVersion = [2, 0, 0];
 
 const KUMA2_TYPE_MIN_VERSION: Record<string, MinVersion> = {
+  "system-service": [2, 1, 0],
   "websocket-upgrade": [2, 1, 0],
   oracledb: [2, 3, 0],
   ntp: [2, 5, 0],
@@ -171,6 +173,11 @@ const SNMP_VERSIONS = ["1", "2c", "3"] as const;
 // The picker's snmpOid input pattern (2.5.11 EditMonitor.vue).
 const SNMP_OID_PATTERN = /^([0-2])((\.0)|(\.[1-9][0-9]*))*$/;
 
+// The service-name pattern monitor.js enforces on system-service after
+// trimming: letters, digits and . _ - @ only. The picker's hint pattern is
+// looser and lets a space through that validate() would reject.
+const SYSTEM_SERVICE_NAME_PATTERN = /^[a-zA-Z0-9._\-@]+$/;
+
 // monitorTypesWithEncodingAllowed of EditMonitor.vue's submit() (1.23.17 and
 // 2.5.11 alike): httpBodyEncoding stays on the monitor only for these types;
 // for every other type the UI sends null.
@@ -243,6 +250,7 @@ const TYPE_FLAGS: { flag: string; opt: string; types: readonly string[] }[] = [
   { flag: "--snmp-oid", opt: "snmpOid", types: ["snmp"] },
   { flag: "--snmp-version", opt: "snmpVersion", types: ["snmp"] },
   { flag: "--snmp-v3-username", opt: "snmpV3Username", types: ["snmp"] },
+  { flag: "--system-service-name", opt: "systemServiceName", types: ["system-service"] },
 ];
 
 // monitorDefaults of src/pages/EditMonitor.vue in Kuma 1.23.17, minus the fields the CLI always
@@ -724,6 +732,22 @@ function checkTailscalePing(s: KumaSession, type: unknown): void {
   }
 }
 
+// The picker offers system-service only on a linux or win32 host outside a
+// container (2.5.11 EditMonitor.vue's runtime.platform + isContainer check):
+// system-service.js shells out to systemctl / Get-Service, which the
+// container image lacks and other platforms do not provide. Checked on the
+// type the merged monitor ends up with — on add always, on edit only when
+// the type changes.
+function checkSystemService(s: KumaSession, type: unknown): void {
+  if (type !== "system-service") return;
+  if (s.isContainer === true || (s.runtimePlatform !== "linux" && s.runtimePlatform !== "win32")) {
+    fail(
+      2,
+      "system-service is not available: the picker only offers it on a linux or win32 server outside a container",
+    );
+  }
+}
+
 // The gamedig picker offers getGameList's entries; a game outside the list
 // creates a monitor that goes down at its first check. Each entry's keys are
 // the codes the lookup accepts (the UI stores keys[0], aliases resolve too).
@@ -919,6 +943,16 @@ const HATCH_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unknow
   },
   snmpV3Username: (v, k) => {
     if (typeof v !== "string" || v === "") fail(2, `${k} must be a non-empty string`);
+    return v;
+  },
+  // monitor.js trims before the empty check, so a whitespace-only name is
+  // refused here like the server would refuse it. The service-name pattern
+  // applies only to the system-service type, so it is checked on the merged
+  // monitor in validateFinalMonitor, not here.
+  system_service_name: (v, k) => {
+    if (typeof v !== "string" || v.trim() === "") {
+      fail(2, `${k} must be a non-empty string`);
+    }
     return v;
   },
   // The picker's inputs are a text field and a checkbox; a non-string
@@ -1242,6 +1276,22 @@ function validateFinalMonitor(
       'snmpVersion "3" cannot be set on a non-snmp monitor: the row would look like a v3 monitor with no username — set the version on the snmp type, or add a new v3 monitor',
     );
   }
+  if (type === "system-service") {
+    needString("system_service_name");
+    // monitor.js trims then requires letters, digits and . _ - @ only — the
+    // picker's hint pattern is looser and lets a space through that
+    // validate() would reject on the stored row.
+    if (
+      inScope("system_service_name") &&
+      typeof monitor.system_service_name === "string" &&
+      !SYSTEM_SERVICE_NAME_PATTERN.test(monitor.system_service_name.trim())
+    ) {
+      fail(
+        2,
+        `system_service_name must match the service name pattern (letters, digits, and . _ - @ only), got "${monitor.system_service_name}"`,
+      );
+    }
+  }
   // databaseConnectionString is a secret, so it can only arrive through
   // --config-file (--set refuses it) and there is no typed flag to check
   // early: the merged monitor is judged here.
@@ -1563,6 +1613,7 @@ export function registerMonitors(program: Command): void {
       ]),
     )
     .option("--snmp-v3-username <username>", "SNMPv3 username (snmp type, add only)")
+    .option("--system-service-name <name>", "system service name (system-service type)")
     .option("--interval <seconds>", "heartbeat interval")
     .option("--retry-interval <seconds>", "retry interval")
     .option("--max-retries <n>", "maximum retries")
@@ -1674,6 +1725,22 @@ export function registerMonitors(program: Command): void {
         if (opts.dockerHost === undefined) fail(2, "--type docker requires --docker-host");
       }
       if (type === "gamedig" && !opts.game) fail(2, "--type gamedig requires --game");
+      if (type === "system-service") {
+        if (!opts.systemServiceName) {
+          fail(2, "--type system-service requires --system-service-name");
+        }
+        // The flag is validated even when a hatch key overrides it — a
+        // mistyped value should fail loudly, like --snmp-oid.
+        if (
+          typeof opts.systemServiceName === "string" &&
+          !SYSTEM_SERVICE_NAME_PATTERN.test(opts.systemServiceName.trim())
+        ) {
+          fail(
+            2,
+            `--system-service-name must match the service name pattern (letters, digits, and . _ - @ only), got "${opts.systemServiceName}"`,
+          );
+        }
+      }
       if (opts.pushToken === "") fail(2, "--push-token must not be empty");
 
       const sets = parseSets(opts.set as string[] | undefined);
@@ -1848,6 +1915,7 @@ export function registerMonitors(program: Command): void {
       checkKuma2xType(s, type);
       checkKuma2xFields(s, twoXFieldCandidates);
       checkTailscalePing(s, type);
+      checkSystemService(s, type);
       checkMonitorTiming(
         s,
         timingFields(sets, fileConfig, {
@@ -2000,6 +2068,7 @@ export function registerMonitors(program: Command): void {
         typed.docker_host = dockerHost;
       }
       if (type === "gamedig") typed.game = opts.game;
+      if (type === "system-service") typed.system_service_name = opts.systemServiceName;
       if (type === "push") typed.pushToken = pushToken;
       // The UI's submit() sends httpBodyEncoding null outside http, keyword
       // and json-query; the MONITOR_DEFAULTS "json" only reaches those types.
@@ -2319,6 +2388,7 @@ export function registerMonitors(program: Command): void {
       if (typeChanged) {
         checkKuma2xType(s, monitor.type);
         checkTailscalePing(s, monitor.type);
+        checkSystemService(s, monitor.type);
       }
       // A non-v3 monitor can never become v3 by edit: snmpV3Username is
       // required for v3 and no editMonitor reads it, so the monitor would

@@ -1193,4 +1193,27 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
     const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
     expect(del.code).toBe(0);
   }, 120_000);
+
+  // system-service.js first ships in 2.1.0 and the picker only offers the
+  // type on a linux/win32 host outside a container — the integration server
+  // is the official image, so a 2.x leg takes the availability refusal
+  // while an older leg takes the type gate
+  test("system-service exits 2 like the picker's container-hidden type", async () => {
+    const r = await cliRun(sb, [
+      "monitors",
+      "add",
+      "--type",
+      "system-service",
+      "--name",
+      "it-svc",
+      "--system-service-name",
+      "nginx",
+    ]);
+    expect(r.code).toBe(2);
+    if (!on21) {
+      expect(r.stderr).toContain('type "system-service" needs Uptime Kuma >= 2.1.0');
+    } else {
+      expect(r.stderr).toContain("system-service is not available");
+    }
+  }, 120_000);
 });

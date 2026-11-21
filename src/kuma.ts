@@ -277,6 +277,10 @@ export class KumaSession {
     // the type picker hides tailscale-ping there because the image ships no
     // tailscale binary. Undefined when the info never carried the field.
     readonly isContainer: boolean | undefined,
+    // info.runtime.platform (process.platform of the server) first ships in
+    // 2.1.0 with system-service, whose picker option only shows on linux or
+    // win32 outside a container. Undefined on 1.x and 2.0.x.
+    readonly runtimePlatform: string | undefined,
     // info carries the Primary Base URL setting on both Kuma versions, so
     // `monitors add --type push` builds pushUrl from it without a getSettings
     // round trip; undefined when the server never sent a string one.
@@ -649,6 +653,7 @@ export async function connect(
   let serverDbType: string | undefined;
   let primaryBaseURL: string | undefined;
   let isContainer: boolean | undefined;
+  let runtimePlatform: string | undefined;
   let infoSeen = false;
   socket.on("info", (data: unknown) => {
     infoSeen = true;
@@ -658,6 +663,7 @@ export async function connect(
           dbType?: unknown;
           primaryBaseURL?: unknown;
           isContainer?: unknown;
+          runtime?: { platform?: unknown } | null;
         }
       | null
       | undefined;
@@ -665,6 +671,7 @@ export async function connect(
     if (typeof info?.dbType === "string") serverDbType = info.dbType;
     if (typeof info?.primaryBaseURL === "string") primaryBaseURL = info.primaryBaseURL;
     if (typeof info?.isContainer === "boolean") isContainer = info.isContainer;
+    if (typeof info?.runtime?.platform === "string") runtimePlatform = info.runtime.platform;
   });
   // 1.23 pushes these right after the login callback and 2.x before it, so the
   // listeners must be in place before login is emitted.
@@ -874,6 +881,7 @@ export async function connect(
     serverVersion,
     serverDbType,
     isContainer,
+    runtimePlatform,
     primaryBaseURL,
     password,
     disconnected,
