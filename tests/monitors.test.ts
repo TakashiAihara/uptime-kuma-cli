@@ -5118,6 +5118,75 @@ describe("monitors edit", () => {
     expect(kuma.calls.find((c) => c.event === "editMonitor")).toBeUndefined();
   });
 
+  const kafkaEditArgs = () => [
+    "monitors",
+    "edit",
+    "7",
+    "--set",
+    "type=kafka-producer",
+    "--set",
+    "kafkaProducerTopic=t",
+    "--set",
+    "kafkaProducerMessage=m",
+    "--set",
+    'kafkaProducerBrokers=["h:1"]',
+  ];
+
+  test("edit --set type=kafka-producer fills absent SASL options like add does", async () => {
+    // a non-kafka monitor never carried SASL options; sent absent, the
+    // server's JSON.stringify writes NULL and the kafka check's
+    // JSON.parse(...).mechanism throws on every beat
+    const r = await run(sb, kafkaEditArgs(), creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.kafkaProducerSaslOptions).toEqual({ mechanism: "None" });
+    expect(r.json().kafkaProducerSaslOptions).toEqual({ mechanism: "None" });
+  });
+
+  test("edit --set type=kafka-producer heals a stored null kafkaProducerSaslOptions", async () => {
+    // a real server emits null, not a missing key, for the NULL column
+    kuma.state.monitors.find((m) => m.id === 7)!.kafkaProducerSaslOptions = null;
+    const r = await run(sb, kafkaEditArgs(), creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.kafkaProducerSaslOptions).toEqual({ mechanism: "None" });
+  });
+
+  test("edit --set type=kafka-producer keeps a stored SASL config", async () => {
+    // a kafka -> other -> kafka round trip leaves the options object on the
+    // row; resetting it to "None" would silently drop the SASL credentials
+    kuma.state.monitors.find((m) => m.id === 7)!.kafkaProducerSaslOptions = {
+      mechanism: "plain",
+      username: "u",
+      password: "p",
+    };
+    const r = await run(sb, kafkaEditArgs(), creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.kafkaProducerSaslOptions).toEqual({
+      mechanism: "plain",
+      username: "u",
+      password: "p",
+    });
+  });
+
+  test("edit on a kafka-producer monitor heals a stored null kafkaProducerSaslOptions", async () => {
+    Object.assign(
+      kuma.state.monitors.find((m) => m.id === 7)!,
+      {
+        type: "kafka-producer",
+        kafkaProducerTopic: "t",
+        kafkaProducerMessage: "m",
+        kafkaProducerBrokers: ["h:1"],
+        kafkaProducerSaslOptions: null,
+      },
+    );
+    const r = await run(sb, ["monitors", "edit", "7", "--set", "description=x"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "editMonitor")!.args[0] as Record<string, any>;
+    expect(sent.kafkaProducerSaslOptions).toEqual({ mechanism: "None" });
+  });
+
   test("edit --set type=radius without the required fields exits 2", async () => {
     const r = await run(sb, ["monitors", "edit", "7", "--set", "type=radius"], creds(kuma.url));
     expect(r.code).toBe(2);

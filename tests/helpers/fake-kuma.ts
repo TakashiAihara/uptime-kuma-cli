@@ -1164,6 +1164,14 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
       if (before.snmpV3Username !== undefined) {
         row.snmpV3Username = before.snmpV3Username;
       }
+      // editMonitor JSON.stringify's the kafka columns unconditionally, so
+      // a payload key that is absent stores NULL — which toJSON's
+      // JSON.parse reports back as null, the shape a monitor that never
+      // carried the field emits (accepted_statuscodes is excluded: its
+      // `.every` guard fails the edit before the stringify).
+      for (const key of ["kafkaProducerBrokers", "kafkaProducerSaslOptions"]) {
+        if (row[key] === undefined) row[key] = null;
+      }
       state.monitors[i] = {
         ...row,
         active: before.active,
