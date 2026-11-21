@@ -3719,6 +3719,50 @@ describe("system-service monitors", () => {
     expect(k.calls).toHaveLength(0);
   });
 
+  // monitor.js reassigns the trimmed name in validate(), so the wire value
+  // is trimmed the same way — surrounding whitespace never reaches the row
+  test("add --system-service-name trims surrounding whitespace before storing", async () => {
+    const k = await useFake({ profile: "2.x", info: linuxHost });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "system-service",
+        "--name",
+        "svc1",
+        "--system-service-name",
+        "  nginx.service  ",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "svc1").system_service_name).toBe("nginx.service");
+  });
+
+  test("add --set system_service_name trims surrounding whitespace too", async () => {
+    const k = await useFake({ profile: "2.x", info: linuxHost });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "system-service",
+        "--name",
+        "svc1",
+        "--system-service-name",
+        "nginx.service",
+        "--set",
+        "system_service_name=  memcached  ",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "svc1").system_service_name).toBe("memcached");
+  });
+
   // a hatch key beats the flag in the merge, so the merged value is judged
   // again in validateFinalMonitor after connect
   test("add --set system_service_name overrides the flag and is pattern-checked", async () => {

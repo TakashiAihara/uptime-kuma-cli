@@ -945,15 +945,16 @@ const HATCH_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unknow
     if (typeof v !== "string" || v === "") fail(2, `${k} must be a non-empty string`);
     return v;
   },
-  // monitor.js trims before the empty check, so a whitespace-only name is
-  // refused here like the server would refuse it. The service-name pattern
-  // applies only to the system-service type, so it is checked on the merged
-  // monitor in validateFinalMonitor, not here.
+  // monitor.js trims before the empty check and stores the trimmed value,
+  // so a whitespace-only name is refused here like the server would refuse
+  // it and surrounding whitespace never reaches the wire. The service-name
+  // pattern applies only to the system-service type, so it is checked on
+  // the merged monitor in validateFinalMonitor, not here.
   system_service_name: (v, k) => {
     if (typeof v !== "string" || v.trim() === "") {
       fail(2, `${k} must be a non-empty string`);
     }
-    return v;
+    return v.trim();
   },
   // The picker's inputs are a text field and a checkbox; a non-string
   // subprotocol would die on `.replace` inside websocket-upgrade.js at
@@ -2068,7 +2069,9 @@ export function registerMonitors(program: Command): void {
         typed.docker_host = dockerHost;
       }
       if (type === "gamedig") typed.game = opts.game;
-      if (type === "system-service") typed.system_service_name = opts.systemServiceName;
+      if (type === "system-service") {
+        typed.system_service_name = opts.systemServiceName.trim();
+      }
       if (type === "push") typed.pushToken = pushToken;
       // The UI's submit() sends httpBodyEncoding null outside http, keyword
       // and json-query; the MONITOR_DEFAULTS "json" only reaches those types.
