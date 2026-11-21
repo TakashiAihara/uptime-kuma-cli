@@ -70,6 +70,7 @@ const MONITOR_2X_TYPES = [
   "sftp",
   "manual",
   "ntp",
+  "rabbitmq",
   "smtp",
   "snmp",
   "oracledb",
@@ -83,7 +84,8 @@ const MONITOR_2X_TYPES = [
 // the major gate alone would let an older 2.x store a row whose checks all
 // throw "Unknown Monitor Type" — the failure the type gate exists to
 // prevent. A type absent from the map shipped with 2.0.0 (manual in
-// beta.4, smtp in beta.3, snmp in beta.0) and needs only major 2.
+// beta.4, smtp in beta.3, snmp and rabbitmq in beta.0) and needs only
+// major 2.
 
 const KUMA2_0: MinVersion = [2, 0, 0];
 
@@ -318,6 +320,8 @@ const TYPE_FLAGS: { flag: string; opt: string; types: readonly string[] }[] = [
     opt: "kafkaProducerAllowAutoTopicCreation",
     types: ["kafka-producer"],
   },
+  { flag: "--rabbitmq-node", opt: "rabbitmqNode", types: ["rabbitmq"] },
+  { flag: "--rabbitmq-username", opt: "rabbitmqUsername", types: ["rabbitmq"] },
   { flag: "--radius-username", opt: "radiusUsername", types: ["radius"] },
   { flag: "--radius-called-station-id", opt: "radiusCalledStationId", types: ["radius"] },
   { flag: "--radius-calling-station-id", opt: "radiusCallingStationId", types: ["radius"] },
@@ -985,6 +989,13 @@ function parseMonitorInterval(value: string, flag: string): number {
   return n;
 }
 
+// A rabbitmqNodes entry is a node base URL; rabbitmq.js appends
+// "api/health/checks/alarms/" to it, and the picker's isInputValid accepts
+// only the http(s) prefix (EditMonitor.vue rabbitmqNodesInvalid).
+function isRabbitmqNode(value: unknown): value is string {
+  return typeof value === "string" && (value.startsWith("http://") || value.startsWith("https://"));
+}
+
 // A kafkaProducerBrokers entry is "host:port"; kafkajs splits the string on
 // ":" (connectionPoolBuilder), so a host containing ":" cannot work.
 function isKafkaBroker(value: unknown): value is string {
@@ -1063,6 +1074,11 @@ const HATCH_VALUE_CHECKS: Record<string, (value: unknown, key: string) => unknow
   },
   rabbitmqNodes: (v, k) => {
     if (!Array.isArray(v)) fail(2, `${k} must be an array`);
+    for (const node of v) {
+      if (!isRabbitmqNode(node)) {
+        fail(2, `${k} entries must be strings starting with http:// or https://`);
+      }
+    }
     return v;
   },
   jsonPathOperator: (v, k) => {
@@ -1577,6 +1593,27 @@ function validateFinalMonitor(
       monitor.kafkaProducerSaslOptions = MONITOR_DEFAULTS.kafkaProducerSaslOptions;
     }
   }
+  if (type === "rabbitmq") {
+    // The picker requires a non-empty node list whose every entry starts
+    // with http:// or https:// (isInputValid's rabbitmqNodes checks) and
+    // marks the username and its credential required; the server itself
+    // only checks rabbitmqNodes parses as JSON, so the CLI mirrors the
+    // picker. Each field is judged on the merged monitor in its own
+    // scope — an edit that does not touch the credentials keeps the
+    // stored ones.
+    if (inScope("rabbitmqNodes")) {
+      const nodes = monitor.rabbitmqNodes;
+      if (
+        !Array.isArray(nodes) ||
+        nodes.length === 0 ||
+        nodes.some((node) => !isRabbitmqNode(node))
+      ) {
+        fail(2, "rabbitmqNodes must be a non-empty array of http:// or https:// URLs");
+      }
+    }
+    needString("rabbitmqUsername");
+    needString("rabbitmqPassword");
+  }
   if (type === "radius") {
     needString("radiusUsername");
     needString("radiusPassword");
@@ -1970,6 +2007,13 @@ export function registerMonitors(program: Command): void {
       "--kafka-producer-allow-auto-topic-creation",
       "allow auto topic creation (kafka-producer type)",
     )
+    .option(
+      "--rabbitmq-node <url>",
+      "RabbitMQ node base URL (rabbitmq type, repeatable)",
+      collect,
+      [],
+    )
+    .option("--rabbitmq-username <username>", "RabbitMQ username (rabbitmq type)")
     .option("--radius-username <username>", "radius username (radius type)")
     .option("--radius-called-station-id <id>", "radius called station id (radius type)")
     .option("--radius-calling-station-id <id>", "radius calling station id (radius type)")
@@ -2075,6 +2119,22 @@ export function registerMonitors(program: Command): void {
         if (!opts.kafkaProducerMessage) {
           fail(2, "--type kafka-producer requires --kafka-producer-message");
         }
+      }
+      if (type === "rabbitmq") {
+        const nodes = (opts.rabbitmqNode as string[] | undefined) ?? [];
+        if (nodes.length === 0) {
+          fail(2, "--type rabbitmq requires --rabbitmq-node");
+        }
+        for (const node of nodes) {
+          if (!isRabbitmqNode(node)) {
+            fail(2, `--rabbitmq-node must start with http:// or https://, got "${node}"`);
+          }
+        }
+        if (!opts.rabbitmqUsername) {
+          fail(2, "--type rabbitmq requires --rabbitmq-username");
+        }
+        // rabbitmqPassword is a secret --config-file only carries; the
+        // merged monitor is judged after connect like every secret.
       }
       if (
         type === "ping" ||
@@ -2440,6 +2500,11 @@ export function registerMonitors(program: Command): void {
         if (opts.kafkaProducerAllowAutoTopicCreation) {
           typed.kafkaProducerAllowAutoTopicCreation = true;
         }
+      }
+      if (type === "rabbitmq") {
+        typed.rabbitmqNodes = opts.rabbitmqNode;
+        typed.rabbitmqUsername = opts.rabbitmqUsername;
+        // rabbitmqPassword only arrives through --config-file.
       }
       if (type === "radius") {
         typed.radiusUsername = opts.radiusUsername;

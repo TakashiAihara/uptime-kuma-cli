@@ -6009,6 +6009,338 @@ describe("globalping monitors", () => {
   });
 });
 
+describe("rabbitmq monitors", () => {
+  const rmqSeed = (id: number, name: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    name,
+    type: "rabbitmq",
+    active: true,
+    rabbitmqNodes: ["https://mq.example.com:15672"],
+    rabbitmqUsername: "monitor",
+    rabbitmqPassword: "stored-rabbitmq-secret",
+    interval: 60,
+    retryInterval: 60,
+    timeout: 48,
+    proxyId: null,
+    docker_host: null,
+    parent: null,
+    maxretries: 0,
+    notificationIDList: {},
+    accepted_statuscodes: ["200-299"],
+    ...extra,
+  });
+
+  // the picker's required set: a non-empty node list of http(s) URLs, a
+  // username and a credential — the credential only fits --config-file
+  test("add --type rabbitmq stores the node list, username and credential", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const f = join(sb.dir, "rmq.json");
+    writeFileSync(f, JSON.stringify({ rabbitmqPassword: "fixture-rabbitmq-secret" }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "rabbitmq",
+        "--name",
+        "rmq1",
+        "--rabbitmq-node",
+        "https://mq1.example.com:15672",
+        "--rabbitmq-node",
+        "http://mq2.example.com:15672",
+        "--rabbitmq-username",
+        "monitor",
+        "--config-file",
+        f,
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls(k)[0]!.args[0] as Record<string, unknown>;
+    expect(sent).toMatchObject({
+      type: "rabbitmq",
+      rabbitmqNodes: ["https://mq1.example.com:15672", "http://mq2.example.com:15672"],
+      rabbitmqUsername: "monitor",
+      rabbitmqPassword: "fixture-rabbitmq-secret",
+    });
+    expect(stored(k, "rmq1").rabbitmqNodes).toEqual([
+      "https://mq1.example.com:15672",
+      "http://mq2.example.com:15672",
+    ]);
+  });
+
+  test("add --type rabbitmq without --rabbitmq-node exits 2 before connecting", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "rabbitmq", "--name", "rmq1", "--rabbitmq-username", "monitor"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--type rabbitmq requires --rabbitmq-node");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --type rabbitmq without --rabbitmq-username exits 2 before connecting", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "rabbitmq",
+        "--name",
+        "rmq1",
+        "--rabbitmq-node",
+        "https://mq.example.com:15672",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--type rabbitmq requires --rabbitmq-username");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  // the picker's isInputValid accepts only the http(s) prefix on every
+  // node — a stored off-scheme URL would make every check throw
+  test("add --type rabbitmq with a non-http node exits 2 before connecting", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "rabbitmq",
+        "--name",
+        "rmq1",
+        "--rabbitmq-node",
+        "ftp://mq.example.com",
+        "--rabbitmq-username",
+        "monitor",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--rabbitmq-node must start with http:// or https://");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --set rabbitmqNodes with a bad entry exits 2 before connecting", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "rabbitmq",
+        "--name",
+        "rmq1",
+        "--rabbitmq-node",
+        "https://mq.example.com:15672",
+        "--rabbitmq-username",
+        "monitor",
+        "--set",
+        'rabbitmqNodes=["https://ok.example.com","amqp://bad.example.com"]',
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("rabbitmqNodes entries must be strings starting with");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  // the credential is a secret --config-file only carries, so its check
+  // can only run on the merged monitor after connect
+  test("add --type rabbitmq without the credential exits 2 after connect", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "rabbitmq",
+        "--name",
+        "rmq1",
+        "--rabbitmq-node",
+        "https://mq.example.com:15672",
+        "--rabbitmq-username",
+        "monitor",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("rabbitmqPassword must be a non-empty string");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --set rabbitmqPassword is refused like every secret field", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "rabbitmq",
+        "--name",
+        "rmq1",
+        "--rabbitmq-node",
+        "https://mq.example.com:15672",
+        "--rabbitmq-username",
+        "monitor",
+        "--set",
+        "rabbitmqPassword=hunter2",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("rabbitmqPassword");
+    expect(r.stderr).toContain("--config-file");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --type rabbitmq exits 2 on a 1.x server before add", async () => {
+    const k = await useFake();
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "rabbitmq",
+        "--name",
+        "rmq1",
+        "--rabbitmq-node",
+        "https://mq.example.com:15672",
+        "--rabbitmq-username",
+        "monitor",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('type "rabbitmq" needs Uptime Kuma 2.x');
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("--rabbitmq-node on another type exits 2 before connecting", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "h1",
+        "--url",
+        "https://h.example.com",
+        "--rabbitmq-node",
+        "https://mq.example.com:15672",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--rabbitmq-node only applies to --type");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  // an edit that touches only the node list keeps the stored credentials —
+  // the picker keeps them the same way
+  test("edit --set rabbitmqNodes keeps the stored username and credential", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [rmqSeed(7, "rmq")] });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "rmq", "--set", 'rabbitmqNodes=["https://new.example.com:15672"]'],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const m = stored(k, "rmq");
+    expect(m.rabbitmqNodes).toEqual(["https://new.example.com:15672"]);
+    expect(m.rabbitmqUsername).toBe("monitor");
+    expect(m.rabbitmqPassword).toBe("stored-rabbitmq-secret");
+  });
+
+  test("edit --set rabbitmqNodes=[] on a rabbitmq monitor exits 2", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [rmqSeed(7, "rmq")] });
+    const r = await run(sb, ["monitors", "edit", "rmq", "--set", "rabbitmqNodes=[]"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("rabbitmqNodes must be a non-empty array");
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  // a type change into rabbitmq re-judges every required field on the
+  // merged monitor — the stored row has none of them
+  test("edit --set type=rabbitmq supplies nodes, username and credential", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [http(7, "h")] });
+    const f = join(sb.dir, "rmq.json");
+    writeFileSync(f, JSON.stringify({ rabbitmqPassword: "fixture-rabbitmq-secret" }));
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "h",
+        "--set",
+        "type=rabbitmq",
+        "--set",
+        'rabbitmqNodes=["https://mq.example.com:15672"]',
+        "--set",
+        "rabbitmqUsername=monitor",
+        "--config-file",
+        f,
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const m = stored(k, "h");
+    expect(m.type).toBe("rabbitmq");
+    expect(m.rabbitmqNodes).toEqual(["https://mq.example.com:15672"]);
+    expect(m.rabbitmqUsername).toBe("monitor");
+    expect(m.rabbitmqPassword).toBe("fixture-rabbitmq-secret");
+  });
+
+  test("edit --set type=rabbitmq without the credential exits 2", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [http(7, "h")] });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "h",
+        "--set",
+        "type=rabbitmq",
+        "--set",
+        'rabbitmqNodes=["https://mq.example.com:15672"]',
+        "--set",
+        "rabbitmqUsername=monitor",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("rabbitmqPassword must be a non-empty string");
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set type=rabbitmq on a 1.x server exits 2 before editMonitor", async () => {
+    const k = await useFake();
+    await run(
+      sb,
+      ["monitors", "add", "--type", "http", "--name", "h1", "--url", "https://h.example.com"],
+      creds(k.url),
+    );
+    const r = await run(sb, ["monitors", "edit", "h1", "--set", "type=rabbitmq"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('type "rabbitmq" needs Uptime Kuma 2.x');
+    expect(editCalls(k)).toHaveLength(0);
+  });
+});
+
 describe("monitor timing on Kuma 2.x", () => {
   test("edit of a 2.x ping to a short interval keeps its timeout (no 80% cap)", async () => {
     const k = await useFake({
