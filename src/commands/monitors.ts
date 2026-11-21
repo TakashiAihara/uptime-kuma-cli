@@ -1175,6 +1175,22 @@ function validateFinalMonitor(
         fail(2, "kafkaProducerBrokers must be a non-empty array of host:port strings");
       }
     }
+    // add and editMonitor both JSON.stringify this column unconditionally,
+    // so a monitor that never carried SASL options must still send a
+    // value: absent or null, the column stores NULL/"null" and the
+    // check's JSON.parse(...).mechanism throws on every beat (toJSON
+    // emits null for the NULL column, which is how the null reaches the
+    // edit in the first place). add's MONITOR_DEFAULTS fills
+    // { mechanism: "None" } for the same reason; heal the merged value
+    // the same way. A stored object is the SASL config itself — a
+    // kafka -> other -> kafka round trip keeps it — and goes back
+    // unchanged.
+    if (
+      monitor.kafkaProducerSaslOptions === undefined ||
+      monitor.kafkaProducerSaslOptions === null
+    ) {
+      monitor.kafkaProducerSaslOptions = MONITOR_DEFAULTS.kafkaProducerSaslOptions;
+    }
   }
   if (type === "radius") {
     needString("radiusUsername");

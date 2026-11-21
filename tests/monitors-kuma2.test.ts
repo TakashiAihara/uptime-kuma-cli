@@ -423,6 +423,34 @@ describe("monitors edit on Kuma 2.x", () => {
     expect(r.stderr).toContain("jsonPathOperator must be one of");
     expect(k.calls).toHaveLength(0);
   });
+
+  test("edit --set type=kafka-producer fills absent SASL options like add does", async () => {
+    // a non-kafka monitor never carried SASL options; sent absent, the
+    // server's JSON.stringify writes NULL and the kafka check's
+    // JSON.parse(...).mechanism throws on every beat
+    const k = await useFake({ profile: "2.x", monitors: [http(7, "h")] });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "type=kafka-producer",
+        "--set",
+        "kafkaProducerTopic=t",
+        "--set",
+        "kafkaProducerMessage=m",
+        "--set",
+        'kafkaProducerBrokers=["h:1"]',
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = editCalls(k)[0]!.args[0] as Record<string, unknown>;
+    expect(sent.kafkaProducerSaslOptions).toEqual({ mechanism: "None" });
+    expect(stored(k, "h").kafkaProducerSaslOptions).toEqual({ mechanism: "None" });
+  });
 });
 
 describe("2.x-only fields", () => {

@@ -1129,4 +1129,50 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
     const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
     expect(del.code).toBe(0);
   }, 300_000);
+
+  // add and editMonitor both JSON.stringify kafkaProducerSaslOptions
+  // unconditionally; a non-kafka monitor has no value for it, so a type
+  // change must send the same { mechanism: "None" } add defaults to —
+  // absent, the column stores "null" and every kafka check throws on
+  // JSON.parse(...).mechanism. The monitor stays paused, so no broker
+  // ever has to answer.
+  test("edit --set type=kafka-producer stores the SASL options default", async () => {
+    const a = await cliRun(sb, [
+      "monitors",
+      "add",
+      "--type",
+      "http",
+      "--name",
+      "it-kafka-sw",
+      "--url",
+      "http://localhost:3001",
+      "--paused",
+    ]);
+    expect(a.code).toBe(0);
+    const id = a.json().id;
+
+    const e = await cliRun(sb, [
+      "monitors",
+      "edit",
+      String(id),
+      "--set",
+      "type=kafka-producer",
+      "--set",
+      "kafkaProducerTopic=t",
+      "--set",
+      "kafkaProducerMessage=m",
+      "--set",
+      'kafkaProducerBrokers=["127.0.0.1:9092"]',
+    ]);
+    expect(e.code).toBe(0);
+
+    const g = await cliRun(sb, ["monitors", "get", String(id)]);
+    expect(g.json()).toMatchObject({
+      type: "kafka-producer",
+      kafkaProducerSaslOptions: { mechanism: "None" },
+    });
+
+    const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
+    expect(del.code).toBe(0);
+  }, 120_000);
 });
