@@ -288,4 +288,10 @@
 - Surviving mutants (`Uncaught`) are upserted as a PR comment marked `<!-- mutation-testing -->`; the job is `continue-on-error` and never blocks merge — surviving mutants are a report, not a gate. A run that fails before producing a report still upserts a comment saying so (with the run URL), so a stale result never passes for the latest one
 - Locally: `mise use -g github:trailofbits/mewt@4.0.0` once (needs linux-x64 or macOS-arm64), then `mise exec -- mewt print mutants --target src/commands/tags.ts` to inspect mutants, or `bun scripts/mutation-report.ts --base origin/main` for the same report CI posts; the script prints the full survivor list to stdout because the PR comment caps its list at GitHub's comment size limit
 
+## Operational notes
+
+- `bun scripts/coverage.ts diff --base <ref>` measures committed changes only — it diffs `<base>...HEAD`, so uncommitted work is invisible and lines that drifted since the base count as added even when their code did not change. Commit first, then measure.
+- Two `bun run test:integration` runs on the same port collide twice: on the port bind (`127.0.0.1:3901` by default) and on the compose project name, which `scripts/integration.ts` derives from the port as `uptime-kuma-cli-it-<port>` — a second run on the default port would `down -v` the first run's Kuma before starting its own. A parallel run on the same checkout only needs `UPTIME_KUMA_IT_PORT` set to a free port: the project name follows it, and the binary already builds in a per-run scratch dir instead of `dist/`. Budget for a leg taking on the order of ten-plus minutes (the 2.x leg alone runs about 15 minutes in CI).
+- CodeQL findings can be checked without SARIF or Security-tab access: `gh api repos/TakashiAihara/uptime-kuma-cli/code-scanning/analyses?ref=<ref>` lists analyses newest-first and `results_count` is each one's finding count. PR heads work too (`ref=refs/pull/<N>/head`).
+
 
