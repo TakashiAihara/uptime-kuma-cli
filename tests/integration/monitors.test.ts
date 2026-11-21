@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { sandbox, type Sandbox } from "../helpers/run";
-import { cliRun, on2x, on21, onNtp, onOracleDb, onSnmpV3, onWsUpgrade } from "./helpers";
+import { cliRun, on2x, on21, onNtp, onOracleDb, onSnmpV3, onWsUpgrade, withKuma } from "./helpers";
 
 // Runs only when scripts/integration.ts provides UPTIME_KUMA_IT_*; a plain
 // `bun test` skips the whole file.
@@ -1131,12 +1131,15 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
   }, 300_000);
 
   // add and editMonitor both JSON.stringify kafkaProducerSaslOptions
-  // unconditionally; a non-kafka monitor has no value for it, so a type
-  // change must send the same { mechanism: "None" } add defaults to —
-  // absent, the column stores "null" and every kafka check throws on
-  // JSON.parse(...).mechanism. The monitor stays paused, so no broker
-  // ever has to answer.
-  test("edit --set type=kafka-producer stores the SASL options default", async () => {
+  // unconditionally; a monitor whose column never got a value (a row from
+  // before the field existed, or a write that stored "null") reports null
+  // through getMonitor, and an edit that turns it into kafka-producer must
+  // send the same { mechanism: "None" } add defaults to — left null, the
+  // kafka check's JSON.parse(...).mechanism throws on every beat. The CLI's
+  // own add always sends the default, so the corrupted column is written
+  // through a raw editMonitor the way the bug itself leaves it. The monitor
+  // stays paused, so no broker ever has to answer.
+  test("edit --set type=kafka-producer heals a stored null kafkaProducerSaslOptions", async () => {
     const a = await cliRun(sb, [
       "monitors",
       "add",
@@ -1150,6 +1153,20 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
     ]);
     expect(a.code).toBe(0);
     const id = a.json().id;
+
+    await withKuma(async (call) => {
+      const got = await call<{ ok?: boolean; monitor?: Record<string, unknown> }>("getMonitor", [
+        id,
+      ]);
+      expect(got.ok).toBe(true);
+      const m = got.monitor!;
+      m.kafkaProducerSaslOptions = null;
+      const res = await call<{ ok?: boolean; msg?: string }>("editMonitor", [m]);
+      expect(res.ok).toBe(true);
+    });
+
+    const before = await cliRun(sb, ["monitors", "get", String(id)]);
+    expect(before.json().kafkaProducerSaslOptions).toBeNull();
 
     const e = await cliRun(sb, [
       "monitors",
