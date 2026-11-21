@@ -1338,4 +1338,44 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
     const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
     expect(del.code).toBe(0);
   }, 120_000);
+
+  // rabbitmq.js ships with 2.0.0, so only the 1.x leg takes the type gate;
+  // add only stores the row, so a paused monitor needs no reachable broker —
+  // the credential goes through --config-file like every other secret field
+  test("rabbitmq stores the node list with the credential redacted on get", async () => {
+    const f = join(sb.dir, "rabbitmq-it.json");
+    writeFileSync(f, JSON.stringify({ rabbitmqPassword: "it-rabbitmq-secret" }));
+    const r = await cliRun(sb, [
+      "monitors",
+      "add",
+      "--type",
+      "rabbitmq",
+      "--name",
+      "it-rabbitmq",
+      "--rabbitmq-node",
+      "http://127.0.0.1:15672",
+      "--rabbitmq-username",
+      "it-rabbitmq-user",
+      "--config-file",
+      f,
+      "--paused",
+    ]);
+    if (!on2x) {
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain('type "rabbitmq" needs Uptime Kuma 2.x');
+      return;
+    }
+    expect(r.code).toBe(0);
+    const id = r.json().id;
+    const g = await cliRun(sb, ["monitors", "get", String(id)]);
+    expect(g.code).toBe(0);
+    expect(g.json()).toMatchObject({
+      type: "rabbitmq",
+      rabbitmqNodes: ["http://127.0.0.1:15672"],
+      rabbitmqUsername: "it-rabbitmq-user",
+      rabbitmqPassword: "***",
+    });
+    const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
+    expect(del.code).toBe(0);
+  }, 120_000);
 });
