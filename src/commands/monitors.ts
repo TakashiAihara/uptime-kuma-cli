@@ -1487,14 +1487,19 @@ function validateFinalMonitor(
       // jsonPath — the picker shows the fields together, so a value
       // without a path can only fail every beat. Either side of the pair
       // being edited re-judges the merged combination; clearing both
-      // lifts the check like the picker's empty fields.
-      if (
-        (needMerged("expectedValue") || needMerged("jsonPath")) &&
-        typeof monitor.expectedValue === "string" &&
-        monitor.expectedValue !== "" &&
-        (typeof monitor.jsonPath !== "string" || monitor.jsonPath === "")
-      ) {
-        fail(2, "jsonPath must be a non-empty string when expectedValue is set");
+      // lifts the check like the picker's empty fields. A set value must
+      // be a string like json-query's needString — a numeric one would
+      // still be truthy to globalping.js and fail every beat.
+      if (needMerged("expectedValue") || needMerged("jsonPath")) {
+        const expected = monitor.expectedValue;
+        if (expected !== undefined && expected !== null && expected !== "") {
+          if (typeof expected !== "string") {
+            fail(2, "expectedValue must be a non-empty string");
+          }
+          if (typeof monitor.jsonPath !== "string" || monitor.jsonPath === "") {
+            fail(2, "jsonPath must be a non-empty string when expectedValue is set");
+          }
+        }
       }
     }
     if (validSubtype === "dns" && needMerged("dns_resolve_type")) {
@@ -2885,10 +2890,11 @@ export function registerMonitors(program: Command): void {
           }
           if (!touched.has("port")) {
             const storedPort = monitor.port;
+            // !storedPort covers the unset shapes including a stored 0,
+            // which the UI can legitimately write and the generic
+            // type-change branch treats as empty the same way
             const portKnown =
-              storedPort === undefined ||
-              storedPort === null ||
-              storedPort === "" ||
+              !storedPort ||
               (typeof storedPort === "number" && TYPE_CHANGE_KNOWN_PORTS.has(storedPort));
             if (portKnown) {
               // the port branch only knows the transient "ping" pick
