@@ -1,6 +1,7 @@
 import type { Command } from "commander";
-import { fail, parseId, printJson } from "../lib.ts";
+
 import { connect } from "../kuma.ts";
+import { fail, parseId, printJson } from "../lib.ts";
 
 // The color is stored and rendered verbatim; the UI's custom color is a free
 // hex input that accepts #rgb and #rrggbb.

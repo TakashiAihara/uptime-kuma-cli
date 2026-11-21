@@ -1,4 +1,16 @@
-import { Option, type Command } from "commander";
+import { type Command, Option } from "commander";
+
+import {
+  connect,
+  type KumaSession,
+  meetsMinVersion,
+  type MinVersion,
+  type Monitor,
+  MONITOR_2X_FIELDS,
+  MONITOR_ADD_FIELDS,
+  type MonitorStats,
+  refuseKumaVersion,
+} from "../kuma.ts";
 import {
   CliError,
   decimalNumber,
@@ -17,17 +29,6 @@ import {
   readTextFile,
   redactUrl,
 } from "../lib.ts";
-import {
-  connect,
-  meetsMinVersion,
-  MONITOR_ADD_FIELDS,
-  MONITOR_2X_FIELDS,
-  refuseKumaVersion,
-  type KumaSession,
-  type MinVersion,
-  type Monitor,
-  type MonitorStats,
-} from "../kuma.ts";
 
 // Order follows the type picker of EditMonitor.vue in Kuma 1.23.17. The picker
 // hides tailscale-ping when info.isContainer reports the server runs in its

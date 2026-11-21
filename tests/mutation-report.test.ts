@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { readdirSync } from "node:fs";
 import { join, relative } from "node:path";
+
 import {
-  MUTATION_TESTS,
   buildReport,
+  MUTATION_TESTS,
   parseMutantTable,
   selectMutants,
 } from "../scripts/mutation-report.ts";

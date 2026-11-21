@@ -1,7 +1,8 @@
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { type FakeKuma, type StatusPageRow, startFakeKuma } from "./helpers/fake-kuma";
+
+import { type FakeKuma, startFakeKuma, type StatusPageRow } from "./helpers/fake-kuma";
 import { creds, run, type Sandbox, sandbox } from "./helpers/run";
 
 let kuma: FakeKuma;

@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import pkg from "../package.json" with { type: "json" };
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+
+import pkg from "../package.json" with { type: "json" };
 import { nextTag, TAG_SHAPE } from "../scripts/next-tag.ts";
 
 /**

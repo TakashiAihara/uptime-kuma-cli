@@ -1,6 +1,7 @@
 import type { Command } from "commander";
+
+import { type ApiKeyRow, connect, type KumaSession } from "../kuma.ts";
 import { fail, hasOffsetDesignator, localDateTimeFields, parseId, printJson } from "../lib.ts";
-import { connect, type ApiKeyRow, type KumaSession } from "../kuma.ts";
 
 // The CLI host's local date as "YYYY-MM-DD", zero-padded like the flag input.
 function localToday(): string {

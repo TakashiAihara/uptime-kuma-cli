@@ -1,6 +1,7 @@
-import { Option, type Command } from "commander";
-import { CliError, fail, parseId, printJson, redactUrl } from "../lib.ts";
+import { type Command, Option } from "commander";
+
 import { connect, type KumaSession } from "../kuma.ts";
+import { CliError, fail, parseId, printJson, redactUrl } from "../lib.ts";
 
 const TYPES = ["socket", "tcp"] as const;
 

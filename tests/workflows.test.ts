@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+
 import pkg from "../package.json" with { type: "json" };
 import { CODERABBIT_CONTEXT } from "../scripts/coderabbit-gate.ts";
 import { TEST_LIMIT_MS } from "../scripts/integration-limit.ts";

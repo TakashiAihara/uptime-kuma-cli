@@ -1,6 +1,7 @@
 import { io, type Socket } from "socket.io-client";
+
 import { parseMajorVersion, parseMinorVersion } from "../../src/kuma";
-import { run, type Result, type Sandbox } from "../helpers/run";
+import { type Result, run, type Sandbox } from "../helpers/run";
 
 // Tests that 2.x breaks until the named issue lands are skipped with
 // skipIf(on2x); the fix removes the skip.

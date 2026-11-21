@@ -1,8 +1,9 @@
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+
 import { sandbox, type Sandbox } from "../helpers/run";
-import { cliRun, on2x, on21, withKuma } from "./helpers";
+import { cliRun, on21, on2x, withKuma } from "./helpers";
 
 // Runs only when scripts/integration.ts provides UPTIME_KUMA_IT_*; a plain
 // `bun test` skips the whole file.

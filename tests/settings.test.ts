@@ -1,10 +1,12 @@
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+
 import { io as ioc } from "socket.io-client";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { type FakeKuma, type StatusPageRow, startFakeKuma } from "./helpers/fake-kuma";
-import { creds, run, type Sandbox, sandbox } from "./helpers/run";
+
 import { KUMA_2X_TIMEZONES, KUMA_TIMEZONES } from "../src/timezones";
+import { type FakeKuma, startFakeKuma, type StatusPageRow } from "./helpers/fake-kuma";
+import { creds, run, type Sandbox, sandbox } from "./helpers/run";
 
 // the list scripts/kuma-timezones.js measured: UTC + 423 UI names, no repeats
 test("the Kuma timezone list keeps its measured 424 unique names", () => {

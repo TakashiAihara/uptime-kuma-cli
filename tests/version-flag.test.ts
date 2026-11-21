@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { join, resolve } from "node:path";
+
 import pkg from "../package.json" with { type: "json" };
 import { run, type Sandbox, sandbox } from "./helpers/run";
 

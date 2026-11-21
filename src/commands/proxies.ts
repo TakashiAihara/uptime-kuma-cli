@@ -1,4 +1,6 @@
-import { Option, type Command } from "commander";
+import { type Command, Option } from "commander";
+
+import { connect } from "../kuma.ts";
 import {
   fail,
   firstSecretLine,
@@ -8,7 +10,6 @@ import {
   printJson,
   readTextFile,
 } from "../lib.ts";
-import { connect } from "../kuma.ts";
 
 const PROTOCOLS = ["http", "https", "socks", "socks5", "socks5h", "socks4"] as const;
 
