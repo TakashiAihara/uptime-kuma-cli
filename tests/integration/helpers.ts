@@ -1,6 +1,6 @@
 import { io, type Socket } from "socket.io-client";
 
-import { parseMajorVersion, parseMinorVersion } from "../../src/kuma";
+import { parseMajorVersion, parseMinorVersion, parsePatchVersion } from "../../src/kuma";
 import { type Result, run, type Sandbox } from "../helpers/run";
 
 // Tests that 2.x breaks until the named issue lands are skipped with
@@ -38,6 +38,15 @@ export const onPm2 =
 export const onOracleDb =
   parseMajorVersion(itVersion) > 2 ||
   (parseMajorVersion(itVersion) === 2 && parseMinorVersion(itVersion) >= 3);
+
+// sftp.js first ships in 2.5.4 (upstream #7034) — 1.x and 2.0-2.5.3 legs take
+// the type-gate refusal. The first gate that reads the patch: minor alone
+// cannot tell 2.5.3 from 2.5.4.
+export const onSftp =
+  parseMajorVersion(itVersion) > 2 ||
+  (parseMajorVersion(itVersion) === 2 &&
+    (parseMinorVersion(itVersion) > 5 ||
+      (parseMinorVersion(itVersion) === 5 && parsePatchVersion(itVersion) >= 4)));
 
 // deleteChildren and the incident events (getIncidentHistory / editIncident /
 // resolveIncident / deleteIncident) first ship in 2.1.0 — 1.x and 2.0.x legs
