@@ -537,6 +537,11 @@ const HATCH_SECRET_KEYS = new Set([...SECRET_KEYS, "kafkaProducerSaslOptions"]);
 
 function redactSecrets(monitor: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = { ...monitor, url: redactUrl(monitor.url) };
+  // a node URL may carry userinfo like a monitor url does — the flag and
+  // --set refuse it, --config-file accepts it, and the printout hides it
+  if (Array.isArray(out.rabbitmqNodes)) {
+    out.rabbitmqNodes = out.rabbitmqNodes.map((node) => redactUrl(node));
+  }
   for (const key of SECRET_KEYS) {
     const value = out[key];
     // a --config-file value may be any JSON type, so redact by presence, not type
@@ -743,6 +748,16 @@ function refuseSecretSets(sets: Record<string, unknown>): void {
     }
     if (key === "url" && typeof sets[key] === "string" && urlCarriesCredentials(sets[key])) {
       fail(2, `--set url=... would put credentials in the command line; use --config-file instead`);
+    }
+    if (
+      key === "rabbitmqNodes" &&
+      Array.isArray(sets[key]) &&
+      sets[key].some((node) => typeof node === "string" && urlCarriesCredentials(node))
+    ) {
+      fail(
+        2,
+        `--set rabbitmqNodes=... would put credentials in the command line; use --config-file instead`,
+      );
     }
   }
 }
@@ -2126,6 +2141,14 @@ export function registerMonitors(program: Command): void {
           fail(2, "--type rabbitmq requires --rabbitmq-node");
         }
         for (const node of nodes) {
+          // credentials first: the scheme failure echoes the node, and a
+          // credentialed one must not reach stderr
+          if (urlCarriesCredentials(node)) {
+            fail(
+              2,
+              "--rabbitmq-node ... would put credentials in the command line; pass rabbitmqNodes through --config-file instead",
+            );
+          }
           if (!isRabbitmqNode(node)) {
             fail(2, `--rabbitmq-node must start with http:// or https://, got "${node}"`);
           }

@@ -6339,6 +6339,100 @@ describe("rabbitmq monitors", () => {
     expect(r.stderr).toContain('type "rabbitmq" needs Uptime Kuma 2.x');
     expect(editCalls(k)).toHaveLength(0);
   });
+
+  // a node URL's userinfo is a credential like a monitor url's — argv
+  // sources refuse it and the refusal must not echo the value
+  test("--rabbitmq-node with credentials exits 2 without echoing them", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "rabbitmq",
+        "--name",
+        "rmq1",
+        "--rabbitmq-node",
+        "https://user:s3cret@mq.example.com:15672",
+        "--rabbitmq-username",
+        "monitor",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--config-file");
+    expect(r.stderr).not.toContain("s3cret");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("--set rabbitmqNodes with a credentialed entry exits 2", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "rabbitmq",
+        "--name",
+        "rmq1",
+        "--rabbitmq-node",
+        "https://mq.example.com:15672",
+        "--rabbitmq-username",
+        "monitor",
+        "--set",
+        'rabbitmqNodes=["https://user:s3cret@mq.example.com:15672"]',
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("rabbitmqNodes");
+    expect(r.stderr).toContain("--config-file");
+    expect(r.stderr).not.toContain("s3cret");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  // --config-file is the sanctioned channel: the node stores as given and
+  // get prints the userinfo redacted like a monitor url's
+  test("a credentialed node through --config-file stores and prints redacted", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const f = join(sb.dir, "rmq-nodes.json");
+    writeFileSync(
+      f,
+      JSON.stringify({
+        rabbitmqNodes: ["https://user:s3cret@mq.example.com:15672"],
+        rabbitmqPassword: "fixture-rabbitmq-secret",
+      }),
+    );
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "rabbitmq",
+        "--name",
+        "rmq1",
+        "--rabbitmq-node",
+        "https://plain.example.com:15672",
+        "--rabbitmq-username",
+        "monitor",
+        "--config-file",
+        f,
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const g = await run(sb, ["monitors", "get", "rmq1"], creds(k.url));
+    expect(g.code).toBe(0);
+    const nodes = g.json().rabbitmqNodes as string[];
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0]).toContain("***");
+    expect(nodes[0]).not.toContain("s3cret");
+    expect(nodes[0]).toContain("mq.example.com");
+    expect(stored(k, "rmq1").rabbitmqNodes).toEqual(["https://user:s3cret@mq.example.com:15672"]);
+  });
 });
 
 describe("monitor timing on Kuma 2.x", () => {
