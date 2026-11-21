@@ -5699,6 +5699,94 @@ describe("globalping monitors", () => {
     expect(m.jsonPath).toBe("");
   });
 
+  // subtype persists through editMonitor on any type, so a dns monitor
+  // that leaves globalping and comes back finds its stored "dns" — the
+  // port branch must land on the subtype's own pick, not an empty port
+  test("edit round-trip globalping dns to http and back keeps the dns picks", async () => {
+    const k = await useFake({ profile: "2.x" });
+    await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "globalping",
+        "--name",
+        "gp1",
+        "--subtype",
+        "dns",
+        "--hostname",
+        "example.com",
+      ],
+      creds(k.url),
+    );
+    const away = await run(
+      sb,
+      ["monitors", "edit", "gp1", "--set", "type=http", "--set", "url=https://example.com"],
+      creds(k.url),
+    );
+    expect(away.code).toBe(0);
+    const r = await run(sb, ["monitors", "edit", "gp1", "--set", "type=globalping"], creds(k.url));
+    expect(r.code).toBe(0);
+    const m = stored(k, "gp1");
+    expect(m).toMatchObject({
+      type: "globalping",
+      subtype: "dns",
+      protocol: "UDP",
+      port: 53,
+      hostname: "example.com",
+    });
+  });
+
+  // an explicit --set subtype plays the user's pick on a type change like
+  // on add — a null is refused by the merged check, not rewritten to ping
+  test("edit --set type=globalping --set subtype=null exits 2", async () => {
+    const k = await useFake({ profile: "2.x" });
+    await run(
+      sb,
+      ["monitors", "add", "--type", "http", "--name", "h1", "--url", "https://h.example.com"],
+      creds(k.url),
+    );
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "h1",
+        "--set",
+        "type=globalping",
+        "--set",
+        "subtype=null",
+        "--set",
+        "location=world",
+        "--set",
+        "hostname=example.com",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("subtype must be one of");
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  // globalping's pick stores port 80, which reads as another type's
+  // default to the type-change watcher like the CLI's other stored picks
+  test("edit --set type=ntp on a globalping monitor replaces the picked port 80", async () => {
+    const k = await useFake({ profile: "2.x" });
+    await run(
+      sb,
+      ["monitors", "add", "--type", "globalping", "--name", "gp1", "--hostname", "example.com"],
+      creds(k.url),
+    );
+    const r = await run(
+      sb,
+      ["monitors", "edit", "gp1", "--set", "type=ntp", "--set", "hostname=ntp.example.com"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "gp1")).toMatchObject({ type: "ntp", port: 123, interval: 300 });
+  });
+
   test("edit --set type=globalping exits 2 on a 1.x server before editMonitor", async () => {
     const k = await useFake();
     await run(

@@ -412,16 +412,18 @@ const TYPE_CHANGE_PORT_DEFAULTS: Record<string, number> = {
 
 // The ports that read as "another type's default" to the watcher:
 // 22 / 53 / 123 / 1812 are its own list (sftp / dns / ntp / radius), and
-// the map's values join them — the CLI stores those defaults where the
-// picker leaves the field blank. The stored port alone cannot tell a
-// type's own default from a user's pick, so a 25 kept on a type other
-// than smtp is replaced the same way — the watcher's trade-off, taken
-// one value further for the port only the CLI writes.
+// the map's values plus globalping's 80 join them — the CLI stores those
+// defaults where the picker leaves the field blank. The stored port
+// alone cannot tell a type's own default from a user's pick, so a 25
+// kept on a type other than smtp is replaced the same way — the
+// watcher's trade-off, taken one value further for the ports only the
+// CLI writes.
 const TYPE_CHANGE_KNOWN_PORTS = new Set([
   22,
   53,
   123,
   1812,
+  80,
   ...Object.values(TYPE_CHANGE_PORT_DEFAULTS),
 ]);
 
@@ -2868,7 +2870,9 @@ export function registerMonitors(program: Command): void {
           const storedFalsy =
             fetched.subtype === undefined || fetched.subtype === null || fetched.subtype === "";
           const branchSubtype = storedFalsy ? "ping" : fetched.subtype;
-          if (!monitor.subtype) {
+          // an explicit --set subtype plays the user's pick like on add —
+          // a null stays null so the merged check refuses it
+          if (!touched.has("subtype") && !monitor.subtype) {
             monitor.subtype = "ping";
           }
           if (
@@ -2887,7 +2891,14 @@ export function registerMonitors(program: Command): void {
               storedPort === "" ||
               (typeof storedPort === "number" && TYPE_CHANGE_KNOWN_PORTS.has(storedPort));
             if (portKnown) {
-              monitor.port = branchSubtype === "ping" ? 80 : undefined;
+              // the port branch only knows the transient "ping" pick
+              // upstream; dns's own pick is 53 — the subtype watcher's
+              // change branch and the API's dns default agree — so a
+              // stored dns subtype round-tripping through another type
+              // lands on it instead of an empty required port. http
+              // reads the url's port, so the picker's else unsets.
+              monitor.port =
+                branchSubtype === "ping" ? 80 : branchSubtype === "dns" ? 53 : undefined;
             }
           }
           const newSubtype = monitor.subtype;
