@@ -4083,6 +4083,280 @@ describe("system-service monitors", () => {
   });
 });
 
+describe("pm2 monitors", () => {
+  // the picker's select is fed by getPM2ProcessList; the fake's default
+  // answer lists an online "api" and a stopped "worker"
+  test("add --type pm2 stores a process name from the server's list", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "pm2", "--name", "pm1", "--system-service-name", "api"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const m = stored(k, "pm1");
+    expect(m.type).toBe("pm2");
+    expect(m.system_service_name).toBe("api");
+    expect(m.conditions).toEqual([]);
+  });
+
+  // the select only offers listed names, so a typo would store a monitor
+  // that goes down at its first check
+  test("add --type pm2 with a name outside the list exits 1", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "pm2", "--name", "pm1", "--system-service-name", "typo"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain('PM2 process "typo" is not in the server\'s PM2 process list');
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  // check() matches name or id, and the picker's load rewrites a saved id
+  // to the stable name — the CLI does the same before storing
+  test("add --type pm2 with a process id stores the process name", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "pm2", "--name", "pm1", "--system-service-name", "1"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "pm1").system_service_name).toBe("worker");
+  });
+
+  // ok:false is the picker's free-text path (no pm2 on the server), not a
+  // refusal — the name is stored unverified with a warning
+  test("add --type pm2 stores unverified when the server cannot list processes", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      getPM2ProcessListResult: { ok: false, msg: "Unable to query PM2 process list." },
+    });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "pm2", "--name", "pm1", "--system-service-name", "anything"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "pm1").system_service_name).toBe("anything");
+    expect(r.stderr).toContain("could not list PM2 processes");
+  });
+
+  test("add --type pm2 stores unverified when the process list is empty", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      getPM2ProcessListResult: { ok: true, processList: [] },
+    });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "pm2",
+        "--name",
+        "pm1",
+        "--system-service-name",
+        "later-process",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "pm1").system_service_name).toBe("later-process");
+  });
+
+  test("add --type pm2 without --system-service-name exits 2 before connecting", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(sb, ["monitors", "add", "--type", "pm2", "--name", "pm1"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--type pm2 requires --system-service-name");
+    expect(k.calls).toHaveLength(0);
+  });
+
+  // unlike system-service, pm2's validate() only refuses control
+  // characters — a spaced process name is legal
+  test("add --type pm2 accepts a name with spaces", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      getPM2ProcessListResult: { ok: false, msg: "no pm2" },
+    });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "pm2", "--name", "pm1", "--system-service-name", "my api"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "pm1").system_service_name).toBe("my api");
+  });
+
+  test("add --system-service-name with a control character exits 2 before connecting", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "pm2", "--name", "pm1", "--system-service-name", "api\u0001"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("must not contain control characters");
+    expect(k.calls).toHaveLength(0);
+  });
+
+  test("add --set system_service_name with a control character exits 2 after connect", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      getPM2ProcessListResult: { ok: false, msg: "no pm2" },
+    });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "pm2",
+        "--name",
+        "pm1",
+        "--system-service-name",
+        "api",
+        "--set",
+        "system_service_name=bad\u0001name",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("system_service_name must not contain control characters");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --type pm2 exits 2 on a 1.x server after connect", async () => {
+    const k = await useFake();
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "pm2", "--name", "pm1", "--system-service-name", "api"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('type "pm2" needs Uptime Kuma >= 2.5.0; the server reports 1.23.17');
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  // pm2.js first ships in 2.5.0 (upstream #7114): on 2.4.x the row would
+  // store fine but every check would throw "Unknown Monitor Type"
+  test("add --type pm2 exits 2 on a 2.4 server naming 2.5.0", async () => {
+    const k = await useFake({ profile: "2.x", info: { version: "2.4.9" } });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "pm2", "--name", "pm1", "--system-service-name", "api"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('type "pm2" needs Uptime Kuma >= 2.5.0; the server reports 2.4.9');
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --type pm2 runs on 2.5.0, the first release with the type", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      info: { version: "2.5.0" },
+      getPM2ProcessListResult: { ok: false, msg: "no pm2" },
+    });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "pm2", "--name", "pm1", "--system-service-name", "api"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "pm1").system_service_name).toBe("api");
+  });
+
+  test("add --type pm2 with a malformed processList exits 70", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      getPM2ProcessListResult: { ok: true, processList: "nope" },
+    });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "pm2", "--name", "pm1", "--system-service-name", "api"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(70);
+    expect(r.stderr).toContain("unexpected getPM2ProcessList response");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set type=pm2 stores it with a listed process name", async () => {
+    const k = await useFake({ profile: "2.x" });
+    await run(
+      sb,
+      ["monitors", "add", "--type", "http", "--name", "h1", "--url", "https://h.example.com"],
+      creds(k.url),
+    );
+    const r = await run(
+      sb,
+      ["monitors", "edit", "h1", "--set", "type=pm2", "--set", "system_service_name=worker"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const m = stored(k, "h1");
+    expect(m.type).toBe("pm2");
+    expect(m.system_service_name).toBe("worker");
+  });
+
+  test("edit --set type=pm2 exits 2 on a 1.x server before editMonitor", async () => {
+    const k = await useFake();
+    await run(
+      sb,
+      ["monitors", "add", "--type", "http", "--name", "h1", "--url", "https://h.example.com"],
+      creds(k.url),
+    );
+    const r = await run(sb, ["monitors", "edit", "h1", "--set", "type=pm2"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('type "pm2" needs Uptime Kuma >= 2.5.0; the server reports 1.23.17');
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  // the name check runs when the type changes to pm2 or the name itself is
+  // touched — an unrelated edit never asks for the process list
+  test("edit on a pm2 monitor checks membership only when the name is touched", async () => {
+    const k = await useFake({ profile: "2.x" });
+    await run(
+      sb,
+      ["monitors", "add", "--type", "pm2", "--name", "pm1", "--system-service-name", "api"],
+      creds(k.url),
+    );
+    k.calls.length = 0;
+    const r = await run(sb, ["monitors", "edit", "pm1", "--set", "interval=60"], creds(k.url));
+    expect(r.code).toBe(0);
+    expect(k.calls.filter((c) => c.event === "getPM2ProcessList")).toHaveLength(0);
+
+    const bad = await run(
+      sb,
+      ["monitors", "edit", "pm1", "--set", "system_service_name=typo"],
+      creds(k.url),
+    );
+    expect(bad.code).toBe(1);
+    expect(bad.stderr).toContain('PM2 process "typo" is not in the server\'s PM2 process list');
+    expect(editCalls(k)).toHaveLength(1);
+  });
+
+  test("edit --set system_service_name on a pm2 monitor stores a listed name", async () => {
+    const k = await useFake({ profile: "2.x" });
+    await run(
+      sb,
+      ["monitors", "add", "--type", "pm2", "--name", "pm1", "--system-service-name", "api"],
+      creds(k.url),
+    );
+    const r = await run(
+      sb,
+      ["monitors", "edit", "pm1", "--set", 'system_service_name="1"'],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "pm1").system_service_name).toBe("worker");
+  });
+});
+
 describe("monitor timing on Kuma 2.x", () => {
   test("edit of a 2.x ping to a short interval keeps its timeout (no 80% cap)", async () => {
     const k = await useFake({

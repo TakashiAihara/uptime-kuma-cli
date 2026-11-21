@@ -65,6 +65,7 @@ const MONITOR_TYPES = [
 // "Unknown Monitor Type" — so the pre-connect choices list takes the union.
 const MONITOR_2X_TYPES = [
   "system-service",
+  "pm2",
   "websocket-upgrade",
   "manual",
   "ntp",
@@ -73,19 +74,20 @@ const MONITOR_2X_TYPES = [
   "oracledb",
 ] as const;
 
-// server/monitor-types/websocket-upgrade.js, system-service.js, oracledb.js
-// and ntp.js first ship in 2.1.0, 2.1.0, 2.3.0 and 2.5.0 (upstream #5613,
-// #6488, #7156 and #7214) respectively, so the major gate alone would let
-// an older 2.x store a row whose checks all throw "Unknown Monitor Type" —
-// the failure the type gate exists to prevent. A type absent from the map
-// shipped with 2.0.0 (manual in beta.4, smtp in beta.3, snmp in beta.0)
-// and needs only major 2.
+// server/monitor-types/websocket-upgrade.js, system-service.js, pm2.js,
+// oracledb.js and ntp.js first ship in 2.1.0, 2.1.0, 2.5.0, 2.3.0 and 2.5.0
+// (upstream #5613, #6488, #7114, #7156 and #7214) respectively, so the major
+// gate alone would let an older 2.x store a row whose checks all throw
+// "Unknown Monitor Type" — the failure the type gate exists to prevent. A
+// type absent from the map shipped with 2.0.0 (manual in beta.4, smtp in
+// beta.3, snmp in beta.0) and needs only major 2.
 
 const KUMA2_0: MinVersion = [2, 0, 0];
 
 const KUMA2_TYPE_MIN_VERSION: Record<string, MinVersion> = {
   "system-service": [2, 1, 0],
   "websocket-upgrade": [2, 1, 0],
+  pm2: [2, 5, 0],
   oracledb: [2, 3, 0],
   ntp: [2, 5, 0],
 };
@@ -178,6 +180,12 @@ const SNMP_OID_PATTERN = /^([0-2])((\.0)|(\.[1-9][0-9]*))*$/;
 // looser and lets a space through that validate() would reject.
 const SYSTEM_SERVICE_NAME_PATTERN = /^[a-zA-Z0-9._\-@]+$/;
 
+// pm2 shares the system_service_name column but validate() only refuses
+// control characters there — process names may hold spaces, which the
+// system-service pattern would reject. The range is upstream's own check.
+// oxlint-disable-next-line no-control-regex
+const PM2_NAME_CONTROL_CHARS = /[\u0000-\u001F\u007F]/;
+
 // monitorTypesWithEncodingAllowed of EditMonitor.vue's submit() (1.23.17 and
 // 2.5.11 alike): httpBodyEncoding stays on the monitor only for these types;
 // for every other type the UI sends null.
@@ -250,7 +258,7 @@ const TYPE_FLAGS: { flag: string; opt: string; types: readonly string[] }[] = [
   { flag: "--snmp-oid", opt: "snmpOid", types: ["snmp"] },
   { flag: "--snmp-version", opt: "snmpVersion", types: ["snmp"] },
   { flag: "--snmp-v3-username", opt: "snmpV3Username", types: ["snmp"] },
-  { flag: "--system-service-name", opt: "systemServiceName", types: ["system-service"] },
+  { flag: "--system-service-name", opt: "systemServiceName", types: ["system-service", "pm2"] },
 ];
 
 // monitorDefaults of src/pages/EditMonitor.vue in Kuma 1.23.17, minus the fields the CLI always
@@ -773,6 +781,46 @@ async function checkGameId(s: KumaSession, monitor: Record<string, unknown>): Pr
   fail(1, `game "${game}" is not in the server's game list`);
 }
 
+// The pm2 picker calls getPM2ProcessList when the type is chosen or a pm2
+// monitor opens: a non-empty list turns the name field into a required
+// select of process names, while ok:false (the server has no pm2 install)
+// and an empty list leave the free-text input — both still store the name
+// unverified, like the picker does. A name outside a non-empty list creates
+// a monitor that goes down at its first check, and check() itself looks the
+// name up among id and name alike, so a numeric id match is rewritten to
+// the stable process name the way loadPM2ProcessList rewrites a saved one.
+async function checkPm2Process(s: KumaSession, monitor: Record<string, unknown>): Promise<void> {
+  const name = monitor.system_service_name;
+  if (typeof name !== "string" || name === "") return; // needString reports an empty one
+  const res = await s.requestSoft("getPM2ProcessList");
+  if (res === null || typeof res !== "object") {
+    fail(70, "unexpected getPM2ProcessList response");
+  }
+  if (res.ok === false) {
+    console.error(
+      `warning: could not list PM2 processes (${String(res.msg ?? "unknown error")}); the name is stored unverified`,
+    );
+    return;
+  }
+  if (res.ok !== true || !Array.isArray(res.processList)) {
+    fail(70, "unexpected getPM2ProcessList response");
+  }
+  const list = res.processList as { id?: unknown; name?: unknown }[];
+  if (list.length === 0) return;
+  for (const entry of list) {
+    if (typeof entry !== "object" || entry === null) {
+      fail(70, "unexpected getPM2ProcessList response");
+    }
+    if (entry.name !== name && entry.id !== name) continue;
+    if (typeof entry.name !== "string") {
+      fail(70, "unexpected getPM2ProcessList response");
+    }
+    monitor.system_service_name = entry.name;
+    return;
+  }
+  fail(1, `PM2 process "${name}" is not in the server's PM2 process list`);
+}
+
 // A hatch value for a key that has a typed flag goes through the flag's
 // parser; flags take strings, so a string here parses the same way while a
 // number is written out in plain decimal first (String() would give "1e-7",
@@ -1293,6 +1341,18 @@ function validateFinalMonitor(
       );
     }
   }
+  if (type === "pm2") {
+    needString("system_service_name");
+    // pm2's validate() trims then refuses only control characters — a name
+    // with spaces is a legal process name here.
+    if (
+      inScope("system_service_name") &&
+      typeof monitor.system_service_name === "string" &&
+      PM2_NAME_CONTROL_CHARS.test(monitor.system_service_name.trim())
+    ) {
+      fail(2, "system_service_name must not contain control characters");
+    }
+  }
   // databaseConnectionString is a secret, so it can only arrive through
   // --config-file (--set refuses it) and there is no typed flag to check
   // early: the merged monitor is judged here.
@@ -1614,7 +1674,10 @@ export function registerMonitors(program: Command): void {
       ]),
     )
     .option("--snmp-v3-username <username>", "SNMPv3 username (snmp type, add only)")
-    .option("--system-service-name <name>", "system service name (system-service type)")
+    .option(
+      "--system-service-name <name>",
+      "service or PM2 process name (system-service / pm2 type)",
+    )
     .option("--interval <seconds>", "heartbeat interval")
     .option("--retry-interval <seconds>", "retry interval")
     .option("--max-retries <n>", "maximum retries")
@@ -1726,20 +1789,28 @@ export function registerMonitors(program: Command): void {
         if (opts.dockerHost === undefined) fail(2, "--type docker requires --docker-host");
       }
       if (type === "gamedig" && !opts.game) fail(2, "--type gamedig requires --game");
-      if (type === "system-service") {
+      if (type === "system-service" || type === "pm2") {
         if (!opts.systemServiceName) {
-          fail(2, "--type system-service requires --system-service-name");
+          fail(2, `--type ${type} requires --system-service-name`);
         }
         // The flag is validated even when a hatch key overrides it — a
-        // mistyped value should fail loudly, like --snmp-oid.
-        if (
-          typeof opts.systemServiceName === "string" &&
-          !SYSTEM_SERVICE_NAME_PATTERN.test(opts.systemServiceName.trim())
-        ) {
-          fail(
-            2,
-            `--system-service-name must match the service name pattern (letters, digits, and . _ - @ only), got "${opts.systemServiceName}"`,
-          );
+        // mistyped value should fail loudly, like --snmp-oid. pm2 shares the
+        // column but its validate() only refuses control characters, so the
+        // strict service-name pattern stays system-service-only.
+        if (typeof opts.systemServiceName === "string") {
+          const name = opts.systemServiceName.trim();
+          if (type === "system-service" && !SYSTEM_SERVICE_NAME_PATTERN.test(name)) {
+            fail(
+              2,
+              `--system-service-name must match the service name pattern (letters, digits, and . _ - @ only), got "${opts.systemServiceName}"`,
+            );
+          }
+          if (type === "pm2" && PM2_NAME_CONTROL_CHARS.test(name)) {
+            fail(
+              2,
+              `--system-service-name must not contain control characters, got "${opts.systemServiceName}"`,
+            );
+          }
         }
       }
       if (opts.pushToken === "") fail(2, "--push-token must not be empty");
@@ -2069,7 +2140,7 @@ export function registerMonitors(program: Command): void {
         typed.docker_host = dockerHost;
       }
       if (type === "gamedig") typed.game = opts.game;
-      if (type === "system-service") {
+      if (type === "system-service" || type === "pm2") {
         typed.system_service_name = opts.systemServiceName.trim();
       }
       if (type === "push") typed.pushToken = pushToken;
@@ -2114,6 +2185,7 @@ export function registerMonitors(program: Command): void {
       validateFinalMonitor(s, monitor);
       checkKuma2Ping(s, monitor);
       if (type === "gamedig") await checkGameId(s, monitor);
+      if (type === "pm2") await checkPm2Process(s, monitor);
 
       const res = await s.request("add", [monitor]);
       const out: Record<string, unknown> = {
@@ -2411,6 +2483,9 @@ export function registerMonitors(program: Command): void {
       checkKuma2Ping(s, monitor);
       if (monitor.type === "gamedig" && (typeChanged || touched.has("game"))) {
         await checkGameId(s, monitor);
+      }
+      if (monitor.type === "pm2" && (typeChanged || touched.has("system_service_name"))) {
+        await checkPm2Process(s, monitor);
       }
       await s.request("editMonitor", [monitor]);
       // editMonitor ignores fields like `active`, so print what Kuma saved.

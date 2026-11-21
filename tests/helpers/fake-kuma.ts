@@ -258,6 +258,11 @@ export type FakeState = {
   gameList: { keys: string[]; pretty?: string }[];
   // getGameList answer override; null answers state.gameList
   getGameListResult: Record<string, unknown> | null;
+  // getPM2ProcessList's processList: the server util's normalized
+  // {id, name, status} entries from `pm2 jlist`
+  pm2ProcessList: { id: string; name: string; status: string }[];
+  // getPM2ProcessList answer override; null answers state.pm2ProcessList
+  getPM2ProcessListResult: Record<string, unknown> | null;
   // getSettings data; primaryBaseURL is what the UI uses for push URLs
   settings: Record<string, unknown>;
   // getSettings answer override; null answers the stored settings with the
@@ -597,6 +602,11 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
       { keys: ["terraria"], pretty: "Terraria" },
     ],
     getGameListResult: null,
+    pm2ProcessList: [
+      { id: "0", name: "api", status: "online" },
+      { id: "1", name: "worker", status: "stopped" },
+    ],
+    getPM2ProcessListResult: null,
     settings: {},
     getSettingsResult: null,
     getMonitorResult: null,
@@ -1474,6 +1484,12 @@ export async function startFakeKuma(init: Partial<FakeState> = {}): Promise<Fake
       state.getGameListResult !== null
         ? structuredClone(state.getGameListResult)
         : { ok: true, gameList: structuredClone(state.gameList) },
+    );
+
+    handle("getPM2ProcessList", () =>
+      state.getPM2ProcessListResult !== null
+        ? structuredClone(state.getPM2ProcessListResult)
+        : { ok: true, processList: structuredClone(state.pm2ProcessList) },
     );
 
     handle("addTag", (tag: { name: string; color: string }) => {

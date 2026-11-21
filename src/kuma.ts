@@ -315,6 +315,13 @@ export class KumaSession {
     return res;
   }
 
+  // getPM2ProcessList answers ok:false when the server has no pm2 install —
+  // a state the picker's free-text input accepts, not a refusal — so this
+  // variant hands the raw answer to the caller to judge.
+  async requestSoft(event: string, args: any[] = []): Promise<any> {
+    return emitAck(this.socket, event, args, this.timeoutMs, this.disconnected);
+  }
+
   monitors(): Monitor[] {
     return Object.values(this.monitorList).sort((a, b) => a.id - b.id);
   }

@@ -3,7 +3,17 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { sandbox, type Sandbox } from "../helpers/run";
-import { cliRun, on21, on2x, onNtp, onOracleDb, onSnmpV3, onWsUpgrade, withKuma } from "./helpers";
+import {
+  cliRun,
+  on21,
+  on2x,
+  onNtp,
+  onOracleDb,
+  onPm2,
+  onSnmpV3,
+  onWsUpgrade,
+  withKuma,
+} from "./helpers";
 
 // Runs only when scripts/integration.ts provides UPTIME_KUMA_IT_*; a plain
 // `bun test` skips the whole file.
@@ -1215,5 +1225,34 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
     } else {
       expect(r.stderr).toContain("system-service is not available");
     }
+  }, 120_000);
+
+  // pm2.js first ships in 2.5.0; the official image has no pm2 install, so
+  // getPM2ProcessList answers ok:false and the picker-equivalent free-text
+  // path stores the name unverified — older legs take the type gate
+  test("pm2 stores the process name unverified when the server has no pm2", async () => {
+    const r = await cliRun(sb, [
+      "monitors",
+      "add",
+      "--type",
+      "pm2",
+      "--name",
+      "it-pm2",
+      "--system-service-name",
+      "it-pm2-proc",
+    ]);
+    if (!onPm2) {
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain('type "pm2" needs Uptime Kuma >= 2.5.0');
+      return;
+    }
+    expect(r.code).toBe(0);
+    expect(r.stderr).toContain("could not list PM2 processes");
+    const id = r.json().id;
+    const g = await cliRun(sb, ["monitors", "get", String(id)]);
+    expect(g.code).toBe(0);
+    expect(g.json().system_service_name).toBe("it-pm2-proc");
+    const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
+    expect(del.code).toBe(0);
   }, 120_000);
 });
