@@ -71,6 +71,7 @@ const MONITOR_2X_TYPES = [
   "manual",
   "ntp",
   "rabbitmq",
+  "sip-options",
   "smtp",
   "snmp",
   "oracledb",
@@ -78,9 +79,10 @@ const MONITOR_2X_TYPES = [
 ] as const;
 
 // server/monitor-types/websocket-upgrade.js, system-service.js, pm2.js,
-// oracledb.js, ntp.js, sftp.js and globalping.js first ship in 2.1.0,
-// 2.1.0, 2.5.0, 2.3.0, 2.5.0, 2.5.4 and 2.1.0 (upstream #5613, #6488,
-// #7114, #7156, #7214, #7034 and the globalping addition) respectively, so
+// oracledb.js, ntp.js, sftp.js, globalping.js and sip-options.js first ship
+// in 2.1.0, 2.1.0, 2.5.0, 2.3.0, 2.5.0, 2.5.4, 2.1.0 and 2.1.0 (upstream
+// #5613, #6488, #7114, #7156, #7214, #7034, the globalping addition and
+// #5362) respectively, so
 // the major gate alone would let an older 2.x store a row whose checks all
 // throw "Unknown Monitor Type" — the failure the type gate exists to
 // prevent. A type absent from the map shipped with 2.0.0 (manual in
@@ -97,6 +99,7 @@ const KUMA2_TYPE_MIN_VERSION: Record<string, MinVersion> = {
   oracledb: [2, 3, 0],
   ntp: [2, 5, 0],
   globalping: [2, 1, 0],
+  "sip-options": [2, 1, 0],
 };
 
 // A 2.x-only field whose column postdates 2.0.0 is silently dropped by
@@ -265,6 +268,7 @@ const TYPE_FLAGS: { flag: string; opt: string; types: readonly string[] }[] = [
       "snmp",
       "sftp",
       "globalping",
+      "sip-options",
     ],
   },
   {
@@ -282,6 +286,7 @@ const TYPE_FLAGS: { flag: string; opt: string; types: readonly string[] }[] = [
       "snmp",
       "sftp",
       "globalping",
+      "sip-options",
     ],
   },
   { flag: "--keyword", opt: "keyword", types: ["keyword", "grpc-keyword", "globalping"] },
@@ -864,6 +869,22 @@ function checkSystemService(s: KumaSession, type: unknown): void {
   }
 }
 
+// The picker hides sip-options on the container image through the whole
+// 2.x line (2.5.11 EditMonitor.vue's `v-if="!$root.info.isContainer"` on
+// the option, still there at 2.5.12) — the 2.x image does not ship the
+// sipsak binary sip-options.js spawns. From 3.0.0-beta.1 the image
+// carries sipsak and the option is ungated, so the refusal is 2.x-only.
+// Checked on the type the merged monitor ends up with — on add always,
+// on edit only when the type changes.
+function checkSipOptions(s: KumaSession, type: unknown): void {
+  if (type === "sip-options" && s.isContainer === true && s.majorVersion === 2) {
+    fail(
+      2,
+      "sip-options is not available: the picker hides it on a 2.x container server, which has no sipsak binary",
+    );
+  }
+}
+
 // The gamedig picker offers getGameList's entries; a game outside the list
 // creates a monitor that goes down at its first check. Each entry's keys are
 // the codes the lookup accepts (the UI stores keys[0], aliases resolve too).
@@ -1399,7 +1420,8 @@ function validateFinalMonitor(
     type === "ntp" ||
     type === "smtp" ||
     type === "snmp" ||
-    type === "sftp"
+    type === "sftp" ||
+    type === "sip-options"
   ) {
     needString("hostname");
   }
@@ -1412,7 +1434,8 @@ function validateFinalMonitor(
       type === "ntp" ||
       type === "smtp" ||
       type === "snmp" ||
-      type === "sftp") &&
+      type === "sftp" ||
+      type === "sip-options") &&
     inScope("port")
   ) {
     const port = monitor.port;
@@ -1972,11 +1995,11 @@ export function registerMonitors(program: Command): void {
     .option("--url <url>", "monitor url")
     .option(
       "--hostname <hostname>",
-      "hostname (port, ping, dns, steam, gamedig, mqtt, radius, tailscale-ping, ntp, smtp, snmp, sftp, globalping)",
+      "hostname (port, ping, dns, steam, gamedig, mqtt, radius, tailscale-ping, ntp, smtp, snmp, sftp, globalping, sip-options)",
     )
     .option(
       "--port <port>",
-      "port (port, dns, steam, gamedig, mqtt, radius, ntp, smtp, snmp, sftp, globalping)",
+      "port (port, dns, steam, gamedig, mqtt, radius, ntp, smtp, snmp, sftp, globalping, sip-options)",
     )
     .option("--keyword <keyword>", "keyword (keyword, grpc-keyword, globalping types)")
     .option("--json-path <path>", "json path (json-query, snmp, globalping types)")
@@ -2113,7 +2136,13 @@ export function registerMonitors(program: Command): void {
           fail(2, "--type grpc-keyword requires --grpc-protobuf");
         }
       }
-      if (type === "port" || type === "steam" || type === "gamedig" || type === "mqtt") {
+      if (
+        type === "port" ||
+        type === "steam" ||
+        type === "gamedig" ||
+        type === "mqtt" ||
+        type === "sip-options"
+      ) {
         if (!opts.hostname) fail(2, `--type ${type} requires --hostname`);
         if (opts.port === undefined) fail(2, `--type ${type} requires --port`);
       }
@@ -2352,7 +2381,13 @@ export function registerMonitors(program: Command): void {
         // the picker's port pick is subtype-dependent (dns 53, ping 80),
         // resolved on the merged monitor once subtype is known
         port = opts.port === undefined ? undefined : parsePort(opts.port, "--port");
-      } else if (type === "port" || type === "steam" || type === "gamedig" || type === "mqtt") {
+      } else if (
+        type === "port" ||
+        type === "steam" ||
+        type === "gamedig" ||
+        type === "mqtt" ||
+        type === "sip-options"
+      ) {
         port = parsePort(opts.port, "--port");
       }
       const grpcProtobuf =
@@ -2413,6 +2448,7 @@ export function registerMonitors(program: Command): void {
       checkKuma2xFields(s, twoXFieldCandidates);
       checkTailscalePing(s, type);
       checkSystemService(s, type);
+      checkSipOptions(s, type);
       checkMonitorTiming(
         s,
         timingFields(sets, fileConfig, {
@@ -3063,6 +3099,7 @@ export function registerMonitors(program: Command): void {
         checkKuma2xType(s, monitor.type);
         checkTailscalePing(s, monitor.type);
         checkSystemService(s, monitor.type);
+        checkSipOptions(s, monitor.type);
       }
       // A non-v3 monitor can never become v3 by edit: snmpV3Username is
       // required for v3 and no editMonitor reads it, so the monitor would

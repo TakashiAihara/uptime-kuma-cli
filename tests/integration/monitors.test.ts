@@ -12,8 +12,10 @@ import {
   onOracleDb,
   onPm2,
   onSftp,
+  onSipOptions,
   onSnmpV3,
   onWsUpgrade,
+  sipOptionsContainerHidden,
   withKuma,
 } from "./helpers";
 
@@ -1377,5 +1379,40 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
     });
     const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
     expect(del.code).toBe(0);
+  }, 120_000);
+
+  // sip-options.js first ships in 2.1.0 and the picker hides the type on a
+  // 2.x container server — the official 2.x image has no sipsak binary —
+  // while 3.0.0-beta.1 ships it and ungated the option, so a leg takes the
+  // type gate, the availability refusal or a stored paused add respectively;
+  // a real SIP check never runs
+  test("sip-options follows the picker's per-version container gate", async () => {
+    const r = await cliRun(sb, [
+      "monitors",
+      "add",
+      "--type",
+      "sip-options",
+      "--name",
+      "it-sip",
+      "--hostname",
+      "localhost",
+      "--port",
+      "5060",
+      "--paused",
+    ]);
+    if (!onSipOptions) {
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain('type "sip-options" needs Uptime Kuma >= 2.1.0');
+      return;
+    }
+    if (!sipOptionsContainerHidden) {
+      expect(r.code).toBe(0);
+      const id = r.json().id;
+      const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
+      expect(del.code).toBe(0);
+      return;
+    }
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("sip-options is not available");
   }, 120_000);
 });
