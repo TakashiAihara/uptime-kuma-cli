@@ -6435,6 +6435,270 @@ describe("rabbitmq monitors", () => {
   });
 });
 
+describe("sip-options monitors", () => {
+  // the picker hides the type on the container image; the fake's default
+  // 2.x info is that image, so the success path needs a non-container host
+  const hostInfo = {
+    version: "2.5.11",
+    isContainer: false,
+    runtime: { platform: "linux", arch: "x64" },
+    dbType: "sqlite",
+    primaryBaseURL: null,
+  };
+
+  // sip-options.js spawns sipsak with sip:hostname:port — the picker's
+  // required pair with no port default of its own
+  test("add --type sip-options stores the hostname and port on a non-container host", async () => {
+    const k = await useFake({ profile: "2.x", info: hostInfo });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "sip-options",
+        "--name",
+        "sip1",
+        "--hostname",
+        "sip.example.com",
+        "--port",
+        "5060",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const m = stored(k, "sip1");
+    expect(m.type).toBe("sip-options");
+    expect(m.hostname).toBe("sip.example.com");
+    expect(m.port).toBe(5060);
+    expect(m.conditions).toEqual([]);
+  });
+
+  test("add --type sip-options without --hostname exits 2 before connecting", async () => {
+    const k = await useFake({ profile: "2.x", info: hostInfo });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "sip-options", "--name", "sip1", "--port", "5060"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--type sip-options requires --hostname");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --type sip-options without --port exits 2 before connecting", async () => {
+    const k = await useFake({ profile: "2.x", info: hostInfo });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "sip-options",
+        "--name",
+        "sip1",
+        "--hostname",
+        "sip.example.com",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--type sip-options requires --port");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --type sip-options with an out-of-range port exits 2 before connecting", async () => {
+    const k = await useFake({ profile: "2.x", info: hostInfo });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "sip-options",
+        "--name",
+        "sip1",
+        "--hostname",
+        "sip.example.com",
+        "--port",
+        "70000",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--port must be a port number");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  // the picker's option carries v-if="!$root.info.isContainer" — the
+  // official image reports isContainer and the check refuses like it
+  test("add --type sip-options exits 2 on the container image", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "sip-options",
+        "--name",
+        "sip1",
+        "--hostname",
+        "sip.example.com",
+        "--port",
+        "5060",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("sip-options is not available");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --type sip-options exits 2 on a 1.x server before add", async () => {
+    const k = await useFake();
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "sip-options",
+        "--name",
+        "sip1",
+        "--hostname",
+        "sip.example.com",
+        "--port",
+        "5060",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('type "sip-options" needs Uptime Kuma >= 2.1.0');
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  // sip-options.js first ships in 2.1.0 — a 2.0.x server takes the same
+  // release gate, not the container refusal
+  test("add --type sip-options exits 2 on a 2.0 server naming 2.1.0", async () => {
+    const k = await useFake({ profile: "2.x", info: { version: "2.0.2" } });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "sip-options",
+        "--name",
+        "sip1",
+        "--hostname",
+        "sip.example.com",
+        "--port",
+        "5060",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('type "sip-options" needs Uptime Kuma >= 2.1.0');
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  // a type change into sip-options re-judges the required pair on the
+  // merged monitor — the stored http row has neither — and the watcher's
+  // last act clears conditions since sip-options supports none
+  test("edit --set type=sip-options supplies hostname and port", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      info: hostInfo,
+      monitors: [http(7, "h", { conditions: [{ type: "keyword" }] })],
+    });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "h",
+        "--set",
+        "type=sip-options",
+        "--set",
+        "hostname=sip.example.com",
+        "--set",
+        "port=5060",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const m = stored(k, "h");
+    expect(m.type).toBe("sip-options");
+    expect(m.hostname).toBe("sip.example.com");
+    expect(m.port).toBe(5060);
+    expect(m.conditions).toEqual([]);
+  });
+
+  // the watcher's port branch compares string forms a numeric stored port
+  // never matches, so a custom stored port survives the change untouched
+  test("edit --set type=sip-options keeps a stored custom port", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      info: hostInfo,
+      monitors: [http(7, "h", { hostname: "sip.example.com", port: 5061 })],
+    });
+    const r = await run(sb, ["monitors", "edit", "h", "--set", "type=sip-options"], creds(k.url));
+    expect(r.code).toBe(0);
+    const m = stored(k, "h");
+    expect(m.type).toBe("sip-options");
+    expect(m.hostname).toBe("sip.example.com");
+    expect(m.port).toBe(5061);
+  });
+
+  test("edit --set type=sip-options without a port exits 2", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      info: hostInfo,
+      monitors: [http(7, "h", { hostname: "sip.example.com" })],
+    });
+    const r = await run(sb, ["monitors", "edit", "h", "--set", "type=sip-options"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("port must be a port number");
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set type=sip-options on the container image exits 2", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [http(7, "h")] });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "h",
+        "--set",
+        "type=sip-options",
+        "--set",
+        "hostname=sip.example.com",
+        "--set",
+        "port=5060",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("sip-options is not available");
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set type=sip-options on a 1.x server exits 2 before editMonitor", async () => {
+    const k = await useFake();
+    await run(
+      sb,
+      ["monitors", "add", "--type", "http", "--name", "h1", "--url", "https://h.example.com"],
+      creds(k.url),
+    );
+    const r = await run(sb, ["monitors", "edit", "h1", "--set", "type=sip-options"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('type "sip-options" needs Uptime Kuma >= 2.1.0');
+    expect(editCalls(k)).toHaveLength(0);
+  });
+});
+
 describe("monitor timing on Kuma 2.x", () => {
   test("edit of a 2.x ping to a short interval keeps its timeout (no 80% cap)", async () => {
     const k = await useFake({

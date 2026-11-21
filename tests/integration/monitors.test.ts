@@ -12,6 +12,7 @@ import {
   onOracleDb,
   onPm2,
   onSftp,
+  onSipOptions,
   onSnmpV3,
   onWsUpgrade,
   withKuma,
@@ -1377,5 +1378,30 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
     });
     const del = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
     expect(del.code).toBe(0);
+  }, 120_000);
+
+  // sip-options.js first ships in 2.1.0 and the picker hides the type on a
+  // container server — the official 2.x image has no sipsak binary, so a
+  // supported leg takes the availability refusal while an older leg takes
+  // the type gate; a real SIP check is impossible on either image
+  test("sip-options exits 2 like the picker's container-hidden type", async () => {
+    const r = await cliRun(sb, [
+      "monitors",
+      "add",
+      "--type",
+      "sip-options",
+      "--name",
+      "it-sip",
+      "--hostname",
+      "localhost",
+      "--port",
+      "5060",
+    ]);
+    expect(r.code).toBe(2);
+    if (!onSipOptions) {
+      expect(r.stderr).toContain('type "sip-options" needs Uptime Kuma >= 2.1.0');
+    } else {
+      expect(r.stderr).toContain("sip-options is not available");
+    }
   }, 120_000);
 });
