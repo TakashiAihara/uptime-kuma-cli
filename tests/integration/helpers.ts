@@ -27,6 +27,12 @@ export const onWsUpgrade =
   parseMajorVersion(itVersion) > 2 ||
   (parseMajorVersion(itVersion) === 2 && parseMinorVersion(itVersion) >= 1);
 
+// pm2.js first ships in 2.5.0 (upstream #7114) — a 1.x or 2.0-2.4 leg takes
+// the type-gate refusal for any add or type change.
+export const onPm2 =
+  parseMajorVersion(itVersion) > 2 ||
+  (parseMajorVersion(itVersion) === 2 && parseMinorVersion(itVersion) >= 5);
+
 // oracledb.js first ships in 2.3.0 (upstream #7156) — 1.x and 2.0-2.2 legs
 // take the type-gate refusal for any add or type change.
 export const onOracleDb =
