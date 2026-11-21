@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+
 import { totpToken } from "../src/lib.ts";
 
 // The all-zero 10-byte key that base32 "AAAAAAAAAAAAAAAA" decodes to.

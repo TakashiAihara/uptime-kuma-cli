@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+
 import { totpToken } from "../../src/lib.ts";
-import { sandbox, writeConfig, type Sandbox } from "../helpers/run";
+import { sandbox, type Sandbox, writeConfig } from "../helpers/run";
 import { cliRun, reserveLogins, withKuma2FA } from "./helpers";
 
 // Runs only when scripts/integration.ts provides UPTIME_KUMA_IT_*; a plain

@@ -20,7 +20,9 @@
 import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
 import { io, type Socket } from "socket.io-client";
+
 import { TEST_LIMIT_MS } from "./integration-limit.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..");

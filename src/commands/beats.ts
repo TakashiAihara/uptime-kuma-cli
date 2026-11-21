@@ -1,6 +1,7 @@
 import type { Command } from "commander";
-import { fail, parsePositiveInteger, parsePositiveNumber, printJson } from "../lib.ts";
+
 import { connect } from "../kuma.ts";
+import { fail, parsePositiveInteger, parsePositiveNumber, printJson } from "../lib.ts";
 
 type Beat = Record<string, unknown>;
 

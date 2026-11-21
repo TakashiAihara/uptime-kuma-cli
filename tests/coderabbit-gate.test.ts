@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
+
 import {
   CODERABBIT_CONTEXT,
-  GATE_CONTEXT,
-  evaluate,
-  gateState,
   type CommitStatus,
+  evaluate,
+  GATE_CONTEXT,
+  gateState,
 } from "../scripts/coderabbit-gate.ts";
 
 const status = (over: Partial<CommitStatus>): CommitStatus => ({

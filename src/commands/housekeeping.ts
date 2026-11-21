@@ -1,4 +1,5 @@
 import type { Command } from "commander";
+
 import { connect, type KumaSession } from "../kuma.ts";
 import { fail, printJson, shrinkTimeoutMs } from "../lib.ts";
 

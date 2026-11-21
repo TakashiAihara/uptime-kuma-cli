@@ -1,6 +1,7 @@
 import type { Command } from "commander";
-import { fail, parseSets, printJson, readJsonFile } from "../lib.ts";
+
 import { connect, type NotificationRow } from "../kuma.ts";
+import { fail, parseSets, printJson, readJsonFile } from "../lib.ts";
 
 function storedConfig(row: NotificationRow): Record<string, unknown> {
   try {

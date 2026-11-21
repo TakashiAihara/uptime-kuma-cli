@@ -1,6 +1,7 @@
 import { type Command } from "commander";
-import { CliError, fail, parseSets, printJson, readJsonFile, redactUrl } from "../lib.ts";
+
 import { connect, type KumaSession } from "../kuma.ts";
+import { CliError, fail, parseSets, printJson, readJsonFile, redactUrl } from "../lib.ts";
 import { KUMA_2X_TIMEZONES, KUMA_TIMEZONES } from "../timezones.ts";
 import { urlCarriesCredentials } from "./monitors.ts";
 

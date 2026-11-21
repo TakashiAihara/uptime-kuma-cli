@@ -1,4 +1,13 @@
-import { Option, type Command } from "commander";
+import { type Command, Option } from "commander";
+
+import {
+  connect,
+  type KumaSession,
+  meetsMinVersion,
+  type MinVersion,
+  refuseKumaVersion,
+  type StatusPageRow,
+} from "../kuma.ts";
 import {
   CliError,
   fail,
@@ -8,14 +17,6 @@ import {
   redactUrl as redactMonitorUrl,
   socketTimeoutMs,
 } from "../lib.ts";
-import {
-  connect,
-  meetsMinVersion,
-  refuseKumaVersion,
-  type KumaSession,
-  type MinVersion,
-  type StatusPageRow,
-} from "../kuma.ts";
 
 // The six styles the StatusPage.vue incident picker offers; createIncident
 // starts a new incident at "primary".

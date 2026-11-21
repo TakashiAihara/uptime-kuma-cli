@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+
 import { type Sandbox, sandbox } from "./helpers/run";
 
 const SCRIPT = resolve(import.meta.dir, "../scripts/publish-release.sh");

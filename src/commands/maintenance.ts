@@ -1,4 +1,6 @@
-import { Option, type Command } from "commander";
+import { type Command, Option } from "commander";
+
+import { connect, type KumaSession } from "../kuma.ts";
 import {
   compareLocalDateTimes,
   fail,
@@ -9,7 +11,6 @@ import {
   printJson,
   readJsonFile,
 } from "../lib.ts";
-import { connect, type KumaSession } from "../kuma.ts";
 
 // The six strategies the 1.23.17 EditMaintenance.vue picker offers.
 const STRATEGIES = [
