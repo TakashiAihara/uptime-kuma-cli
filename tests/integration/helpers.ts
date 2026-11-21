@@ -53,8 +53,10 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // spend them without a pacing wait in between — needed when the wait
 // itself would change what is being measured (a TOTP window boundary).
 export async function reserveLogins(logins: number): Promise<void> {
-  if (logins > MAX_LOGINS_PER_WINDOW) {
-    throw new Error(`cannot reserve ${logins} logins above the per-window budget`);
+  if (!Number.isInteger(logins) || logins < 0 || logins > MAX_LOGINS_PER_WINDOW) {
+    throw new Error(
+      `cannot reserve ${logins} logins; allowed: integer 0..${MAX_LOGINS_PER_WINDOW}`,
+    );
   }
   for (;;) {
     const now = Date.now();
