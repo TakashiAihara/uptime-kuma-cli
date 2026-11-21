@@ -437,6 +437,50 @@ describe("ci.yml dependency audit", () => {
   });
 });
 
+// The integration job is the only check that runs the suite against real Kuma
+// images, and both matrix legs are required checks. Its env wiring is the soft
+// spot: if UPTIME_KUMA_IT_IMAGE stopped reaching the step, both legs would run
+// the compose default (1.23.17) and still pass — scripts/integration.ts only
+// cross-checks the image's major when the variable is set.
+describe("ci.yml integration job", () => {
+  const job = () =>
+    (
+      Bun.YAML.parse(read("ci.yml")) as {
+        jobs: {
+          integration: {
+            "timeout-minutes"?: number;
+            permissions?: Record<string, string>;
+            strategy?: { "fail-fast"?: boolean; matrix?: { image?: string[] } };
+            steps: { run?: string; env?: Record<string, string> }[];
+          };
+        };
+      }
+    ).jobs.integration;
+
+  // README promises both legs and branch protection requires both
+  // `integration (<image>)` checks; a matrix change also renames them, so the
+  // failure would otherwise surface as stuck merges, not a red test
+  test("the matrix runs the suite against both Kuma 1.x and 2.x, and a failing leg cannot cancel the other", () => {
+    expect(job().strategy?.matrix?.image).toEqual([
+      "louislam/uptime-kuma:1.23.17",
+      "louislam/uptime-kuma:2.5.11",
+    ]);
+    expect(job().strategy?.["fail-fast"]).toBe(false);
+  });
+
+  test("the matrix image reaches the runner through UPTIME_KUMA_IT_IMAGE", () => {
+    const step = job().steps.find((s) => s.run?.includes("test:integration"));
+
+    expect(step?.run?.trim()).toBe("bun run test:integration");
+    expect(step?.env?.UPTIME_KUMA_IT_IMAGE).toBe("${{ matrix.image }}");
+  });
+
+  test("the job is time-boxed and read-only", () => {
+    expect(job()["timeout-minutes"]).toBeGreaterThan(0);
+    expect(job().permissions?.contents).toBe("read");
+  });
+});
+
 describe("release.yml: publish the checked commit and artifact as is (second round of #13)", () => {
   type Step = {
     id?: string;
