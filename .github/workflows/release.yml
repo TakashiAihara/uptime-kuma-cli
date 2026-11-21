@@ -228,9 +228,11 @@ jobs:
             runner: macos-15-intel
           - target: darwin-arm64
             runner: macos-15
-    # Cap how long a single binary may keep running so a hung binary does not hold up
-    # the next main release
-    timeout-minutes: 15
+    # timeout-minutes counts the wait for a runner too: at 15 minutes a starved
+    # leg was cancelled before its first step and publish was skipped (#98). The
+    # budget leaves room for queue starvation while still capping a hung binary,
+    # just later
+    timeout-minutes: 45
     runs-on: ${{ matrix.runner }}
     steps:
       # The script being run also comes from the same commit as build. Only that one

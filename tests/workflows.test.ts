@@ -579,12 +579,14 @@ describe("release.yml: publish the checked commit and artifact as is (second rou
     }
   });
 
-  test("verify has a time limit so a hung binary does not jam main's release", () => {
-    const limit = jobs().verify!["timeout-minutes"];
-
-    expect(typeof limit).toBe("number");
-    expect(limit!).toBeGreaterThan(0);
-    expect(limit!).toBeLessThanOrEqual(30);
+  // timeout-minutes counts the wait for a runner too, not just run time: at 15
+  // minutes a starved leg was cancelled before its first step and publish was
+  // skipped (#98). The smoke run takes well under a minute, so the budget is
+  // mostly queue headroom; the pin is exact because 45 is the low end of the
+  // range the issue suggests (45-60), the trade-off between surviving
+  // starvation and capping a hung binary
+  test("verify's time limit leaves room for runner queueing and still caps a hung binary", () => {
+    expect(jobs().verify!["timeout-minutes"]).toBe(45);
   });
 
   test("the artifact states a retention period, and verify and publish download the name build uploaded", () => {
