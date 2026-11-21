@@ -1277,10 +1277,6 @@ function validateFinalMonitor(
   const type = typeof monitor.type === "string" ? monitor.type : "";
   const inScope = (field: string): boolean =>
     edit === undefined || edit.touched.has(field) || edit.typeChanged;
-  // Optional selects the picker may leave unset are judged only when the
-  // edit carries the field — a type change must not re-judge a stored
-  // null the picker itself could have produced.
-  const fieldTouched = (field: string): boolean => edit === undefined || edit.touched.has(field);
   const needString = (field: string): void => {
     if (!inScope(field)) return;
     const v = monitor[field];
@@ -1414,10 +1410,11 @@ function validateFinalMonitor(
       }
     }
   }
-  if (type === "dns" && fieldTouched("dns_resolve_type")) {
+  if (type === "dns" && inScope("dns_resolve_type")) {
     // The hatch takes the union of the dns and globalping RR-type lists;
-    // the dns type's picker offers only DNS_RESOLVE_TYPES. A null stays
-    // allowed — the picker's select can sit unset on a type change.
+    // the dns type's picker offers only DNS_RESOLVE_TYPES, so a type
+    // change re-judges a stored value the new type cannot offer. A null
+    // stays allowed — the picker's select can sit unset on a type change.
     const rrtype = monitor.dns_resolve_type;
     if (
       rrtype !== null &&
@@ -1486,9 +1483,11 @@ function validateFinalMonitor(
       }
       // expectedValue switches the check to json-query, which reads
       // jsonPath — the picker shows the fields together, so a value
-      // without a path can only fail every beat.
+      // without a path can only fail every beat. Either side of the pair
+      // being edited re-judges the merged combination; clearing both
+      // lifts the check like the picker's empty fields.
       if (
-        needMerged("expectedValue") &&
+        (needMerged("expectedValue") || needMerged("jsonPath")) &&
         typeof monitor.expectedValue === "string" &&
         monitor.expectedValue !== "" &&
         (typeof monitor.jsonPath !== "string" || monitor.jsonPath === "")
@@ -1496,7 +1495,10 @@ function validateFinalMonitor(
         fail(2, "jsonPath must be a non-empty string when expectedValue is set");
       }
     }
-    if (validSubtype === "dns" && fieldTouched("dns_resolve_type")) {
+    if (validSubtype === "dns" && needMerged("dns_resolve_type")) {
+      // A subtype switch re-judges a stored RR type the new subtype's
+      // select cannot offer, like every other field the subtype reads;
+      // a null stays allowed — the select can sit unset.
       const rrtype = monitor.dns_resolve_type;
       if (
         rrtype !== null &&

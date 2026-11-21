@@ -5597,6 +5597,108 @@ describe("globalping monitors", () => {
     });
   });
 
+  // a type or subtype switch re-judges a stored RR type the destination
+  // cannot offer — the picker's select would show a value outside its
+  // options, which the merged monitor refuses like every other field
+  test("edit --set type=dns on a globalping dns monitor with a globalping-only RR type exits 2", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [
+        gpSeed(7, "gp", {
+          subtype: "dns",
+          protocol: "UDP",
+          port: 53,
+          dns_resolve_server: "1.1.1.1",
+          dns_resolve_type: "HTTPS",
+        }),
+      ],
+    });
+    const r = await run(sb, ["monitors", "edit", "gp", "--set", "type=dns"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("dns_resolve_type must be one of");
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set type=globalping --set subtype=dns on a dns monitor with a dns-only RR type exits 2", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [
+        {
+          ...http(7, "d"),
+          type: "dns",
+          url: null,
+          hostname: "dns.example.com",
+          port: 53,
+          location: "world",
+          dns_resolve_server: "1.1.1.1",
+          dns_resolve_type: "CAA",
+        },
+      ],
+    });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "d", "--set", "type=globalping", "--set", "subtype=dns"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("dns_resolve_type must be one of");
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set subtype=dns on a ping monitor with a dns-only RR type exits 2", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [gpSeed(7, "gp", { dns_resolve_type: "CAA" })],
+    });
+    const r = await run(sb, ["monitors", "edit", "gp", "--set", "subtype=dns"], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("dns_resolve_type must be one of");
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  // expectedValue switches the check to json-query, which reads jsonPath —
+  // editing either side of the pair re-judges the merged combination
+  test("edit --set jsonPath= on a globalping http monitor with expectedValue exits 2", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [
+        gpSeed(7, "gp", {
+          subtype: "http",
+          url: "https://example.com",
+          expectedValue: "ok",
+          jsonPath: "$.status",
+        }),
+      ],
+    });
+    const r = await run(sb, ["monitors", "edit", "gp", "--set", 'jsonPath=""'], creds(k.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("jsonPath must be a non-empty string when expectedValue is set");
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("edit clearing expectedValue and jsonPath together is allowed", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      monitors: [
+        gpSeed(7, "gp", {
+          subtype: "http",
+          url: "https://example.com",
+          expectedValue: "ok",
+          jsonPath: "$.status",
+        }),
+      ],
+    });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "gp", "--set", 'expectedValue=""', "--set", 'jsonPath=""'],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const m = stored(k, "gp");
+    expect(m.expectedValue).toBe("");
+    expect(m.jsonPath).toBe("");
+  });
+
   test("edit --set type=globalping exits 2 on a 1.x server before editMonitor", async () => {
     const k = await useFake();
     await run(
