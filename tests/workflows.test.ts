@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import pkg from "../package.json" with { type: "json" };
 import { CODERABBIT_CONTEXT } from "../scripts/coderabbit-gate.ts";
+import { TEST_LIMIT_MS } from "../scripts/integration-limit.ts";
 import { TAG_SHAPE } from "../scripts/next-tag.ts";
 
 const WORKFLOWS = ["ci.yml", "coderabbit-review.yml", "release.yml"];
@@ -434,6 +436,107 @@ describe("ci.yml dependency audit", () => {
   test("the audit pin rejects run lines that mask a failure", () => {
     expect("bun audit || true").not.toMatch(AUDIT_RUN);
     expect("bun audit --ignore=123||true").not.toMatch(AUDIT_RUN);
+  });
+});
+
+// The integration job is the only check that runs the suite against real Kuma
+// images, and both matrix legs are required checks. Its env wiring is the soft
+// spot: if UPTIME_KUMA_IT_IMAGE stopped reaching the step, both legs would run
+// the compose default (1.23.17) and still pass — scripts/integration.ts only
+// cross-checks the image's major when the variable is set.
+describe("ci.yml integration job", () => {
+  const job = () =>
+    (
+      Bun.YAML.parse(read("ci.yml")) as {
+        jobs: {
+          integration: {
+            "timeout-minutes"?: number;
+            "continue-on-error"?: boolean;
+            if?: string;
+            needs?: string | string[];
+            permissions?: Record<string, string>;
+            strategy?: { "fail-fast"?: boolean; matrix?: { image?: string[] } };
+            steps: {
+              run?: string;
+              env?: Record<string, string>;
+              "continue-on-error"?: boolean;
+              "timeout-minutes"?: number;
+              if?: string;
+            }[];
+          };
+        };
+      }
+    ).jobs.integration;
+
+  // Exactly one step must mention the runner: without this the assertions
+  // below on step fields pass vacuously when the step is renamed or dropped
+  const testStep = () => {
+    const matches = job().steps.filter((s) => s.run?.includes("test:integration"));
+
+    expect(matches.length).toBe(1);
+    return matches[0]!;
+  };
+
+  // README promises both legs and the main ruleset requires both
+  // `integration (<image>)` checks; a matrix change also renames them, so the
+  // failure would otherwise surface as stuck merges, not a red test. The
+  // whole matrix is pinned — an `exclude`/`include` key could otherwise drop
+  // or rename a leg while keeping the image list green
+  test("the matrix runs the suite against both Kuma 1.x and 2.x, and a failing leg cannot cancel the other", () => {
+    expect(job().strategy?.matrix).toEqual({
+      image: ["louislam/uptime-kuma:1.23.17", "louislam/uptime-kuma:2.5.11"],
+    });
+    expect(job().strategy?.["fail-fast"]).toBe(false);
+  });
+
+  test("the matrix image reaches the runner through UPTIME_KUMA_IT_IMAGE", () => {
+    const step = testStep();
+
+    expect(step.run?.trim()).toBe("bun run test:integration");
+    expect(step.env?.UPTIME_KUMA_IT_IMAGE).toBe("${{ matrix.image }}");
+  });
+
+  // The step above pins the script name, not what it runs. If
+  // test:integration stopped pointing at scripts/integration.ts (which sets
+  // UPTIME_KUMA_IT_URL), the suite would still run but skip every test, and
+  // both legs would pass without ever checking the image
+  test("test:integration runs the integration runner, not the test files directly", () => {
+    expect(pkg.scripts["test:integration"]).toBe("bun scripts/integration.ts");
+  });
+
+  // timeout-minutes must cover the runner's own suite bound (TEST_LIMIT_MS
+  // in scripts/integration-limit.ts) plus image pull, build, setup and
+  // teardown — the 25 the job sets is that documented budget, and a smaller
+  // value could kill the suite mid-run and lose the runner's own timeout
+  // message and the container logs it dumps; the step keeps no timeout of
+  // its own for the same reason. The pin against TEST_LIMIT_MS requires at
+  // least 5 minutes of slack over the bound — a bare `>` would still pass
+  // if the bound grew to 24 while setup alone pushes the total past 25.
+  // permissions is pinned as the whole object: an added
+  // pull-requests or id-token write would otherwise pass while widening
+  // the token a job that pulls and runs external images gets
+  test("the job is time-boxed over the suite's own budget and read-only", () => {
+    const step = testStep();
+
+    expect(job()["timeout-minutes"]).toBe(25);
+    expect(job()["timeout-minutes"]! * 60_000).toBeGreaterThanOrEqual(TEST_LIMIT_MS + 5 * 60_000);
+    expect(step["timeout-minutes"]).toBeUndefined();
+    expect(job().permissions).toEqual({ contents: "read" });
+  });
+
+  // Both legs are required checks, and a skipped required check counts as
+  // passing: a continue-on-error or a false `if` would report green without
+  // gating, and a `needs` chain would skip the job when the dependency
+  // fails. The `mutation` job's continue-on-error is legitimate because it
+  // is report-only
+  test("the job and the test step cannot skip or swallow a failure", () => {
+    const step = testStep();
+
+    expect(job().needs).toBeUndefined();
+    expect(job()["continue-on-error"]).toBeUndefined();
+    expect(job().if).toBeUndefined();
+    expect(step["continue-on-error"]).toBeUndefined();
+    expect(step.if).toBeUndefined();
   });
 });
 

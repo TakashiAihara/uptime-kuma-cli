@@ -21,6 +21,7 @@ import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { io, type Socket } from "socket.io-client";
+import { TEST_LIMIT_MS } from "./integration-limit.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..");
 const COMPOSE_FILE = join(REPO_ROOT, "tests", "integration", "compose.yaml");
@@ -56,11 +57,7 @@ if (
 const TEARDOWN_ATTEMPTS = 3;
 // Children a signal kills get this long to exit before SIGKILL.
 const KILL_GRACE_MS = 5_000;
-// cliRun paces invocations to 15 logins/min, so the suite's floor grows with
-// its call count; the 2.5.11 leg already measures about 15 min, so the bound
-// sits at 18. The CI job allows 25: setup (~2 min) + this bound + the sweep,
-// server log and down -v after it fit inside.
-const TEST_LIMIT_MS = 18 * 60_000;
+
 const KEEP = process.env.UPTIME_KUMA_IT_KEEP === "1";
 // An empty value (a mistyped CI matrix key) would make compose fall back to
 // 1.23.17 while the job claims another image.
