@@ -3627,6 +3627,462 @@ describe("oracledb monitors", () => {
   });
 });
 
+describe("system-service monitors", () => {
+  // the picker offers the type only on a linux or win32 host outside a
+  // container; the fake's default 2.x info is the container image
+  const linuxHost = {
+    version: "2.5.11",
+    isContainer: false,
+    runtime: { platform: "linux", arch: "x64" },
+    dbType: "sqlite",
+    primaryBaseURL: null,
+  };
+
+  test("add --type system-service stores the service name on a linux host", async () => {
+    const k = await useFake({ profile: "2.x", info: linuxHost });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "system-service",
+        "--name",
+        "svc1",
+        "--system-service-name",
+        "nginx.service",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    const m = stored(k, "svc1");
+    expect(m.type).toBe("system-service");
+    expect(m.system_service_name).toBe("nginx.service");
+    expect(m.conditions).toEqual([]);
+  });
+
+  test("add --type system-service runs on a win32 host too", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      info: { ...linuxHost, runtime: { platform: "win32", arch: "x64" } },
+    });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "system-service",
+        "--name",
+        "svc1",
+        "--system-service-name",
+        "W32Time",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "svc1").system_service_name).toBe("W32Time");
+  });
+
+  test("add --type system-service without --system-service-name exits 2 before connecting", async () => {
+    const k = await useFake({ profile: "2.x", info: linuxHost });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "system-service", "--name", "svc1"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--type system-service requires --system-service-name");
+    expect(k.calls).toHaveLength(0);
+  });
+
+  // monitor.js trims then requires letters, digits and . _ - @ only — the
+  // picker's hint pattern is looser and would let this through
+  test("add --system-service-name with a space exits 2 before connecting", async () => {
+    const k = await useFake({ profile: "2.x", info: linuxHost });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "system-service",
+        "--name",
+        "svc1",
+        "--system-service-name",
+        "my service",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("service name pattern");
+    expect(k.calls).toHaveLength(0);
+  });
+
+  // monitor.js reassigns the trimmed name in validate(), so the wire value
+  // is trimmed the same way — surrounding whitespace never reaches the row
+  test("add --system-service-name trims surrounding whitespace before storing", async () => {
+    const k = await useFake({ profile: "2.x", info: linuxHost });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "system-service",
+        "--name",
+        "svc1",
+        "--system-service-name",
+        "  nginx.service  ",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "svc1").system_service_name).toBe("nginx.service");
+  });
+
+  test("add --set system_service_name trims surrounding whitespace too", async () => {
+    const k = await useFake({ profile: "2.x", info: linuxHost });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "system-service",
+        "--name",
+        "svc1",
+        "--system-service-name",
+        "nginx.service",
+        "--set",
+        "system_service_name=  memcached  ",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "svc1").system_service_name).toBe("memcached");
+  });
+
+  // a hatch key beats the flag in the merge, so the merged value is judged
+  // again in validateFinalMonitor after connect
+  test("add --set system_service_name overrides the flag and is pattern-checked", async () => {
+    const k = await useFake({ profile: "2.x", info: linuxHost });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "system-service",
+        "--name",
+        "svc1",
+        "--system-service-name",
+        "nginx",
+        "--set",
+        "system_service_name=bad name",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("system_service_name must match the service name pattern");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --set system_service_name= exits 2 before connecting", async () => {
+    const k = await useFake({ profile: "2.x", info: linuxHost });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "system-service",
+        "--name",
+        "svc1",
+        "--system-service-name",
+        "nginx",
+        "--set",
+        "system_service_name=",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("system_service_name must be a non-empty string");
+    expect(k.calls).toHaveLength(0);
+  });
+
+  test("add --type system-service exits 2 on a 1.x server after connect", async () => {
+    const k = await useFake();
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "system-service",
+        "--name",
+        "svc1",
+        "--system-service-name",
+        "nginx",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(
+      'type "system-service" needs Uptime Kuma >= 2.1.0; the server reports 1.23.17',
+    );
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --type system-service names the assumed 1.x when no version arrives", async () => {
+    const k = await useFake({ info: null });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "system-service",
+        "--name",
+        "svc1",
+        "--system-service-name",
+        "nginx",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(
+      'type "system-service" needs Uptime Kuma >= 2.1.0; the server sent no version',
+    );
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  // system-service.js first ships in 2.1.0 (upstream #6488): on 2.0.x the row
+  // would store and every check would throw "Unknown Monitor Type"
+  test("add --type system-service exits 2 on a 2.0 server naming 2.1.0", async () => {
+    const k = await useFake({ profile: "2.x", info: { version: "2.0.2" } });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "system-service",
+        "--name",
+        "svc1",
+        "--system-service-name",
+        "nginx",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(
+      'type "system-service" needs Uptime Kuma >= 2.1.0; the server reports 2.0.2',
+    );
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --type system-service runs on 2.1.0, the first release with the type", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      info: { ...linuxHost, version: "2.1.0" },
+    });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "system-service",
+        "--name",
+        "svc1",
+        "--system-service-name",
+        "nginx",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "svc1")).toMatchObject({
+      type: "system-service",
+      system_service_name: "nginx",
+    });
+  });
+
+  // the picker hides the type on the official container image, which has no
+  // systemctl / Get-Service to shell out to
+  test("add --type system-service exits 2 on the container image", async () => {
+    const k = await useFake({ profile: "2.x" });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "system-service",
+        "--name",
+        "svc1",
+        "--system-service-name",
+        "nginx",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("system-service is not available");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("add --type system-service exits 2 on a darwin host", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      info: { ...linuxHost, runtime: { platform: "darwin", arch: "arm64" } },
+    });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "system-service",
+        "--name",
+        "svc1",
+        "--system-service-name",
+        "nginx",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("system-service is not available");
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set type=system-service stores it on a linux host", async () => {
+    const k = await useFake({ profile: "2.x", info: linuxHost, monitors: [http(7, "h")] });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "type=system-service",
+        "--set",
+        "system_service_name=nginx",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "h")).toMatchObject({
+      type: "system-service",
+      system_service_name: "nginx",
+    });
+  });
+
+  test("edit --set type=system-service needs the service name on the merged monitor", async () => {
+    const k = await useFake({ profile: "2.x", info: linuxHost, monitors: [http(7, "h")] });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=system-service"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("system_service_name must be a non-empty string");
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set type=system-service exits 2 on the container image", async () => {
+    const k = await useFake({ profile: "2.x", monitors: [http(7, "h")] });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "edit",
+        "7",
+        "--set",
+        "type=system-service",
+        "--set",
+        "system_service_name=nginx",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("system-service is not available");
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set type=system-service exits 2 on a 1.x server before editMonitor", async () => {
+    const k = await useFake({ monitors: [http(7, "h")] });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "type=system-service"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain(
+      'type "system-service" needs Uptime Kuma >= 2.1.0; the server reports 1.23.17',
+    );
+    expect(editCalls(k)).toHaveLength(0);
+  });
+
+  test("edit --set system_service_name stores a new name on a system-service monitor", async () => {
+    const k = await useFake({
+      profile: "2.x",
+      info: linuxHost,
+      monitors: [
+        {
+          ...http(7, "svc"),
+          type: "system-service",
+          url: null,
+          system_service_name: "nginx",
+        },
+      ],
+    });
+    const r = await run(
+      sb,
+      ["monitors", "edit", "7", "--set", "system_service_name=postgresql"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(0);
+    expect(stored(k, "svc").system_service_name).toBe("postgresql");
+  });
+
+  // the field's own min version is 2.1.0 too — the type gate cannot cover a
+  // --set on another type, so the field gate refuses it on 2.0.x
+  test("add --set system_service_name on a 2.0 server exits 2 naming 2.1.0", async () => {
+    const k = await useFake({ profile: "2.x", info: { version: "2.0.2" } });
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "push", "--name", "p1", "--set", "system_service_name=nginx"],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('"system_service_name" needs Uptime Kuma >= 2.1.0');
+    expect(addCalls(k)).toHaveLength(0);
+  });
+
+  test("--system-service-name refuses another type before connecting", async () => {
+    const k = await useFake({ profile: "2.x", info: linuxHost });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "http",
+        "--name",
+        "h1",
+        "--url",
+        "https://h.example.com",
+        "--system-service-name",
+        "nginx",
+      ],
+      creds(k.url),
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--system-service-name only applies to --type system-service");
+    expect(k.calls).toHaveLength(0);
+  });
+});
+
 describe("monitor timing on Kuma 2.x", () => {
   test("edit of a 2.x ping to a short interval keeps its timeout (no 80% cap)", async () => {
     const k = await useFake({
