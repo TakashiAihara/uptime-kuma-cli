@@ -1,11 +1,16 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import { join, resolve } from "node:path";
 
 import { Server } from "socket.io";
 
+import {
+  SHARD_TEST_LIMIT_MS,
+  testLimitMs,
+  UNSHARDED_TEST_LIMIT_MS,
+} from "../scripts/integration-limit.ts";
 import { sandbox, type Sandbox } from "./helpers/run";
 
 const REPO = resolve(import.meta.dir, "..");
@@ -532,4 +537,42 @@ describe("scripts/integration.ts signal handling", () => {
     expect(log).toContain("bun-test-child ran");
     expect(await runner.output()).toContain("could not remove the compose project");
   }, 30_000);
+});
+
+// scripts/integration-limit.ts picks the suite bound from whether the
+// run is sharded; the bound must also outlast the largest per-test
+// timeout any integration file declares — login.test.ts's 2FA test
+// budgets 780s — or the runner kills a slow-but-legitimate shard
+// before that test's own timeout and its finally cleanup
+describe("scripts/integration-limit.ts", () => {
+  const IT_DIR = join(REPO, "tests", "integration");
+  const maxTestTimeout = () =>
+    Math.max(
+      ...readdirSync(IT_DIR)
+        .filter((f) => f.endsWith(".test.ts"))
+        .flatMap((f) =>
+          [...readFileSync(join(IT_DIR, f), "utf8").matchAll(/\},\s*([\d_]+)\);/g)].map((m) =>
+            Number(m[1]!.replaceAll("_", "")),
+          ),
+        ),
+    );
+
+  test("a sharded run gets the per-shard bound", () => {
+    expect(testLimitMs(true)).toBe(900_000);
+    expect(SHARD_TEST_LIMIT_MS).toBe(900_000);
+  });
+
+  test("an unsharded run keeps the whole-suite bound", () => {
+    expect(testLimitMs(false)).toBe(1_080_000);
+    expect(UNSHARDED_TEST_LIMIT_MS).toBe(1_080_000);
+  });
+
+  // login.test.ts's 2FA test declares the suite's largest budget; a
+  // bound below it would kill the shard before the test's own timeout
+  // fires and its finally cleanup runs
+  test("both bounds outlast the largest per-test timeout in the suite", () => {
+    expect(maxTestTimeout()).toBe(780_000);
+    expect(SHARD_TEST_LIMIT_MS).toBeGreaterThan(maxTestTimeout());
+    expect(UNSHARDED_TEST_LIMIT_MS).toBeGreaterThan(maxTestTimeout());
+  });
 });
