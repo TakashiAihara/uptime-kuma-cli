@@ -23,14 +23,21 @@ const RUNNER = join(REPO, "scripts", "integration.ts");
 // ephemeral port, which becomes UPTIME_KUMA_IT_PORT for the runner.
 
 const FAKE_DOCKER = `#!/bin/sh
-echo "docker $*" >> "$FAKE_LOG"
+args="$*"
 shift 5
+# down is counted before it is logged: the signal tests fire on the logged
+# line, and a down killed between the log write and the count write leaves
+# FAKE_DOWN_COUNT stale — the teardown retry then recomputes the same n and
+# re-arms FAKE_DOWN_SLEEP_AT, stalling until the compose timeout.
+if [ "$1" = "down" ]; then
+  n=0
+  [ -f "$FAKE_DOWN_COUNT" ] && n=$(cat "$FAKE_DOWN_COUNT")
+  n=$((n + 1))
+  echo "$n" > "$FAKE_DOWN_COUNT"
+fi
+echo "docker $args" >> "$FAKE_LOG"
 case "$1" in
   down)
-    n=0
-    [ -f "$FAKE_DOWN_COUNT" ] && n=$(cat "$FAKE_DOWN_COUNT")
-    n=$((n + 1))
-    echo "$n" > "$FAKE_DOWN_COUNT"
     fail=0
     [ -n "$FAKE_DOWN_FAIL_ALWAYS" ] && fail=1
     if [ -n "$FAKE_DOWN_FAIL_AT" ] && [ "$n" = "$FAKE_DOWN_FAIL_AT" ]; then fail=1; fi
