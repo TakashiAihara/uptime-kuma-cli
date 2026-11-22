@@ -594,11 +594,12 @@ describe("scripts/integration.ts signal handling", () => {
 // scripts/integration-limit.ts picks the suite bound from the shard
 // spec's slice count; the shard bound must also outlast the suite's
 // largest per-test timeout — login.test.ts's 2FA test budgets 780s
-// and can start ~3 minutes into its shard — and the whole-suite bound
-// must outlast the measured total plus login.test.ts's whole timeout
-// budget, the worst legitimate case the timings.json refresh run
-// lives under, or the runner kills a slow-but-legitimate run before
-// the test's own timeout and its finally cleanup
+// and can start ~2.6 minutes into its shard — and the whole-suite bound
+// must outlast the measured total minus login.test.ts's share plus
+// that file's whole timeout budget, the worst legitimate case the
+// timings.json refresh run lives under, or the runner kills a
+// slow-but-legitimate run before the test's own timeout and its
+// finally cleanup
 describe("scripts/integration-limit.ts", () => {
   const IT_DIR = join(REPO, "tests", "integration");
   const timeoutArgs = (path: string) =>
@@ -651,7 +652,7 @@ describe("scripts/integration-limit.ts", () => {
   // and the timings.json refresh run lives under this bound
   test("the whole-suite bound outlasts the suite's worst legitimate case", () => {
     const nonLogin = Object.entries(timings())
-      .filter(([f]) => !f.endsWith("login.test.ts"))
+      .filter(([f]) => f !== "tests/integration/login.test.ts")
       .reduce((a, [, v]) => a + v, 0);
     const loginBudget = timeoutArgs(join(IT_DIR, "login.test.ts")).reduce((a, b) => a + b, 0);
     expect(UNSHARDED_TEST_LIMIT_MS).toBeGreaterThan(nonLogin + loginBudget);
