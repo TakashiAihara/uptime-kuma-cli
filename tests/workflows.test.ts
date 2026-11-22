@@ -627,6 +627,7 @@ describe("ci.yml mutation job comment upsert", () => {
 
     expect(run).toContain("actions/workflows/ci.yml/runs");
     expect(run).toContain("branch=");
+    expect(run).toContain("event=pull_request");
     expect(run).toContain("pull_requests");
     expect(run).toContain("env.PR");
     expect(run).toContain("head_repository.full_name");
@@ -698,7 +699,7 @@ if [ ! -f "$file" ]; then printf '{}\\n'; exit 0; fi
 if [ -n "$jqexpr" ]; then jq "$jqexpr" "$file"; else cat "$file"; fi
 `;
 
-  type NewerRun = { id: number; pr: number; status: string };
+  type NewerRun = { id: number; pr: number; status: string; repo?: string };
   // each entry is one comment: a number = the run id it was posted under,
   // "unmarked" = a comment predating the run-id marker, an object = a
   // comment by the given login carrying the given run id
@@ -742,7 +743,7 @@ if [ -n "$jqexpr" ]; then jq "$jqexpr" "$file"; else cat "$file"; fi
       JSON.stringify({
         workflow_runs: newer.map((r) => ({
           id: r.id,
-          head_repository: { full_name: REPO },
+          head_repository: { full_name: r.repo ?? REPO },
           pull_requests: [{ number: r.pr }],
           status: r.status,
         })),
@@ -812,6 +813,12 @@ if [ -n "$jqexpr" ]; then jq "$jqexpr" "$file"; else cat "$file"; fi
     {
       name: "an older in-progress run does not silence the fallback",
       newer: [{ id: 50, pr: 136, status: "in_progress" }],
+      comment: [],
+      expectPost: true,
+    },
+    {
+      name: "a run from a fork does not silence the fallback",
+      newer: [{ id: 200, pr: 136, status: "in_progress", repo: "someone/fork" }],
       comment: [],
       expectPost: true,
     },

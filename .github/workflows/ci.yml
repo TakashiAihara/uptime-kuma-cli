@@ -146,7 +146,9 @@ jobs:
             # no marker behind, and an older run posting late carries an
             # older id, so neither can be mistaken for fresher news. Lookup
             # failures still post: a possibly stale comment is corrected by
-            # the next run, a missing one never is.
+            # the next run, a missing one never is. The pull_requests match
+            # is trusted to mean this PR — a second open PR on the same head
+            # branch is not a shape this repo produces.
             if ! active=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
               --method GET \
               -f branch="$HEAD_REF" \
