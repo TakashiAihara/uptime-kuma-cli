@@ -619,16 +619,19 @@ describe("scripts/integration-limit.ts", () => {
 
   test("a three-slice shard run gets the per-shard bound", () => {
     expect(testLimitMs("2/3")).toBe(1_200_000);
+    expect(testLimitMs("3/4")).toBe(1_200_000);
     expect(SHARD_TEST_LIMIT_MS).toBe(1_200_000);
   });
 
   // "1/1" passes shard validation and bun runs every file as one
-  // slice, and "i/2" covers half the suite — both need the
-  // whole-suite bound like an unset spec
-  test("runs covering half the suite or more keep the whole-suite bound", () => {
+  // slice; n <= 2 leaves slices bigger than any the shard bound was
+  // sized against, so those specs — and an unset one — keep the
+  // whole-suite bound
+  test("whole-suite and coarse-slice runs keep the whole-suite bound", () => {
     expect(testLimitMs(undefined)).toBe(1_500_000);
     expect(testLimitMs("1/1")).toBe(1_500_000);
     expect(testLimitMs("1/2")).toBe(1_500_000);
+    expect(testLimitMs("2/2")).toBe(1_500_000);
     expect(UNSHARDED_TEST_LIMIT_MS).toBe(1_500_000);
   });
 

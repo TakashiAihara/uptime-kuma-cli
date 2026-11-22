@@ -14,9 +14,10 @@
  * UPTIME_KUMA_IT_SHARD="<i>/<n>" forwards the spec to `bun test --shard` so
  * CI legs each run a slice of the file list; --timings reads the measured
  * per-file durations in tests/integration/timings.json to balance the
- * split by time rather than file count, and unsharded runs add
- * --update-timings to refresh that file (a sharded write would keep only
- * the shard's own entries).
+ * split by time rather than file count, and unsharded runs on a 2.x
+ * image add --update-timings to refresh that file (a sharded write
+ * would keep only the shard's own entries, and a 1.x run would
+ * overwrite the 2.x-measured table).
  * `down -v` (which also removes the
  * anonymous data volume) always runs before `up`, clearing a project left by
  * UPTIME_KUMA_IT_KEEP=1 or a killed run when the port matches — the project
