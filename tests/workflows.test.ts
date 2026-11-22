@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import pkg from "../package.json" with { type: "json" };
@@ -549,6 +550,489 @@ describe("ci.yml integration job", () => {
     expect(step["continue-on-error"]).toBeUndefined();
     expect(step.if).toBeUndefined();
   });
+});
+
+// The mutation job is report-only, so its PR comment is the only place a
+// missing report surfaces. A timeout-cancelled job is still the PR's latest
+// word — gating the step on !cancelled() skipped it and left an older report
+// posing as current (#120). The step therefore runs on cancel too, and the
+// script itself stays silent only when a newer run for this PR can still
+// post to the comment.
+describe("ci.yml mutation job comment upsert", () => {
+  const job = () =>
+    (
+      Bun.YAML.parse(read("ci.yml")) as {
+        jobs: {
+          mutation: {
+            permissions?: Record<string, string>;
+            steps: {
+              name?: string;
+              if?: string;
+              shell?: string;
+              env?: Record<string, string>;
+              run?: string;
+            }[];
+          };
+        };
+      }
+    ).jobs.mutation;
+
+  // Exactly one step may carry the upsert name; the assertions below pass
+  // vacuously on an empty match otherwise
+  const upsert = () => {
+    const matches = job().steps.filter((s) => s.name === "upsert PR comment");
+
+    expect(matches.length).toBe(1);
+    return matches[0]!;
+  };
+
+  test("the upsert step runs even when the job was cancelled", () => {
+    const step = upsert();
+
+    expect(step.if).toContain("always()");
+    expect(step.if).toContain("head.repo.full_name");
+    expect(step.if).not.toContain("cancelled()");
+    // the guard pipes gh api into jq; the default `bash -e` shell has no
+    // pipefail, so a failed lookup could still produce output
+    expect(step.shell).toBe("bash");
+    expect(step.env?.HEAD_REF).toBe("${{ github.head_ref }}");
+    expect(step.env?.PR).toBe("${{ github.event.pull_request.number }}");
+  });
+
+  // Listing workflow runs takes actions: read; without it the newer-run
+  // check fails and every fallback degrades to whatever the lookup-failure
+  // default picks
+  test("the job can list workflow runs for the supersede check", () => {
+    expect(job().permissions?.actions).toBe("read");
+  });
+
+  // Failure, timeout and non-superseded cancels all reach the fallback, so
+  // the wording must name every outcome that can get there
+  test("the fallback names failure, timeout and cancellation", () => {
+    const run = upsert().run ?? "";
+
+    expect(run).toContain("failed, timed out, or was cancelled");
+  });
+
+  // A superseded run must not overwrite the newer run's comment. The runs
+  // list exposes each run's pull_requests and status, so one query counts
+  // newer same-PR runs that are still in progress; only the no-report
+  // fallback consults it, since a produced report is real data a newer
+  // in-flight run will overwrite anyway. For finished runs the comment
+  // itself is the signal — for both paths: every upsert stamps the
+  // posting run's id at the end of the body, and only a trailing marker
+  // newer than this run's id counts as fresher news. The upsert re-reads
+  // the stamp on the comment it is about to overwrite, covering a failed
+  // guard lookup and a stamp landing between the two reads.
+  test("the fallback is skipped only when fresher news is in flight or posted", () => {
+    const run = upsert().run ?? "";
+
+    expect(run).toContain("actions/workflows/ci.yml/runs");
+    expect(run).toContain("branch=");
+    expect(run).toContain("event=pull_request");
+    expect(run).toContain("pull_requests");
+    expect(run).toContain("env.PR");
+    expect(run).toContain("head_repository.full_name");
+    expect(run).toContain('(.status // "completed") != "completed"');
+    // all three gh api reads paginate: runs, the stamp lookup, the upsert
+    expect(run.split("--paginate").length - 1).toBe(3);
+    // the stamp is captured only at the end of the body, twice: the guard
+    // lookup and the upsert re-check
+    expect(run.split('capture("<!-- mutation-run: ').length - 1).toBe(2);
+    expect(run).toContain('"$commented" -gt "$GITHUB_RUN_ID"');
+    expect(run).toContain('"$existing_rid" -gt "$GITHUB_RUN_ID"');
+    expect(run).toContain('--arg rid "$GITHUB_RUN_ID"');
+    expect(run).toContain('mutation-run: " + $rid + " -->"');
+    // the runs lookup and the fallback body stay inside the no-report
+    // branch; the stamp check sits outside it so reports yield too
+    expect(run.split('if [ ! -f "$report" ]').length - 1).toBe(2);
+    const runsAt = run.indexOf("actions/workflows/ci.yml/runs");
+    // runs must be sampled before comments: a completed run has already
+    // finished its upsert, so its marker is guaranteed visible afterwards
+    expect(runsAt).toBeLessThan(run.indexOf("issues/$PR/comments"));
+    const stampAt = run.indexOf('"$commented" -gt "$GITHUB_RUN_ID"');
+    expect(runsAt).toBeLessThan(stampAt);
+    expect(stampAt).toBeLessThan(run.indexOf("The mutation run produced no report"));
+  });
+});
+
+// String pins cannot tell a working guard from an inverted one, so the run
+// block is executed against a stubbed gh that serves fixture JSON and applies
+// each --jq filter with the real jq — the same way GitHub Actions runs it.
+// Skipped where jq is missing; CI runners always have it.
+const jqPath = Bun.which("jq");
+(jqPath ? describe : describe.skip)("ci.yml mutation upsert guard behavior", () => {
+  const OUR_RUN = 100;
+
+  const upsertRun = () => {
+    const doc = Bun.YAML.parse(read("ci.yml")) as {
+      jobs: { mutation: { steps: { name?: string; run?: string }[] } };
+    };
+    const step = doc.jobs.mutation.steps.find((s) => s.name === "upsert PR comment");
+    if (!step?.run) throw new Error("upsert PR comment step not found");
+    return step.run;
+  };
+
+  // Mirrors gh api: dispatches on the endpoint, applies --jq with real jq,
+  // prints gh's error body on stdout with a failing exit status, and appends
+  // any --input payload to the call log so tests can see the posted body
+  const GH_STUB = `#!/usr/bin/env bash
+echo "$*" >> "$GH_LOG"
+endpoint=""; jqexpr=""; input=""; prev=""
+for a in "$@"; do
+  [ "$prev" = "--jq" ] && jqexpr="$a"
+  [ "$prev" = "--input" ] && input="$a"
+  case "$a" in repos/*) endpoint="$a" ;; esac
+  prev="$a"
+done
+if [ -n "$input" ] && [ -f "$input" ]; then cat "$input" >> "$GH_LOG"; fi
+case "$endpoint" in
+  */issues/*/comments*)
+    if [ -f "$FAKE_DIR/fail-comments" ]; then
+      rm -f "$FAKE_DIR/fail-comments"
+      printf '{"message":"Not Found","status":"404"}'
+      exit 1
+    fi ;;
+esac
+if [ -f "$FAKE_DIR/fail-runs" ] && [[ "$endpoint" == */actions/workflows/ci.yml/runs ]]; then
+  printf '{"message":"Not Found","status":"404"}'
+  exit 1
+fi
+file=""
+case "$endpoint" in
+  */actions/workflows/ci.yml/runs) file="$FAKE_DIR/runs.json" ;;
+  */issues/*/comments*) file="$FAKE_DIR/comments.json" ;;
+  *) printf '{}\\n'; exit 0 ;;
+esac
+if [ ! -f "$file" ]; then printf '{}\\n'; exit 0; fi
+if [ -n "$jqexpr" ]; then jq "$jqexpr" "$file"; else cat "$file"; fi
+`;
+
+  type NewerRun = { id: number; pr: number; status: string; repo?: string };
+  // each entry is one comment: a number = the run id it was posted under,
+  // "unmarked" = a comment predating the run-id marker, an object = a
+  // comment by the given login carrying the given run id; `decoy` puts a
+  // second, fake marker inside the report body before the real trailing
+  // one, the way quoted marker text in mutant output would appear
+  type CommentSpec = number | "unmarked" | { rid: number; login: string; decoy?: number };
+  type Options = {
+    failRunsList?: boolean;
+    failComments?: boolean;
+    withReport?: boolean;
+    runsPages?: NewerRun[][];
+    commentPages?: CommentSpec[][];
+  };
+
+  const commentFixture = (specs: CommentSpec[]) =>
+    specs.map((spec, i) => {
+      const base = { id: 7 + i, user: { login: "github-actions[bot]" } };
+      if (spec === "unmarked") return { ...base, body: "<!-- mutation-testing --> old" };
+      if (typeof spec === "object") {
+        const decoy =
+          spec.decoy === undefined
+            ? ""
+            : `\n\n<!-- mutation-run: ${spec.decoy} -->\nreport quotes the marker format`;
+        return {
+          ...base,
+          user: { login: spec.login },
+          body: `<!-- mutation-testing --> report${decoy}\n\n<!-- mutation-run: ${spec.rid} -->`,
+        };
+      }
+      return {
+        ...base,
+        body: `<!-- mutation-testing --> report\n\n<!-- mutation-run: ${spec} -->`,
+      };
+    });
+
+  const runsPage = (runs: NewerRun[]) =>
+    JSON.stringify({
+      workflow_runs: runs.map((r) => ({
+        id: r.id,
+        head_repository: { full_name: r.repo ?? REPO },
+        pull_requests: [{ number: r.pr }],
+        status: r.status,
+      })),
+    });
+
+  const outcome = (newer: NewerRun[], comment: CommentSpec[], options: Options = {}) => {
+    const dir = mkdtempSync(join(tmpdir(), "mut-upsert-"));
+    const binDir = join(dir, "bin");
+    const caseDir = join(dir, "case");
+    const callsLog = join(dir, "calls.log");
+    mkdirSync(binDir);
+    mkdirSync(caseDir);
+    writeFileSync(join(binDir, "gh"), GH_STUB, { mode: 0o755 });
+    writeFileSync(join(caseDir, "upsert.sh"), upsertRun());
+    if (options.withReport) {
+      writeFileSync(
+        join(caseDir, "mutation-report.md"),
+        "<!-- mutation-testing -->\nREAL MUTATION REPORT\n",
+      );
+    }
+    // --paginate makes gh emit one JSON document per page; concatenating
+    // them here is what the real command's stdout looks like
+    writeFileSync(
+      join(caseDir, "runs.json"),
+      options.runsPages ? options.runsPages.map(runsPage).join("\n") : runsPage(newer),
+    );
+    writeFileSync(
+      join(caseDir, "comments.json"),
+      options.commentPages
+        ? options.commentPages.map((p) => JSON.stringify(commentFixture(p))).join("\n")
+        : JSON.stringify(commentFixture(comment)),
+    );
+    if (options.failRunsList) writeFileSync(join(caseDir, "fail-runs"), "");
+    if (options.failComments) writeFileSync(join(caseDir, "fail-comments"), "");
+
+    const result = Bun.spawnSync(
+      ["bash", "--noprofile", "--norc", "-eo", "pipefail", "upsert.sh"],
+      {
+        cwd: caseDir,
+        env: {
+          ...process.env,
+          PATH: `${binDir}:${process.env.PATH ?? ""}`,
+          FAKE_DIR: caseDir,
+          GH_LOG: callsLog,
+          GITHUB_REPOSITORY: REPO,
+          GITHUB_RUN_ID: String(OUR_RUN),
+          GITHUB_SERVER_URL: "https://github.com",
+          PR: "136",
+          HEAD_REF: "fix/mutation-fallback-timeout",
+          GH_TOKEN: "fake",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const reportPath = join(caseDir, "mutation-report.md");
+    const calls = existsSync(callsLog) ? readFileSync(callsLog, "utf8") : "";
+    return {
+      exitCode: result.exitCode,
+      fallbackWritten:
+        existsSync(reportPath) &&
+        readFileSync(reportPath, "utf8").includes("The mutation run produced no report"),
+      commented: /-X (POST|PATCH)/.test(calls),
+      stamped: calls.includes(`mutation-run: ${OUR_RUN}`),
+      guardRan: calls.includes("actions/workflows"),
+      runsPaginated: /ci\.yml\/runs[^\n]*--paginate/.test(calls),
+      calls,
+    };
+  };
+
+  type Case = {
+    name: string;
+    newer: NewerRun[];
+    comment: CommentSpec[];
+    options?: Options;
+    expectPost: boolean;
+    expectFallback?: boolean;
+    expectPatchId?: number;
+  };
+
+  const cases: Case[] = [
+    { name: "no newer run posts the fallback", newer: [], comment: [], expectPost: true },
+    {
+      name: "an in-progress run for this PR silences the fallback",
+      newer: [{ id: 200, pr: 136, status: "in_progress" }],
+      comment: [],
+      expectPost: false,
+    },
+    {
+      name: "a newer run for another PR does not silence the fallback",
+      newer: [{ id: 200, pr: 137, status: "in_progress" }],
+      comment: [],
+      expectPost: true,
+    },
+    {
+      name: "an older in-progress run does not silence the fallback",
+      newer: [{ id: 50, pr: 136, status: "in_progress" }],
+      comment: [],
+      expectPost: true,
+    },
+    {
+      name: "a run from a fork does not silence the fallback",
+      newer: [{ id: 200, pr: 136, status: "in_progress", repo: "someone/fork" }],
+      comment: [],
+      expectPost: true,
+    },
+    {
+      name: "a comment stamped by a newer run silences the fallback",
+      newer: [{ id: 200, pr: 136, status: "completed" }],
+      comment: [200],
+      expectPost: false,
+    },
+    {
+      name: "the newest stamp among several comments decides",
+      newer: [{ id: 200, pr: 136, status: "completed" }],
+      comment: [50, 200],
+      expectPost: false,
+    },
+    {
+      name: "a comment stamped by an older run does not silence the fallback",
+      newer: [{ id: 200, pr: 136, status: "completed" }],
+      comment: [50],
+      expectPost: true,
+    },
+    {
+      name: "a legacy comment without a run marker does not silence the fallback",
+      newer: [{ id: 200, pr: 136, status: "completed" }],
+      comment: ["unmarked"],
+      expectPost: true,
+    },
+    {
+      name: "a marker on a non-bot comment does not silence the fallback",
+      newer: [{ id: 200, pr: 136, status: "completed" }],
+      comment: [{ rid: 999999, login: "someone" }],
+      expectPost: true,
+    },
+    {
+      name: "a newer run that finished without posting does not silence it",
+      newer: [{ id: 200, pr: 136, status: "completed" }],
+      comment: [],
+      expectPost: true,
+    },
+    {
+      name: "a run deferred to one that never notified still posts",
+      newer: [
+        { id: 200, pr: 136, status: "completed" },
+        { id: 300, pr: 136, status: "completed" },
+      ],
+      comment: [],
+      expectPost: true,
+    },
+    {
+      name: "an in-progress run for another PR does not hide a dead newer run",
+      newer: [
+        { id: 200, pr: 136, status: "completed" },
+        { id: 300, pr: 137, status: "in_progress" },
+      ],
+      comment: [],
+      expectPost: true,
+    },
+    {
+      name: "a failed runs lookup still posts the fallback",
+      newer: [{ id: 200, pr: 136, status: "in_progress" }],
+      comment: [],
+      options: { failRunsList: true },
+      expectPost: true,
+    },
+    {
+      name: "a failed comments lookup still posts when nothing newer is stamped",
+      newer: [{ id: 200, pr: 136, status: "completed" }],
+      comment: [50],
+      options: { failComments: true },
+      expectPost: true,
+    },
+    {
+      name: "a failed comments lookup does not overwrite a newer stamp",
+      newer: [{ id: 200, pr: 136, status: "completed" }],
+      comment: [200],
+      options: { failComments: true },
+      expectPost: false,
+      // the fallback body is written before the upsert re-check stops it
+      expectFallback: true,
+    },
+    {
+      name: "a failed comments lookup still posts when no comment exists",
+      newer: [],
+      comment: [],
+      options: { failComments: true },
+      expectPost: true,
+    },
+    {
+      name: "a marker quoted inside a report body does not count as the poster",
+      newer: [{ id: 200, pr: 136, status: "completed" }],
+      comment: [{ rid: 200, login: "github-actions[bot]", decoy: 50 }],
+      expectPost: false,
+    },
+    {
+      name: "a high marker quoted inside a report body does not suppress the fallback",
+      newer: [{ id: 200, pr: 136, status: "completed" }],
+      comment: [{ rid: 50, login: "github-actions[bot]", decoy: 999999 }],
+      expectPost: true,
+    },
+    {
+      name: "an in-progress run on a later runs page still silences the fallback",
+      newer: [],
+      comment: [],
+      options: {
+        runsPages: [
+          [{ id: 150, pr: 136, status: "completed" }],
+          [{ id: 200, pr: 136, status: "in_progress" }],
+        ],
+      },
+      expectPost: false,
+    },
+    {
+      name: "a newer stamp on a later comments page still silences the fallback",
+      newer: [{ id: 200, pr: 136, status: "completed" }],
+      comment: [],
+      options: { commentPages: [[50], [200]] },
+      expectPost: false,
+    },
+    {
+      name: "the upsert re-check takes the newest stamp across comments",
+      newer: [{ id: 200, pr: 136, status: "completed" }],
+      comment: [50, 200],
+      options: { failComments: true },
+      expectPost: false,
+      expectFallback: true,
+    },
+    {
+      name: "posting with several comments patches the first one",
+      newer: [{ id: 200, pr: 136, status: "completed" }],
+      comment: [50, 60],
+      expectPost: true,
+      expectPatchId: 7,
+    },
+    {
+      name: "a produced report posts when the newest stamp is older",
+      newer: [{ id: 200, pr: 136, status: "completed" }],
+      comment: [50],
+      options: { withReport: true },
+      expectPost: true,
+      expectFallback: false,
+    },
+    {
+      name: "a produced report still posts while a newer run is in flight",
+      newer: [{ id: 200, pr: 136, status: "in_progress" }],
+      comment: [],
+      options: { withReport: true },
+      expectPost: true,
+      expectFallback: false,
+    },
+    {
+      name: "a produced report yields to a comment stamped by a newer run",
+      newer: [{ id: 200, pr: 136, status: "completed" }],
+      comment: [200],
+      options: { withReport: true },
+      expectPost: false,
+    },
+  ];
+
+  for (const c of cases) {
+    test(c.name, () => {
+      const got = outcome(c.newer, c.comment, c.options);
+
+      expect(got.exitCode).toBe(0);
+      expect(got.commented).toBe(c.expectPost);
+      expect(got.stamped).toBe(c.expectPost);
+      expect(got.fallbackWritten).toBe(c.expectFallback ?? c.expectPost);
+      expect(got.guardRan).toBe(!c.options?.withReport);
+      expect(got.runsPaginated).toBe(!c.options?.withReport);
+      // the stamp check runs on the report path too; cases silenced by an
+      // in-progress run exit before any comments call
+      if (c.options?.withReport) {
+        expect(got.calls.includes("issues/136/comments")).toBe(true);
+      }
+      if (c.options?.withReport && c.expectPost) {
+        expect(got.calls).toContain("REAL MUTATION REPORT");
+      }
+      if (c.expectPatchId !== undefined) {
+        expect(got.calls).toContain(`issues/comments/${c.expectPatchId}`);
+      }
+    });
+  }
 });
 
 describe("release.yml: publish the checked commit and artifact as is (second round of #13)", () => {

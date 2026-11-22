@@ -127,33 +127,41 @@ describe("buildReport", () => {
   });
 
   test("caps the survivor list below GitHub's comment size limit", () => {
-    // Long snippets across many files: a count cap alone can still overflow.
-    const survivors = Array.from({ length: 250 }, (_, i) => ({
+    // Short snippets across many files pack the survivor list right up to
+    // the comment budget, so the stamp reservation is what keeps the
+    // appended run-id marker under GitHub's limit.
+    const survivors = Array.from({ length: 200 }, (_, i) => ({
       id: i + 1,
       slug: "CR",
       line: i + 1,
-      oldText: "x".repeat(200),
-      newText: "y".repeat(200),
+      oldText: "x",
+      newText: "y",
     }));
     const files = Array.from({ length: 10 }, (_, i) => ({
       file: `src/commands/file-${i}-with-a-rather-long-name.ts`,
-      selected: 25,
-      survivors: survivors.slice(0, 25),
+      selected: 200,
+      survivors,
     }));
     const md = buildReport({
       base: "abc1234",
       head: "def5678",
       changedCount: 10,
       files,
-      counts: { caught: 0, uncaught: 250, other: 0 },
+      counts: { caught: 0, uncaught: 2000, other: 0 },
       errors: [],
     });
     const shown = md.match(/- line /g)?.length ?? 0;
     expect(shown).toBeGreaterThan(0);
-    expect(shown).toBeLessThan(250);
+    expect(shown).toBeLessThan(2000);
     expect(md).toContain("more surviving mutant(s)");
     expect(md).toContain("mutation job log");
-    expect(md.length).toBeLessThan(65536);
+    // the upsert step appends the run-id stamp after this file is written;
+    // the report plus that stamp must stay under GitHub's comment limit,
+    // and the leftover margin must stay inside the reserve headroom so the
+    // survivor budget is actually spent
+    const stamp = "\n\n<!-- mutation-run: 99999999999 -->";
+    expect(md.length + stamp.length).toBeLessThanOrEqual(65536);
+    expect(65536 - md.length).toBeLessThan(208);
   });
 
   test("shows every survivor when they fit the comment budget", () => {
