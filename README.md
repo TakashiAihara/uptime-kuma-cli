@@ -63,6 +63,7 @@ uptime-kuma-cli monitors add --type json-query --name "relay jp" --url https://a
   --json-path '$[hostname="jp-1"].active' --expected-value true --proxy-id 2
 uptime-kuma-cli monitors add --type port --name "ssh" --hostname 10.0.0.5 --port 22
 uptime-kuma-cli monitors add --type push --name "nightly job" --paused --notifications-from 14
+uptime-kuma-cli monitors add --type http --name "api" --url https://api.example.com --notification-id 7 --no-default-notifications
 uptime-kuma-cli monitors add --type group --name "edge"
 uptime-kuma-cli monitors add --type ping --name "gw" --hostname 192.0.2.1 --parent 12 --paused
 uptime-kuma-cli monitors add --type dns --name "resolver" --hostname example.com --set 'dns_resolve_type="AAAA"'
@@ -159,7 +160,7 @@ uptime-kuma-cli api-keys delete 3 --yes
 - On Kuma 2.x, `monitors add` sends `conditions: []`, `rabbitmqNodes: []` and `jsonPathOperator: "=="` (like the 2.x UI, for every type) unless `--config-file` / `--set` give them; `--json-path-operator <op>` (`==`, `!=`, `<`, `<=`, `>`, `>=` or `contains`) sets the operator of a json-query monitor and is ignored on other types. `monitors edit` gives a monitor that is or becomes json-query `==` when it has no operator. On Kuma 1.x, `--json-path-operator` (on add only for json-query; on edit always, since the type is not known yet) and every other 2.x-only field exit 2
 - Monitor timing follows the server version detected at login: `interval` must be 20–2073600 s on Kuma 1.x but only >= 1 s on 2.x (no maximum), `timeout` must be positive on 1.x (0 would become interval × 800 s) but may be 0 on 2.x (Kuma turns it into 80% of the interval), and `retryInterval` must be >= 1 on 2.x. An unset `timeout` on `monitors add` defaults to the 2.x UI value — 10 for ping, 1 for kafka-producer, 48 for every other type — and 48 on 1.x. The timeout is capped at 80% of the interval, except a ping on 2.x, whose timeout must be 1–300 s and at least `ping_per_request_timeout` (2 by default) or the command exits 2
 - `monitors stats` reports Kuma's pushed stats like `beats latest` waits for heartbeats: `uptime24h` / `uptime30d` are 0–1 ratios over the 24h / 30d windows, `avgPing` is null when no beat has a ping, `certExpiresAt` / `certDaysRemaining` are null without a certificate — the wait for a monitor's certificate ends 500 ms after its own 30d uptime arrives, and missing stats (not a missing certificate) exit 2 naming the monitors
-- New monitors get the notifications marked default; every type except port / push gets the proxy flagged `default` (proxyId), and `--proxy-id` overrides it
+- New monitors get the notifications marked default — `monitors add --no-default-notifications` leaves them off, so `--notification-id` / `--notifications-from` then decide the whole list, and the add output's `notificationIDList` shows what was attached either way; every type except port / push gets the proxy flagged `default` (proxyId), and `--proxy-id` overrides it
 - Each command logs in once — a 2FA account can take up to four `login` attempts inside it; Kuma allows 20 logins per minute per instance, so pace long loops. Accounts with 2FA log in via `UPTIME_KUMA_TOTP`, `totp_command` or `totp_secret_command` (see Configuration)
 
 ## Exit codes

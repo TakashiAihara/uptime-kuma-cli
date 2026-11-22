@@ -296,7 +296,13 @@ describe("monitors add", () => {
       creds(kuma.url),
     );
     expect(r.code).toBe(0);
-    expect(r.json()).toEqual({ id: 10, name: "new-site", type: "http", active: true });
+    expect(r.json()).toEqual({
+      id: 10,
+      name: "new-site",
+      type: "http",
+      active: true,
+      notificationIDList: [],
+    });
     const [call] = addCalls();
     const sent = call!.args[0] as Record<string, any>;
     expect(sent.url).toBe("https://new.example.com");
@@ -480,6 +486,104 @@ describe("monitors add", () => {
       "5": true,
       "6": true,
     });
+    expect(r.json().notificationIDList).toEqual([3, 5, 6]);
+  });
+
+  test("--no-default-notifications sends only the named notification ids", async () => {
+    kuma.state.notifications = [
+      { id: 6, name: "def", active: true, isDefault: true, userId: 1, config: "{}" },
+      { id: 8, name: "other", active: true, isDefault: false, userId: 1, config: "{}" },
+    ];
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "push",
+        "--name",
+        "nd1",
+        "--notification-id",
+        "8",
+        "--no-default-notifications",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.notificationIDList).toEqual({ "8": true });
+    expect(r.json().notificationIDList).toEqual([8]);
+  });
+
+  test("--no-default-notifications alone sends an empty notificationIDList", async () => {
+    kuma.state.notifications = [
+      { id: 6, name: "def", active: true, isDefault: true, userId: 1, config: "{}" },
+    ];
+    const r = await run(
+      sb,
+      ["monitors", "add", "--type", "push", "--name", "nd0", "--no-default-notifications"],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.notificationIDList).toEqual({});
+    expect(r.json().notificationIDList).toEqual([]);
+  });
+
+  test("--no-default-notifications keeps the --notifications-from list without defaults", async () => {
+    kuma.state.notifications.push({
+      id: 6,
+      name: "def",
+      active: true,
+      isDefault: true,
+      userId: 1,
+      config: "{}",
+    });
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "push",
+        "--name",
+        "ndf",
+        "--notifications-from",
+        "7",
+        "--no-default-notifications",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.notificationIDList).toEqual({ "3": true, "5": true });
+    expect(r.json().notificationIDList).toEqual([3, 5]);
+  });
+
+  test("a hatch notificationIDList still wins over --no-default-notifications", async () => {
+    kuma.state.notifications = [
+      { id: 6, name: "def", active: true, isDefault: true, userId: 1, config: "{}" },
+      { id: 8, name: "other", active: true, isDefault: false, userId: 1, config: "{}" },
+    ];
+    const r = await run(
+      sb,
+      [
+        "monitors",
+        "add",
+        "--type",
+        "push",
+        "--name",
+        "ndh",
+        "--no-default-notifications",
+        "--set",
+        "notificationIDList=[8]",
+      ],
+      creds(kuma.url),
+    );
+    expect(r.code).toBe(0);
+    const sent = addCalls()[0]!.args[0] as Record<string, any>;
+    expect(sent.notificationIDList).toEqual({ "8": true });
+    expect(r.json().notificationIDList).toEqual([8]);
   });
 
   test.each([[["--notification-id", "99"]], [["--set", "notificationIDList=[99]"]]])(
@@ -674,6 +778,7 @@ describe("monitors add", () => {
     const sent = addCalls()[0]!.args[0] as Record<string, any>;
     expect(sent.notificationIDList).toEqual({ "6": true });
     expect(sent.proxyId).toBe(3);
+    expect(r.json().notificationIDList).toEqual([6]);
   });
 
   test("push monitors get default notifications but no proxy", async () => {

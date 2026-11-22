@@ -130,6 +130,95 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("monitors (real Kuma)", () => {
     expect(r.json()).toEqual({ id: pushId, name: "it-push", skipped: true });
   }, 120_000);
 
+  test("--notification-id attaches defaults unless --no-default-notifications", async () => {
+    const f = join(sb.dir, "webhook.json");
+    writeFileSync(
+      f,
+      JSON.stringify({
+        webhookURL: "http://it-user:it-pass@127.0.0.1:9/",
+        webhookContentType: "json",
+      }),
+    );
+    const def = await cliRun(sb, [
+      "notifications",
+      "add",
+      "--name",
+      "it-notif-def",
+      "--type",
+      "webhook",
+      "--default",
+      "--config-file",
+      f,
+    ]);
+    expect(def.code).toBe(0);
+    const other = await cliRun(sb, [
+      "notifications",
+      "add",
+      "--name",
+      "it-notif-other",
+      "--type",
+      "webhook",
+      "--config-file",
+      f,
+    ]);
+    expect(other.code).toBe(0);
+    const defId = def.json().id;
+    const otherId = other.json().id;
+
+    const list = await cliRun(sb, ["notifications", "list"]);
+    expect(list.code).toBe(0);
+    const rows = list.json() as { id: number; isDefault: boolean }[];
+    expect(rows.find((n) => n.id === defId)?.isDefault).toBe(true);
+    expect(rows.find((n) => n.id === otherId)?.isDefault).toBe(false);
+
+    const both = await cliRun(sb, [
+      "monitors",
+      "add",
+      "--type",
+      "push",
+      "--name",
+      "it-notif-both",
+      "--notification-id",
+      String(otherId),
+      "--paused",
+    ]);
+    expect(both.code).toBe(0);
+    const expected = [defId, otherId].sort((a, b) => a - b);
+    expect(both.json().notificationIDList).toEqual(expected);
+
+    const only = await cliRun(sb, [
+      "monitors",
+      "add",
+      "--type",
+      "push",
+      "--name",
+      "it-notif-only",
+      "--notification-id",
+      String(otherId),
+      "--no-default-notifications",
+      "--paused",
+    ]);
+    expect(only.code).toBe(0);
+    expect(only.json().notificationIDList).toEqual([otherId]);
+
+    // get reads the stored list back, so a server-side rewrite cannot pass
+    const gBoth = await cliRun(sb, ["monitors", "get", String(both.json().id)]);
+    expect(gBoth.code).toBe(0);
+    expect(gBoth.json().notificationIDList).toEqual(expected);
+    const gOnly = await cliRun(sb, ["monitors", "get", String(only.json().id)]);
+    expect(gOnly.code).toBe(0);
+    expect(gOnly.json().notificationIDList).toEqual([otherId]);
+
+    for (const id of [both.json().id, only.json().id]) {
+      const d = await cliRun(sb, ["monitors", "delete", String(id), "--yes"]);
+      expect(d.code).toBe(0);
+    }
+    for (const id of [defId, otherId]) {
+      const d = await cliRun(sb, ["notifications", "delete", String(id), "--yes"]);
+      expect(d.code).toBe(0);
+    }
+  }, 300_000);
+
   test("list --name it- shows the monitors created above", async () => {
     const r = await cliRun(sb, ["monitors", "list", "--name", "it-"]);
     expect(r.code).toBe(0);
