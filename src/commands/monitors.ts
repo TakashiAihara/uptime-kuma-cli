@@ -2091,8 +2091,17 @@ export function registerMonitors(program: Command): void {
     .option("--resend-interval <n>", "resend interval")
     .option("--timeout <seconds>", "request timeout")
     .option("--proxy-id <id>", "proxy id")
-    .option("--notification-id <id|name>", "notification id or name (repeatable)", collect, [])
-    .option("--notifications-from <monitorId|name>", "copy notifications from a monitor")
+    .option(
+      "--notification-id <id|name>",
+      "notification id or name (repeatable); default notifications are added too unless --no-default-notifications",
+      collect,
+      [],
+    )
+    .option(
+      "--notifications-from <monitorId|name>",
+      "copy notifications from a monitor; default notifications are added too unless --no-default-notifications",
+    )
+    .option("--no-default-notifications", "do not attach notifications marked as default")
     .option("--parent <groupId|name>", "parent group monitor id or name")
     .option("--paused", "create the monitor paused")
     .option("--push-token <token>", "push token (push type)")
@@ -2480,10 +2489,17 @@ export function registerMonitors(program: Command): void {
         }
       }
 
-      const ids: number[] = s
-        .notifications()
-        .filter((n) => n.isDefault === true)
-        .map((n) => n.id);
+      // Like the UI's Add flow, every notification marked default attaches
+      // unless --no-default-notifications opts out; the flag and the two
+      // notification options compose, and a hatch notificationIDList still
+      // replaces the whole list below.
+      const ids: number[] =
+        opts.defaultNotifications === false
+          ? []
+          : s
+              .notifications()
+              .filter((n) => n.isDefault === true)
+              .map((n) => n.id);
       if (notificationsFromArg !== undefined) {
         const srcId = s.resolveMonitorId(notificationsFromArg);
         const src = s.monitorById(srcId);
@@ -2728,6 +2744,7 @@ export function registerMonitors(program: Command): void {
         name,
         type,
         active: monitor.active !== false,
+        notificationIDList: notificationIdArray(monitor.notificationIDList),
       };
       if (pushToken !== undefined) {
         out.pushToken = pushToken;
