@@ -510,7 +510,7 @@ describe("scripts/integration.ts signal handling", () => {
     expect(bunTest).toContain("tests/integration --shard=1/1 --timings=");
     expect(bunTest).not.toContain("--update-timings");
     expect(await runner.exited).toBe(0);
-    expect(await runner.output()).toContain("bun test bound: 25 minutes");
+    expect(await runner.output()).toContain("bun test bound: 35 minutes");
   }, 30_000);
 
   // --update-timings rides only an unsharded run on a 2.x image: it is
@@ -529,7 +529,7 @@ describe("scripts/integration.ts signal handling", () => {
       expect(bunTest).not.toContain("--shard=");
       expect(bunTest).toContain("--update-timings");
       expect(await runner.exited).toBe(0);
-      expect(await runner.output()).toContain("bun test bound: 25 minutes");
+      expect(await runner.output()).toContain("bun test bound: 35 minutes");
     } finally {
       await kuma2.close();
     }
@@ -549,7 +549,7 @@ describe("scripts/integration.ts signal handling", () => {
     expect(await runner.exited).toBe(0);
     const out = await runner.output();
     expect(out).toContain("not refreshing timings.json");
-    expect(out).toContain("bun test bound: 25 minutes");
+    expect(out).toContain("bun test bound: 35 minutes");
   }, 30_000);
 
   test("invalid UPTIME_KUMA_IT_SHARD values fail fast", async () => {
@@ -595,20 +595,21 @@ describe("scripts/integration.ts signal handling", () => {
 // spec's slice count; the shard bound must also outlast the suite's
 // largest per-test timeout — login.test.ts's 2FA test budgets 780s
 // and can start ~3 minutes into its shard — and the whole-suite bound
-// must outlast the measured suite total the timings.json refresh run
+// must outlast the measured total plus login.test.ts's whole timeout
+// budget, the worst legitimate case the timings.json refresh run
 // lives under, or the runner kills a slow-but-legitimate run before
 // the test's own timeout and its finally cleanup
 describe("scripts/integration-limit.ts", () => {
   const IT_DIR = join(REPO, "tests", "integration");
+  const timeoutArgs = (path: string) =>
+    [...readFileSync(path, "utf8").matchAll(/\},\s*([\d_]+)\);/g)].map((m) =>
+      Number(m[1]!.replaceAll("_", "")),
+    );
   const maxTestTimeout = () =>
     Math.max(
       ...readdirSync(IT_DIR)
         .filter((f) => f.endsWith(".test.ts"))
-        .flatMap((f) =>
-          [...readFileSync(join(IT_DIR, f), "utf8").matchAll(/\},\s*([\d_]+)\);/g)].map((m) =>
-            Number(m[1]!.replaceAll("_", "")),
-          ),
-        ),
+        .flatMap((f) => timeoutArgs(join(IT_DIR, f))),
     );
   const timings = () =>
     (
@@ -628,11 +629,11 @@ describe("scripts/integration-limit.ts", () => {
   // sized against, so those specs — and an unset one — keep the
   // whole-suite bound
   test("whole-suite and coarse-slice runs keep the whole-suite bound", () => {
-    expect(testLimitMs(undefined)).toBe(1_500_000);
-    expect(testLimitMs("1/1")).toBe(1_500_000);
-    expect(testLimitMs("1/2")).toBe(1_500_000);
-    expect(testLimitMs("2/2")).toBe(1_500_000);
-    expect(UNSHARDED_TEST_LIMIT_MS).toBe(1_500_000);
+    expect(testLimitMs(undefined)).toBe(2_100_000);
+    expect(testLimitMs("1/1")).toBe(2_100_000);
+    expect(testLimitMs("1/2")).toBe(2_100_000);
+    expect(testLimitMs("2/2")).toBe(2_100_000);
+    expect(UNSHARDED_TEST_LIMIT_MS).toBe(2_100_000);
   });
 
   // login.test.ts's 2FA test declares the suite's largest budget; a
@@ -643,11 +644,17 @@ describe("scripts/integration-limit.ts", () => {
     expect(SHARD_TEST_LIMIT_MS).toBeGreaterThan(maxTestTimeout());
   });
 
-  // the unsharded timings.json refresh run lives under this bound; it
-  // must stay above the measured suite total or refreshes start dying
-  test("the whole-suite bound outlasts the measured suite total", () => {
-    const total = Object.values(timings()).reduce((a, b) => a + b, 0);
-    expect(UNSHARDED_TEST_LIMIT_MS).toBeGreaterThan(total);
+  // an unsharded run places every file end to end, so its worst
+  // legitimate case is the measured total minus login.test.ts's
+  // share plus that file's whole declared timeout budget — the 2FA
+  // test's 780s and the wrong-password test's 120s back to back —
+  // and the timings.json refresh run lives under this bound
+  test("the whole-suite bound outlasts the suite's worst legitimate case", () => {
+    const nonLogin = Object.entries(timings())
+      .filter(([f]) => !f.endsWith("login.test.ts"))
+      .reduce((a, [, v]) => a + v, 0);
+    const loginBudget = timeoutArgs(join(IT_DIR, "login.test.ts")).reduce((a, b) => a + b, 0);
+    expect(UNSHARDED_TEST_LIMIT_MS).toBeGreaterThan(nonLogin + loginBudget);
   });
 
   // bun merges --update-timings into the existing table, so entries
