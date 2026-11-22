@@ -23,7 +23,11 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("notifications (real Kuma)", ()
     const f = join(sb.dir, "webhook.json");
     writeFileSync(
       f,
-      JSON.stringify({ webhookURL: "http://127.0.0.1:9/", webhookContentType: "json" }),
+      JSON.stringify({
+        webhookURL: "http://it-user:it-pass@127.0.0.1:9/",
+        webhookContentType: "json",
+        webhookAdditionalHeaders: '{"Authorization":"Bearer it-header-secret"}',
+      }),
     );
     const r = await cliRun(sb, [
       "notifications",
@@ -47,6 +51,36 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("notifications (real Kuma)", ()
     expect(r.code).toBe(0);
     const row = r.json().find((n: any) => n.id === notifId);
     expect(row).toMatchObject({ name: "it-webhook", type: "webhook" });
+  }, 120_000);
+
+  test("get prints the stored config with secrets redacted", async () => {
+    const r = await cliRun(sb, ["notifications", "get", String(notifId)]);
+    expect(r.code).toBe(0);
+    expect(r.json()).toEqual({
+      id: notifId,
+      active: true,
+      name: "it-webhook",
+      type: "webhook",
+      isDefault: false,
+      applyExisting: false,
+      webhookURL: "http://***@127.0.0.1:9/",
+      webhookContentType: "json",
+      webhookAdditionalHeaders: "***",
+    });
+    expect(r.stdout).not.toContain("it-pass");
+    expect(r.stdout).not.toContain("it-user");
+    expect(r.stdout).not.toContain("it-header-secret");
+  }, 120_000);
+
+  test("get resolves the notification by name", async () => {
+    const r = await cliRun(sb, ["notifications", "get", "it-webhook"]);
+    expect(r.code).toBe(0);
+    expect(r.json()).toMatchObject({ id: notifId, name: "it-webhook", type: "webhook" });
+  }, 120_000);
+
+  test("get of an unknown id exits 1", async () => {
+    const r = await cliRun(sb, ["notifications", "get", "999999"]);
+    expect(r.code).toBe(1);
   }, 120_000);
 
   test("edit sends the config to Kuma and a rename is listed", async () => {

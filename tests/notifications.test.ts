@@ -71,6 +71,97 @@ describe("notifications", () => {
     expect(r.stdout).not.toContain(SECRET);
   });
 
+  test("get prints the stored config with secrets redacted", async () => {
+    const r = await run(sb, ["notifications", "get", "3"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json()).toEqual({
+      id: 3,
+      active: true,
+      name: "ntfy home",
+      type: "ntfy",
+      isDefault: true,
+      ntfyserverurl: "https://ntfy.example.com",
+      ntfytopic: "home",
+      ntfyPassword: "***",
+    });
+    expect(r.stdout).not.toContain(SECRET);
+  });
+
+  test("get resolves a notification name to its id", async () => {
+    const r = await run(sb, ["notifications", "get", "matrix"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json()).toEqual({
+      id: 1,
+      active: false,
+      isDefault: false,
+      name: "matrix",
+      type: "matrix",
+      accessToken: "***",
+    });
+    expect(r.stdout).not.toContain(SECRET);
+  });
+
+  test("get masks url userinfo, header blocks, bodies and credential urls", async () => {
+    kuma.state.notifications.push({
+      id: 7,
+      name: "hooks",
+      active: true,
+      isDefault: false,
+      userId: 1,
+      config: JSON.stringify({
+        id: 42,
+        active: false,
+        name: "hooks",
+        type: "webhook",
+        webhookURL: "https://user:s3cr3t-pw@example.com/hook",
+        webhookAdditionalHeaders: '{"Authorization":"Bearer hdr-tok-123"}',
+        webhookCustomBody: '{"a":1}',
+        discordWebhookUrl: "https://discord.com/api/webhooks/1/dsc-tok-456",
+        ntfyIcon: "https://example.com/icon.png",
+        pushoverapptoken: "",
+      }),
+    });
+    const r = await run(sb, ["notifications", "get", "7"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    // the row's id / active win over copies stored inside the config
+    expect(r.json()).toEqual({
+      id: 7,
+      active: true,
+      isDefault: false,
+      name: "hooks",
+      type: "webhook",
+      webhookURL: "https://***@example.com/hook",
+      webhookAdditionalHeaders: "***",
+      webhookCustomBody: "***",
+      discordWebhookUrl: "***",
+      ntfyIcon: "https://example.com/icon.png",
+      pushoverapptoken: "",
+    });
+    expect(r.stdout).not.toContain("s3cr3t-pw");
+    expect(r.stdout).not.toContain("hdr-tok-123");
+    expect(r.stdout).not.toContain("dsc-tok-456");
+  });
+
+  test("get of an unknown id exits 1", async () => {
+    const r = await run(sb, ["notifications", "get", "99"], creds(kuma.url));
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("notification 99 not found");
+  });
+
+  test("get of a row with an unreadable config exits 2", async () => {
+    kuma.state.notifications.push({
+      id: 8,
+      name: "broken",
+      active: true,
+      isDefault: false,
+      userId: 1,
+      config: "not json",
+    });
+    const r = await run(sb, ["notifications", "get", "8"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("unreadable stored config");
+  });
+
   test("add builds the object from flags, --config-file and --set", async () => {
     const f = join(sb.dir, "cfg.json");
     writeFileSync(f, JSON.stringify({ ntfyPassword: "from-file", ntfypriority: 3 }));
