@@ -126,7 +126,9 @@ jobs:
           # A produced report always posts, even on a cancelled job: it is
           # real mutant data for its own sha, fresher than whatever the
           # comment currently shows, and any newer run overwrites it when it
-          # finishes. Only the no-report fallback needs the guard below.
+          # finishes. A manual re-run keeps the same run id, so the marker
+          # comparison cannot protect against it — accepted as rare. Only
+          # the no-report fallback needs the guard below.
           if [ ! -f "$report" ]; then
             # Only a newer run for this same pull request can carry fresher
             # news to the comment. Runs are checked before comments on

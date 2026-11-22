@@ -699,24 +699,30 @@ if [ -n "$jqexpr" ]; then jq "$jqexpr" "$file"; else cat "$file"; fi
 `;
 
   type NewerRun = { id: number; pr: number; status: string };
-  // comment: null = no marker comment, "unmarked" = a comment predating the
-  // run-id marker, a number = the run id the comment was posted under
-  type CommentSpec = number | "unmarked" | null;
+  // each entry is one comment: a number = the run id it was posted under,
+  // "unmarked" = a comment predating the run-id marker, an object = a
+  // comment by the given login carrying the given run id
+  type CommentSpec = number | "unmarked" | { rid: number; login: string };
   type Options = { failRunsList?: boolean; failComments?: boolean; withReport?: boolean };
 
-  const commentFixture = (spec: CommentSpec) => {
-    if (spec === null) return [];
-    const rid = spec === "unmarked" ? "" : `\n\n<!-- mutation-run: ${spec} -->`;
-    return [
-      {
-        id: 7,
-        user: { login: "github-actions[bot]" },
-        body: `<!-- mutation-testing --> report${rid}`,
-      },
-    ];
-  };
+  const commentFixture = (specs: CommentSpec[]) =>
+    specs.map((spec, i) => {
+      const base = { id: 7 + i, user: { login: "github-actions[bot]" } };
+      if (spec === "unmarked") return { ...base, body: "<!-- mutation-testing --> old" };
+      if (typeof spec === "object") {
+        return {
+          ...base,
+          user: { login: spec.login },
+          body: `<!-- mutation-testing --> report\n\n<!-- mutation-run: ${spec.rid} -->`,
+        };
+      }
+      return {
+        ...base,
+        body: `<!-- mutation-testing --> report\n\n<!-- mutation-run: ${spec} -->`,
+      };
+    });
 
-  const outcome = (newer: NewerRun[], comment: CommentSpec, options: Options = {}) => {
+  const outcome = (newer: NewerRun[], comment: CommentSpec[], options: Options = {}) => {
     const dir = mkdtempSync(join(tmpdir(), "mut-upsert-"));
     const binDir = join(dir, "bin");
     const caseDir = join(dir, "case");
@@ -783,48 +789,66 @@ if [ -n "$jqexpr" ]; then jq "$jqexpr" "$file"; else cat "$file"; fi
   type Case = {
     name: string;
     newer: NewerRun[];
-    comment: CommentSpec;
+    comment: CommentSpec[];
     options?: Options;
     expectPost: boolean;
     expectFallback?: boolean;
   };
 
   const cases: Case[] = [
-    { name: "no newer run posts the fallback", newer: [], comment: null, expectPost: true },
+    { name: "no newer run posts the fallback", newer: [], comment: [], expectPost: true },
     {
       name: "an in-progress run for this PR silences the fallback",
       newer: [{ id: 200, pr: 136, status: "in_progress" }],
-      comment: null,
+      comment: [],
       expectPost: false,
     },
     {
       name: "a newer run for another PR does not silence the fallback",
       newer: [{ id: 200, pr: 137, status: "in_progress" }],
-      comment: null,
+      comment: [],
+      expectPost: true,
+    },
+    {
+      name: "an older in-progress run does not silence the fallback",
+      newer: [{ id: 50, pr: 136, status: "in_progress" }],
+      comment: [],
       expectPost: true,
     },
     {
       name: "a comment stamped by a newer run silences the fallback",
       newer: [{ id: 200, pr: 136, status: "completed" }],
-      comment: 200,
+      comment: [200],
+      expectPost: false,
+    },
+    {
+      name: "the newest stamp among several comments decides",
+      newer: [{ id: 200, pr: 136, status: "completed" }],
+      comment: [50, 200],
       expectPost: false,
     },
     {
       name: "a comment stamped by an older run does not silence the fallback",
       newer: [{ id: 200, pr: 136, status: "completed" }],
-      comment: 50,
+      comment: [50],
       expectPost: true,
     },
     {
       name: "a legacy comment without a run marker does not silence the fallback",
       newer: [{ id: 200, pr: 136, status: "completed" }],
-      comment: "unmarked",
+      comment: ["unmarked"],
+      expectPost: true,
+    },
+    {
+      name: "a marker on a non-bot comment does not silence the fallback",
+      newer: [{ id: 200, pr: 136, status: "completed" }],
+      comment: [{ rid: 999999, login: "someone" }],
       expectPost: true,
     },
     {
       name: "a newer run that finished without posting does not silence it",
       newer: [{ id: 200, pr: 136, status: "completed" }],
-      comment: null,
+      comment: [],
       expectPost: true,
     },
     {
@@ -833,7 +857,7 @@ if [ -n "$jqexpr" ]; then jq "$jqexpr" "$file"; else cat "$file"; fi
         { id: 200, pr: 136, status: "completed" },
         { id: 300, pr: 136, status: "completed" },
       ],
-      comment: null,
+      comment: [],
       expectPost: true,
     },
     {
@@ -842,27 +866,27 @@ if [ -n "$jqexpr" ]; then jq "$jqexpr" "$file"; else cat "$file"; fi
         { id: 200, pr: 136, status: "completed" },
         { id: 300, pr: 137, status: "in_progress" },
       ],
-      comment: null,
+      comment: [],
       expectPost: true,
     },
     {
       name: "a failed runs lookup still posts the fallback",
       newer: [{ id: 200, pr: 136, status: "in_progress" }],
-      comment: null,
+      comment: [],
       options: { failRunsList: true },
       expectPost: true,
     },
     {
       name: "a failed comments lookup still posts the fallback",
       newer: [{ id: 200, pr: 136, status: "completed" }],
-      comment: 200,
+      comment: [200],
       options: { failComments: true },
       expectPost: true,
     },
     {
       name: "a produced report posts without consulting the guard",
       newer: [{ id: 200, pr: 136, status: "in_progress" }],
-      comment: 200,
+      comment: [200],
       options: { withReport: true },
       expectPost: true,
       expectFallback: false,
