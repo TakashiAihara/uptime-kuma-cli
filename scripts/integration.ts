@@ -95,7 +95,7 @@ if (
   process.exit(1);
 }
 const SHARD_SPEC = SHARD === null ? undefined : `${Number(SHARD[1])}/${Number(SHARD[2])}`;
-const TEST_LIMIT_MS = testLimitMs(SHARD_SPEC !== undefined);
+const TEST_LIMIT_MS = testLimitMs(SHARD_SPEC);
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 

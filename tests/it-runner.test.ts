@@ -488,6 +488,18 @@ describe("scripts/integration.ts signal handling", () => {
     expect(bunTest).not.toContain("--update-timings");
   }, 30_000);
 
+  // "1/1" is a valid spec that bun runs as a single all-file slice;
+  // it forwards like any shard and the bound treats it as unsharded
+  test("UPTIME_KUMA_IT_SHARD=1/1 forwards --shard=1/1", async () => {
+    runner = startRunner(sb, kuma.port, { UPTIME_KUMA_IT_SHARD: "1/1" });
+    await waitForLog(runner.log, "bun-test-child ran");
+    const bunTest = readFileSync(runner.log, "utf8")
+      .split("\n")
+      .find((l) => l.startsWith("bun test "));
+    expect(bunTest).toContain("tests/integration --shard=1/1 --timings=");
+    expect(bunTest).not.toContain("--update-timings");
+  }, 30_000);
+
   // --update-timings rides only the unsharded run: it is what refreshes
   // tests/integration/timings.json for the next CI split
   test("without UPTIME_KUMA_IT_SHARD bun test records and updates timings", async () => {
@@ -539,11 +551,11 @@ describe("scripts/integration.ts signal handling", () => {
   }, 30_000);
 });
 
-// scripts/integration-limit.ts picks the suite bound from whether the
-// run is sharded; the bound must also outlast the largest per-test
-// timeout any integration file declares — login.test.ts's 2FA test
-// budgets 780s — or the runner kills a slow-but-legitimate shard
-// before that test's own timeout and its finally cleanup
+// scripts/integration-limit.ts picks the suite bound from the shard
+// spec's slice count; the bound must also outlast the largest
+// per-test timeout any integration file declares — login.test.ts's
+// 2FA test budgets 780s — or the runner kills a slow-but-legitimate
+// shard before that test's own timeout and its finally cleanup
 describe("scripts/integration-limit.ts", () => {
   const IT_DIR = join(REPO, "tests", "integration");
   const maxTestTimeout = () =>
@@ -557,13 +569,16 @@ describe("scripts/integration-limit.ts", () => {
         ),
     );
 
-  test("a sharded run gets the per-shard bound", () => {
-    expect(testLimitMs(true)).toBe(900_000);
+  test("a multi-slice shard run gets the per-shard bound", () => {
+    expect(testLimitMs("2/3")).toBe(900_000);
     expect(SHARD_TEST_LIMIT_MS).toBe(900_000);
   });
 
-  test("an unsharded run keeps the whole-suite bound", () => {
-    expect(testLimitMs(false)).toBe(1_080_000);
+  // "1/1" passes shard validation and bun runs every file as one
+  // slice, so it must keep the whole-suite bound like an unset spec
+  test("a run covering the whole suite keeps the whole-suite bound", () => {
+    expect(testLimitMs(undefined)).toBe(1_080_000);
+    expect(testLimitMs("1/1")).toBe(1_080_000);
     expect(UNSHARDED_TEST_LIMIT_MS).toBe(1_080_000);
   });
 

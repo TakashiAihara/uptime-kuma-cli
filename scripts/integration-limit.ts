@@ -14,7 +14,11 @@ export const SHARD_TEST_LIMIT_MS = 15 * 60_000;
 // timings.json refresh runs.
 export const UNSHARDED_TEST_LIMIT_MS = 18 * 60_000;
 
-// UPTIME_KUMA_IT_SHARD selects the bound: a shard covers about a
-// third of the suite, an unsharded run all of it.
-export const testLimitMs = (sharded: boolean) =>
-  sharded ? SHARD_TEST_LIMIT_MS : UNSHARDED_TEST_LIMIT_MS;
+// UPTIME_KUMA_IT_SHARD's "<i>/<n>" picks the bound by n: n > 1 splits
+// the suite so each leg covers about 1/n of it; n = 1 — unset, or a
+// degenerate "1/1" that still runs every file — keeps the whole-suite
+// bound.
+export const testLimitMs = (spec: string | undefined) =>
+  spec !== undefined && Number(spec.split("/")[1]) > 1
+    ? SHARD_TEST_LIMIT_MS
+    : UNSHARDED_TEST_LIMIT_MS;
