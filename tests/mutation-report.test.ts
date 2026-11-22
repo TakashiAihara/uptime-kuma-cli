@@ -156,9 +156,12 @@ describe("buildReport", () => {
     expect(md).toContain("more surviving mutant(s)");
     expect(md).toContain("mutation job log");
     // the upsert step appends the run-id stamp after this file is written;
-    // the report plus that stamp must stay under GitHub's comment limit
+    // the report plus that stamp must stay under GitHub's comment limit,
+    // and the leftover margin must stay inside the reserve headroom so the
+    // survivor budget is actually spent
     const stamp = "\n\n<!-- mutation-run: 99999999999 -->";
     expect(md.length + stamp.length).toBeLessThanOrEqual(65536);
+    expect(65536 - md.length).toBeLessThan(208);
   });
 
   test("shows every survivor when they fit the comment budget", () => {
