@@ -123,12 +123,12 @@ jobs:
           HEAD_REF: ${{ github.head_ref }}
         run: |
           report=mutation-report.md
-          # A produced report always posts, even on a cancelled job: it is
-          # real mutant data for its own sha, fresher than whatever the
-          # comment currently shows, and any newer run overwrites it when it
-          # finishes. A manual re-run keeps the same run id, so the marker
-          # comparison cannot protect against it — accepted as rare. Only
-          # the no-report fallback needs the guard below.
+          # A produced report is real mutant data for its own sha, so it
+          # skips the newer-run lookup: a run still in flight overwrites the
+          # comment when it finishes anyway. Both paths still yield to a
+          # comment already stamped by a newer run — a manual re-run keeps
+          # its old run id, so without that check a stale run finishing
+          # late could overwrite fresher news.
           if [ ! -f "$report" ]; then
             # Only a newer run for this same pull request can carry fresher
             # news to the comment. Runs are checked before comments on
@@ -154,20 +154,30 @@ jobs:
               -f branch="$HEAD_REF" \
               -f event=pull_request \
               -f per_page=100 \
-              --jq '[.workflow_runs[] | select(.id > (env.GITHUB_RUN_ID | tonumber) and .head_repository.full_name == env.GITHUB_REPOSITORY and ([.pull_requests[]?.number] | index(env.PR | tonumber)) != null and (.status // "completed") != "completed")] | length'); then
+              --paginate \
+              | jq -s '[.[] | .workflow_runs[]? | select(.id > (env.GITHUB_RUN_ID | tonumber) and .head_repository.full_name == env.GITHUB_REPOSITORY and ([.pull_requests[]?.number] | index(env.PR | tonumber)) != null and (.status // "completed") != "completed")] | length'); then
               active=0
             fi
             if [ "$active" -gt 0 ]; then
               exit 0
             fi
-            if ! commented=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments?per_page=100" --paginate \
-              --jq '[.[] | select(.user.login == "github-actions[bot]" and (.body | contains("<!-- mutation-testing -->"))) | .body | capture("<!-- mutation-run: (?<rid>[0-9]+) -->")? | .rid | tonumber] | max // 0' \
-              | jq -s '[.[] | numbers] | max // 0'); then
-              commented=0
-            fi
-            if [ "$commented" -gt "$GITHUB_RUN_ID" ]; then
-              exit 0
-            fi
+          fi
+          # The newest stamp at the end of a bot comment's body says whether
+          # fresher news already landed. Only a trailing stamp counts: a
+          # report can quote the marker format, and the first match would
+          # then name a run that never posted. A failed lookup still posts —
+          # the upsert below re-checks the stamp on the comment it is about
+          # to overwrite, which also covers a newer stamp landing between
+          # this read and that write.
+          if ! commented=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments?per_page=100" --paginate \
+            --jq '[.[] | select(.user.login == "github-actions[bot]" and (.body | contains("<!-- mutation-testing -->"))) | .body | capture("<!-- mutation-run: (?<rid>[0-9]+) -->\\s*$")? | .rid | tonumber] | max // 0' \
+            | jq -s '[.[] | numbers] | max // 0'); then
+            commented=0
+          fi
+          if [ "$commented" -gt "$GITHUB_RUN_ID" ]; then
+            exit 0
+          fi
+          if [ ! -f "$report" ]; then
             {
               echo '<!-- mutation-testing -->'
               echo ''
@@ -176,9 +186,15 @@ jobs:
               echo "The mutation run produced no report — the job failed, timed out, or was cancelled. See $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             } > "$report"
           fi
+          hit=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments?per_page=100" --paginate \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | contains("<!-- mutation-testing -->"))) | {id: .id, rid: ((.body | capture("<!-- mutation-run: (?<rid>[0-9]+) -->\\s*$")? | .rid | tonumber) // 0)}' \
+            | jq -sr '[(.[0].id // ""), ([.[].rid] | max // 0)] | @tsv')
+          existing=${hit%%$'\t'*}
+          existing_rid=${hit##*$'\t'}
+          if [ -n "$existing" ] && [ "$existing_rid" -gt "$GITHUB_RUN_ID" ]; then
+            exit 0
+          fi
           jq -n --rawfile body "$report" --arg rid "$GITHUB_RUN_ID" '{body: ($body + "\n\n<!-- mutation-run: " + $rid + " -->")}' > /tmp/mutation-comment.json
-          ids=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments?per_page=100" --paginate --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | contains("<!-- mutation-testing -->"))) | .id')
-          existing=${ids%%$'\n'*}
           if [ -n "$existing" ]; then
             gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$existing" --input /tmp/mutation-comment.json
           else

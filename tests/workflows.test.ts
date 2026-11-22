@@ -616,12 +616,14 @@ describe("ci.yml mutation job comment upsert", () => {
 
   // A superseded run must not overwrite the newer run's comment. The runs
   // list exposes each run's pull_requests and status, so one query counts
-  // newer same-PR runs that are still in progress; only those can silence
-  // the fallback. For finished runs the comment itself is the signal:
-  // every upsert stamps the posting run's id into the body, and only a
-  // marker newer than this run's id counts as fresher news — a deferred or
-  // cancelled run leaves a successful step but no marker, and an older run
-  // posting late must not pass for the latest
+  // newer same-PR runs that are still in progress; only the no-report
+  // fallback consults it, since a produced report is real data a newer
+  // in-flight run will overwrite anyway. For finished runs the comment
+  // itself is the signal — for both paths: every upsert stamps the
+  // posting run's id at the end of the body, and only a trailing marker
+  // newer than this run's id counts as fresher news. The upsert re-reads
+  // the stamp on the comment it is about to overwrite, covering a failed
+  // guard lookup and a stamp landing between the two reads.
   test("the fallback is skipped only when fresher news is in flight or posted", () => {
     const run = upsert().run ?? "";
 
@@ -632,18 +634,25 @@ describe("ci.yml mutation job comment upsert", () => {
     expect(run).toContain("env.PR");
     expect(run).toContain("head_repository.full_name");
     expect(run).toContain('(.status // "completed") != "completed"');
-    expect(run).toContain("<!-- mutation-run: (?<rid>[0-9]+) -->");
+    // all three gh api reads paginate: runs, the stamp lookup, the upsert
+    expect(run.split("--paginate").length - 1).toBe(3);
+    // the stamp is captured only at the end of the body, twice: the guard
+    // lookup and the upsert re-check
+    expect(run.split('capture("<!-- mutation-run: ').length - 1).toBe(2);
     expect(run).toContain('"$commented" -gt "$GITHUB_RUN_ID"');
+    expect(run).toContain('"$existing_rid" -gt "$GITHUB_RUN_ID"');
     expect(run).toContain('--arg rid "$GITHUB_RUN_ID"');
     expect(run).toContain('mutation-run: " + $rid + " -->"');
+    // the runs lookup and the fallback body stay inside the no-report
+    // branch; the stamp check sits outside it so reports yield too
+    expect(run.split('if [ ! -f "$report" ]').length - 1).toBe(2);
+    const runsAt = run.indexOf("actions/workflows/ci.yml/runs");
     // runs must be sampled before comments: a completed run has already
     // finished its upsert, so its marker is guaranteed visible afterwards
-    expect(run.indexOf("actions/workflows/ci.yml/runs")).toBeLessThan(
-      run.indexOf("issues/$PR/comments"),
-    );
-    expect(run.indexOf("actions/workflows/ci.yml/runs")).toBeLessThan(
-      run.indexOf("The mutation run produced no report"),
-    );
+    expect(runsAt).toBeLessThan(run.indexOf("issues/$PR/comments"));
+    const stampAt = run.indexOf('"$commented" -gt "$GITHUB_RUN_ID"');
+    expect(runsAt).toBeLessThan(stampAt);
+    expect(stampAt).toBeLessThan(run.indexOf("The mutation run produced no report"));
   });
 });
 
@@ -702,25 +711,46 @@ if [ -n "$jqexpr" ]; then jq "$jqexpr" "$file"; else cat "$file"; fi
   type NewerRun = { id: number; pr: number; status: string; repo?: string };
   // each entry is one comment: a number = the run id it was posted under,
   // "unmarked" = a comment predating the run-id marker, an object = a
-  // comment by the given login carrying the given run id
-  type CommentSpec = number | "unmarked" | { rid: number; login: string };
-  type Options = { failRunsList?: boolean; failComments?: boolean; withReport?: boolean };
+  // comment by the given login carrying the given run id; `decoy` puts a
+  // second, fake marker inside the report body before the real trailing
+  // one, the way quoted marker text in mutant output would appear
+  type CommentSpec = number | "unmarked" | { rid: number; login: string; decoy?: number };
+  type Options = {
+    failRunsList?: boolean;
+    failComments?: boolean;
+    withReport?: boolean;
+    runsPages?: NewerRun[][];
+  };
 
   const commentFixture = (specs: CommentSpec[]) =>
     specs.map((spec, i) => {
       const base = { id: 7 + i, user: { login: "github-actions[bot]" } };
       if (spec === "unmarked") return { ...base, body: "<!-- mutation-testing --> old" };
       if (typeof spec === "object") {
+        const decoy =
+          spec.decoy === undefined
+            ? ""
+            : `\n\n<!-- mutation-run: ${spec.decoy} -->\nreport quotes the marker format`;
         return {
           ...base,
           user: { login: spec.login },
-          body: `<!-- mutation-testing --> report\n\n<!-- mutation-run: ${spec.rid} -->`,
+          body: `<!-- mutation-testing --> report${decoy}\n\n<!-- mutation-run: ${spec.rid} -->`,
         };
       }
       return {
         ...base,
         body: `<!-- mutation-testing --> report\n\n<!-- mutation-run: ${spec} -->`,
       };
+    });
+
+  const runsPage = (runs: NewerRun[]) =>
+    JSON.stringify({
+      workflow_runs: runs.map((r) => ({
+        id: r.id,
+        head_repository: { full_name: r.repo ?? REPO },
+        pull_requests: [{ number: r.pr }],
+        status: r.status,
+      })),
     });
 
   const outcome = (newer: NewerRun[], comment: CommentSpec[], options: Options = {}) => {
@@ -738,16 +768,11 @@ if [ -n "$jqexpr" ]; then jq "$jqexpr" "$file"; else cat "$file"; fi
         "<!-- mutation-testing -->\nREAL MUTATION REPORT\n",
       );
     }
+    // --paginate makes gh emit one JSON document per page; concatenating
+    // them here is what the real command's stdout looks like
     writeFileSync(
       join(caseDir, "runs.json"),
-      JSON.stringify({
-        workflow_runs: newer.map((r) => ({
-          id: r.id,
-          head_repository: { full_name: r.repo ?? REPO },
-          pull_requests: [{ number: r.pr }],
-          status: r.status,
-        })),
-      }),
+      options.runsPages ? options.runsPages.map(runsPage).join("\n") : runsPage(newer),
     );
     writeFileSync(join(caseDir, "comments.json"), JSON.stringify(commentFixture(comment)));
     if (options.failRunsList) writeFileSync(join(caseDir, "fail-runs"), "");
@@ -783,6 +808,7 @@ if [ -n "$jqexpr" ]; then jq "$jqexpr" "$file"; else cat "$file"; fi
       commented: /-X (POST|PATCH)/.test(calls),
       stamped: calls.includes(`mutation-run: ${OUR_RUN}`),
       guardRan: calls.includes("actions/workflows"),
+      runsPaginated: /ci\.yml\/runs[^\n]*--paginate/.test(calls),
       calls,
     };
   };
@@ -884,19 +910,74 @@ if [ -n "$jqexpr" ]; then jq "$jqexpr" "$file"; else cat "$file"; fi
       expectPost: true,
     },
     {
-      name: "a failed comments lookup still posts the fallback",
+      name: "a failed comments lookup still posts when nothing newer is stamped",
       newer: [{ id: 200, pr: 136, status: "completed" }],
-      comment: [200],
+      comment: [50],
       options: { failComments: true },
       expectPost: true,
     },
     {
-      name: "a produced report posts without consulting the guard",
-      newer: [{ id: 200, pr: 136, status: "in_progress" }],
+      name: "a failed comments lookup does not overwrite a newer stamp",
+      newer: [{ id: 200, pr: 136, status: "completed" }],
       comment: [200],
+      options: { failComments: true },
+      expectPost: false,
+      // the fallback body is written before the upsert re-check stops it
+      expectFallback: true,
+    },
+    {
+      name: "a failed comments lookup still posts when no comment exists",
+      newer: [],
+      comment: [],
+      options: { failComments: true },
+      expectPost: true,
+    },
+    {
+      name: "a marker quoted inside a report body does not count as the poster",
+      newer: [{ id: 200, pr: 136, status: "completed" }],
+      comment: [{ rid: 200, login: "github-actions[bot]", decoy: 50 }],
+      expectPost: false,
+    },
+    {
+      name: "a high marker quoted inside a report body does not suppress the fallback",
+      newer: [{ id: 200, pr: 136, status: "completed" }],
+      comment: [{ rid: 50, login: "github-actions[bot]", decoy: 999999 }],
+      expectPost: true,
+    },
+    {
+      name: "an in-progress run on a later runs page still silences the fallback",
+      newer: [],
+      comment: [],
+      options: {
+        runsPages: [
+          [{ id: 150, pr: 136, status: "completed" }],
+          [{ id: 200, pr: 136, status: "in_progress" }],
+        ],
+      },
+      expectPost: false,
+    },
+    {
+      name: "a produced report posts when the newest stamp is older",
+      newer: [{ id: 200, pr: 136, status: "completed" }],
+      comment: [50],
       options: { withReport: true },
       expectPost: true,
       expectFallback: false,
+    },
+    {
+      name: "a produced report still posts while a newer run is in flight",
+      newer: [{ id: 200, pr: 136, status: "in_progress" }],
+      comment: [],
+      options: { withReport: true },
+      expectPost: true,
+      expectFallback: false,
+    },
+    {
+      name: "a produced report yields to a comment stamped by a newer run",
+      newer: [{ id: 200, pr: 136, status: "completed" }],
+      comment: [200],
+      options: { withReport: true },
+      expectPost: false,
     },
   ];
 
@@ -909,7 +990,15 @@ if [ -n "$jqexpr" ]; then jq "$jqexpr" "$file"; else cat "$file"; fi
       expect(got.stamped).toBe(c.expectPost);
       expect(got.fallbackWritten).toBe(c.expectFallback ?? c.expectPost);
       expect(got.guardRan).toBe(!c.options?.withReport);
-      if (c.options?.withReport) expect(got.calls).toContain("REAL MUTATION REPORT");
+      expect(got.runsPaginated).toBe(!c.options?.withReport);
+      // the stamp check runs on the report path too; cases silenced by an
+      // in-progress run exit before any comments call
+      if (c.options?.withReport) {
+        expect(got.calls.includes("issues/136/comments")).toBe(true);
+      }
+      if (c.options?.withReport && c.expectPost) {
+        expect(got.calls).toContain("REAL MUTATION REPORT");
+      }
     });
   }
 });
