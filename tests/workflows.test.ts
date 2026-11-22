@@ -551,6 +551,76 @@ describe("ci.yml integration job", () => {
   });
 });
 
+// The mutation job is report-only, so its PR comment is the only place a
+// missing report surfaces. A timeout-cancelled job is still the PR's latest
+// word — gating the step on !cancelled() skipped it and left an older report
+// posing as current (#120). The step therefore runs on cancel too, and the
+// script itself stays silent only when a newer CI run exists for the PR.
+describe("ci.yml mutation job comment upsert", () => {
+  const job = () =>
+    (
+      Bun.YAML.parse(read("ci.yml")) as {
+        jobs: {
+          mutation: {
+            permissions?: Record<string, string>;
+            steps: {
+              name?: string;
+              if?: string;
+              env?: Record<string, string>;
+              run?: string;
+            }[];
+          };
+        };
+      }
+    ).jobs.mutation;
+
+  // Exactly one step may carry the upsert name; the assertions below pass
+  // vacuously on an empty match otherwise
+  const upsert = () => {
+    const matches = job().steps.filter((s) => s.name === "upsert PR comment");
+
+    expect(matches.length).toBe(1);
+    return matches[0]!;
+  };
+
+  test("the upsert step runs even when the job was cancelled", () => {
+    const step = upsert();
+
+    expect(step.if).toContain("always()");
+    expect(step.if).toContain("head.repo.full_name");
+    expect(step.if).not.toContain("cancelled()");
+    expect(step.env?.HEAD_REF).toBe("${{ github.head_ref }}");
+  });
+
+  // Listing workflow runs takes actions: read; without it the newer-run
+  // check fails and every fallback degrades to whatever the `|| echo 0`
+  // default picks
+  test("the job can list workflow runs for the supersede check", () => {
+    expect(job().permissions?.actions).toBe("read");
+  });
+
+  // Failure, timeout and non-superseded cancels all reach the fallback, so
+  // the wording must name every outcome that can get there
+  test("the fallback names failure, timeout and cancellation", () => {
+    const run = upsert().run ?? "";
+
+    expect(run).toContain("failed, timed out, or was cancelled");
+  });
+
+  // A superseded run must not overwrite the newer run's comment: the script
+  // queries newer CI runs on the PR's head branch and exits before writing
+  // the fallback when one exists
+  test("the fallback is skipped when a newer CI run exists for the PR", () => {
+    const run = upsert().run ?? "";
+
+    expect(run).toContain("actions/workflows/ci.yml/runs");
+    expect(run).toContain("branch=");
+    expect(run.indexOf("actions/workflows/ci.yml/runs")).toBeLessThan(
+      run.indexOf("The mutation run produced no report"),
+    );
+  });
+});
+
 describe("release.yml: publish the checked commit and artifact as is (second round of #13)", () => {
   type Step = {
     id?: string;
