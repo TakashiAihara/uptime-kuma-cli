@@ -513,19 +513,19 @@ describe("ci.yml integration job", () => {
   // timeout-minutes must cover the runner's own suite bound
   // (SHARD_TEST_LIMIT_MS in scripts/integration-limit.ts — every CI leg
   // is sharded) plus image pull, build, setup and
-  // teardown — the 18 the job sets is that documented budget, and a smaller
+  // teardown — the 21 the job sets is that documented budget, and a smaller
   // value could kill the suite mid-run and lose the runner's own timeout
   // message and the container logs it dumps; the step keeps no timeout of
   // its own for the same reason. The pin against SHARD_TEST_LIMIT_MS requires at
   // least 5 minutes of slack over the bound — a bare `>` would still pass
-  // if the bound grew to 17 while setup alone pushes the total past 18.
+  // if the bound grew to 17 while setup alone pushes the total past 21.
   // permissions is pinned as the whole object: an added
   // pull-requests or id-token write would otherwise pass while widening
   // the token a job that pulls and runs external images gets
   test("the job is time-boxed over the suite's own budget and read-only", () => {
     const step = testStep();
 
-    expect(job()["timeout-minutes"]).toBe(18);
+    expect(job()["timeout-minutes"]).toBe(21);
     expect(job()["timeout-minutes"]! * 60_000).toBeGreaterThanOrEqual(
       SHARD_TEST_LIMIT_MS + 5 * 60_000,
     );

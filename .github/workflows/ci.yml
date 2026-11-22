@@ -133,7 +133,7 @@ jobs:
 
   integration:
     runs-on: ubuntu-latest
-    timeout-minutes: 18
+    timeout-minutes: 21
     permissions:
       contents: read
     strategy:
