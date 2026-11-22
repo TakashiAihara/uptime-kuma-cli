@@ -555,7 +555,8 @@ describe("ci.yml integration job", () => {
 // missing report surfaces. A timeout-cancelled job is still the PR's latest
 // word — gating the step on !cancelled() skipped it and left an older report
 // posing as current (#120). The step therefore runs on cancel too, and the
-// script itself stays silent only when a newer CI run exists for the PR.
+// script itself stays silent only when a newer run for this PR can still
+// post to the comment.
 describe("ci.yml mutation job comment upsert", () => {
   const job = () =>
     (
@@ -590,10 +591,11 @@ describe("ci.yml mutation job comment upsert", () => {
     expect(step.if).toContain("head.repo.full_name");
     expect(step.if).not.toContain("cancelled()");
     expect(step.env?.HEAD_REF).toBe("${{ github.head_ref }}");
+    expect(step.env?.PR).toBe("${{ github.event.pull_request.number }}");
   });
 
   // Listing workflow runs takes actions: read; without it the newer-run
-  // check fails and every fallback degrades to whatever the `|| echo 0`
+  // check fails and every fallback degrades to whatever the `|| echo '[]'`
   // default picks
   test("the job can list workflow runs for the supersede check", () => {
     expect(job().permissions?.actions).toBe("read");
@@ -607,14 +609,23 @@ describe("ci.yml mutation job comment upsert", () => {
     expect(run).toContain("failed, timed out, or was cancelled");
   });
 
-  // A superseded run must not overwrite the newer run's comment: the script
-  // queries newer CI runs on the PR's head branch and exits before writing
-  // the fallback when one exists
-  test("the fallback is skipped when a newer CI run exists for the PR", () => {
+  // A superseded run must not overwrite the newer run's comment. The runs
+  // list does not expose the PR number, so each newer run on the head branch
+  // is checked individually; only a run belonging to this PR that is still
+  // in progress or already posted its upsert may silence the fallback — a
+  // run cancelled before its upsert step ran never notifies
+  test("the fallback is skipped only when a newer run for this PR can still post", () => {
     const run = upsert().run ?? "";
 
     expect(run).toContain("actions/workflows/ci.yml/runs");
     expect(run).toContain("branch=");
+    expect(run).toContain("pull_requests");
+    expect(run).toContain("env.PR");
+    expect(run).toContain("head_repository.full_name");
+    expect(run).toContain('"$status" != "completed"');
+    expect(run).toContain("/jobs");
+    expect(run).toContain("upsert PR comment");
+    expect(run).toContain('conclusion == "success"');
     expect(run.indexOf("actions/workflows/ci.yml/runs")).toBeLessThan(
       run.indexOf("The mutation run produced no report"),
     );

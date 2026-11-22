@@ -111,8 +111,9 @@ jobs:
       - name: upsert PR comment
         # Runs on cancelled jobs too: a timeout-cancelled run is still the PR's
         # latest mutation result, and skipping it would leave an older report
-        # posing as current. The script itself stays silent when a newer CI run
-        # for this PR exists — that run's mutation job posts the fresher result.
+        # posing as current. The script stays silent only when a newer run for
+        # this PR can still post — that run's mutation job upserts the fresher
+        # result.
         if: always() && github.event.pull_request.head.repo.full_name == github.repository
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -121,22 +122,40 @@ jobs:
         run: |
           report=mutation-report.md
           if [ ! -f "$report" ]; then
-            # A newer run for this PR means this one was superseded; its own
-            # mutation job upserts the comment, so posting the fallback would
-            # briefly overwrite fresher news with a stale "failed" notice.
-            # Timeout and manual cancels have no newer run — the comment must
-            # still move to this run's outcome. When the lookup itself fails,
-            # post anyway: a possibly stale comment is corrected by the next
-            # run, a missing one never is.
-            newer=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+            # Only a newer run for this same pull request can carry fresher
+            # news to the comment. The runs list does not expose the PR
+            # number, so each newer run on the head branch is checked
+            # individually; runs belonging to other PRs opened from the same
+            # branch do not count. A newer run silences the fallback only
+            # while it can still post — a run still in progress reaches its
+            # own upsert step, and a finished run only if that step
+            # succeeded; one cancelled before the step ran never notifies.
+            # When a lookup fails the fallback still goes out: a possibly
+            # stale comment is corrected by the next run, a missing one
+            # never is.
+            candidates=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
               --method GET \
               -f branch="$HEAD_REF" \
               -f event=pull_request \
               -f per_page=100 \
-              --jq '[.workflow_runs[] | select(.id > (env.GITHUB_RUN_ID | tonumber))] | length' || echo 0)
-            if [ "$newer" != "0" ]; then
-              exit 0
-            fi
+              --jq '[.workflow_runs[] | select(.id > (env.GITHUB_RUN_ID | tonumber) and .head_repository.full_name == env.GITHUB_REPOSITORY) | .id] | sort | reverse' || echo '[]')
+            for id in $(printf '%s' "$candidates" | jq -r '.[]'); do
+              run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id" \
+                --jq '{ours: ([.pull_requests[]?.number] | index(env.PR | tonumber)) != null, status}' || echo '{}')
+              ours=$(printf '%s' "$run" | jq -r '.ours // false')
+              if [ "$ours" != "true" ]; then
+                continue
+              fi
+              status=$(printf '%s' "$run" | jq -r '.status // "completed"')
+              if [ "$status" != "completed" ]; then
+                exit 0
+              fi
+              posted=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs" --method GET -f per_page=100 -f filter=latest \
+                --jq '[.jobs[] | select(.name == "mutation") | .steps[]? | select(.name == "upsert PR comment" and .conclusion == "success")] | length > 0' || echo false)
+              if [ "$posted" = "true" ]; then
+                exit 0
+              fi
+            done
             {
               echo '<!-- mutation-testing -->'
               echo ''
