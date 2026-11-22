@@ -470,19 +470,22 @@ describe("scripts/integration.ts signal handling", () => {
     expect(await runner.output()).toContain("UPTIME_KUMA_IT_DOWN_TIMEOUT_MS");
   }, 30_000);
 
-  test("UPTIME_KUMA_IT_SHARD forwards --shard and the timings flags to bun test", async () => {
+  // A sharded run reads timings.json for balancing but must not rewrite
+  // it: --update-timings under --shard keeps only that shard's entries
+  // and would shrink the table the next run splits by
+  test("UPTIME_KUMA_IT_SHARD forwards --shard and reads timings without rewriting them", async () => {
     runner = startRunner(sb, kuma.port, { UPTIME_KUMA_IT_SHARD: "2/3" });
     await waitForLog(runner.log, "bun-test-child ran");
     const bunTest = readFileSync(runner.log, "utf8")
       .split("\n")
       .find((l) => l.startsWith("bun test "));
     expect(bunTest).toContain("tests/integration --shard=2/3 --timings=");
-    expect(bunTest).toContain("--update-timings");
+    expect(bunTest).not.toContain("--update-timings");
   }, 30_000);
 
-  // The timings flags are unconditional: an unsharded local run is what
-  // refreshes tests/integration/timings.json for the next CI split
-  test("without UPTIME_KUMA_IT_SHARD bun test still records timings", async () => {
+  // --update-timings rides only the unsharded run: it is what refreshes
+  // tests/integration/timings.json for the next CI split
+  test("without UPTIME_KUMA_IT_SHARD bun test records and updates timings", async () => {
     runner = startRunner(sb, kuma.port, {});
     await waitForLog(runner.log, "bun-test-child ran");
     const bunTest = readFileSync(runner.log, "utf8")

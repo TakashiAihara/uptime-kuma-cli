@@ -12,9 +12,11 @@
  * UPTIME_KUMA_IT_* pointing at it and UPTIME_KUMA_IT_BIN at that binary, so
  * the suite exercises the compiled artifact rather than only runCli.
  * UPTIME_KUMA_IT_SHARD="<i>/<n>" forwards the spec to `bun test --shard` so
- * CI legs each run a slice of the file list; --timings/--update-timings
- * measure per-file durations into tests/integration/timings.json, which
- * balances the split by time rather than file count.
+ * CI legs each run a slice of the file list; --timings reads the measured
+ * per-file durations in tests/integration/timings.json to balance the
+ * split by time rather than file count, and unsharded runs add
+ * --update-timings to refresh that file (a sharded write would keep only
+ * the shard's own entries).
  * `down -v` (which also removes the
  * anonymous data volume) always runs before `up`, clearing a project left by
  * UPTIME_KUMA_IT_KEEP=1 or a killed run when the port matches — the project
@@ -27,7 +29,7 @@ import { join } from "node:path";
 
 import { io, type Socket } from "socket.io-client";
 
-import { TEST_LIMIT_MS } from "./integration-limit.ts";
+import { testLimitMs } from "./integration-limit.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..");
 const COMPOSE_FILE = join(REPO_ROOT, "tests", "integration", "compose.yaml");
@@ -93,6 +95,7 @@ if (
   process.exit(1);
 }
 const SHARD_SPEC = SHARD === null ? undefined : `${Number(SHARD[1])}/${Number(SHARD[2])}`;
+const TEST_LIMIT_MS = testLimitMs(SHARD_SPEC !== undefined);
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -214,7 +217,11 @@ let testProc: Child | undefined;
 async function runTests(kumaVersion: string): Promise<number> {
   const args = ["test", "tests/integration"];
   if (SHARD_SPEC !== undefined) args.push(`--shard=${SHARD_SPEC}`);
-  args.push(`--timings=${TIMINGS_FILE}`, "--update-timings");
+  args.push(`--timings=${TIMINGS_FILE}`);
+  // --update-timings under --shard writes only that shard's files and
+  // drops the rest, so shard runs read the table for balancing without
+  // rewriting it; unsharded runs are what refresh it
+  if (SHARD_SPEC === undefined) args.push("--update-timings");
   console.log(`running bun ${args.join(" ")}`);
   // detached gives the test run its own process group so a signal (or the
   // timeout below) reaches the compiled-binary grandchildren the suite
