@@ -71,6 +71,197 @@ describe("notifications", () => {
     expect(r.stdout).not.toContain(SECRET);
   });
 
+  test("get prints the stored config with secrets redacted", async () => {
+    const r = await run(sb, ["notifications", "get", "3"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json()).toEqual({
+      id: 3,
+      active: true,
+      name: "ntfy home",
+      type: "ntfy",
+      isDefault: true,
+      ntfyserverurl: "https://ntfy.example.com",
+      ntfytopic: "home",
+      ntfyPassword: "***",
+    });
+    expect(r.stdout).not.toContain(SECRET);
+  });
+
+  test("get resolves a notification name to its id", async () => {
+    const r = await run(sb, ["notifications", "get", "matrix"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json()).toEqual({
+      id: 1,
+      active: false,
+      isDefault: false,
+      name: "matrix",
+      type: "matrix",
+      accessToken: "***",
+    });
+    expect(r.stdout).not.toContain(SECRET);
+  });
+
+  test("get masks url userinfo, header blocks, bodies and credential urls", async () => {
+    kuma.state.notifications.push({
+      id: 7,
+      name: "hooks",
+      active: true,
+      isDefault: false,
+      userId: 1,
+      config: JSON.stringify({
+        id: 42,
+        active: false,
+        name: "hooks",
+        type: "webhook",
+        webhookURL: "https://user:s3cr3t-pw@example.com/hook",
+        webhookAdditionalHeaders: '{"Authorization":"Bearer hdr-tok-123"}',
+        webhookCustomBody: '{"a":1}',
+        discordWebhookUrl: "https://discord.com/api/webhooks/1/dsc-tok-456",
+        slackwebhookURL: "https://hooks.slack.com/services/T/B/sl-tok-789",
+        gotifyserverurl: "https://gotify.example.com/hook?token=gt-tok-1&foo=bar",
+        ntfyIcon: "https://example.com/icon.png",
+        pushoverapptoken: "",
+        // an add-time flag stored in the config is not printed — edit
+        // refuses the key, so a get -> edit round trip must not carry it
+        applyExisting: true,
+      }),
+    });
+    const r = await run(sb, ["notifications", "get", "7"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    // the row's id / active / isDefault win over copies stored inside the config
+    expect(r.json()).toEqual({
+      id: 7,
+      active: true,
+      isDefault: false,
+      name: "hooks",
+      type: "webhook",
+      // a webhook url is a bearer credential — it prints "***", not just
+      // its userinfo; other urls keep the readable form with userinfo and
+      // secret-named query params masked
+      webhookURL: "***",
+      webhookAdditionalHeaders: "***",
+      webhookCustomBody: "***",
+      discordWebhookUrl: "***",
+      slackwebhookURL: "***",
+      gotifyserverurl: "https://gotify.example.com/hook?token=***&foo=bar",
+      ntfyIcon: "https://example.com/icon.png",
+      pushoverapptoken: "",
+    });
+    expect(r.stdout).not.toContain("s3cr3t-pw");
+    expect(r.stdout).not.toContain("hdr-tok-123");
+    expect(r.stdout).not.toContain("dsc-tok-456");
+    expect(r.stdout).not.toContain("sl-tok-789");
+    expect(r.stdout).not.toContain("gt-tok-1");
+    expect(r.json()).not.toHaveProperty("applyExisting");
+  });
+
+  test("get masks secret query params even when the url does not parse", async () => {
+    kuma.state.notifications.push({
+      id: 11,
+      name: "badport",
+      active: true,
+      isDefault: false,
+      userId: 1,
+      config: JSON.stringify({
+        type: "gotify",
+        gotifyserverurl: "https://gotify.example.com:bad/?token=gt-tok-2&foo=bar",
+      }),
+    });
+    const r = await run(sb, ["notifications", "get", "11"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json().gotifyserverurl).toBe("https://gotify.example.com:bad/?token=***&foo=bar");
+    expect(r.stdout).not.toContain("gt-tok-2");
+  });
+
+  test("get masks a percent-encoded secret query param name", async () => {
+    kuma.state.notifications.push({
+      id: 12,
+      name: "encoded",
+      active: true,
+      isDefault: false,
+      userId: 1,
+      config: JSON.stringify({
+        type: "gotify",
+        gotifyserverurl: "https://gotify.example.com/?%74oken=enc-tok-3&safe=1",
+      }),
+    });
+    const r = await run(sb, ["notifications", "get", "12"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json().gotifyserverurl).toBe("https://gotify.example.com/?%74oken=***&safe=1");
+    expect(r.stdout).not.toContain("enc-tok-3");
+  });
+
+  test("get masks a query param whose name cannot be decoded", async () => {
+    kuma.state.notifications.push({
+      id: 13,
+      name: "badescape",
+      active: true,
+      isDefault: false,
+      userId: 1,
+      config: JSON.stringify({
+        type: "gotify",
+        gotifyserverurl: "https://gotify.example.com/?%74oken%=enc-tok-4",
+      }),
+    });
+    const r = await run(sb, ["notifications", "get", "13"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json().gotifyserverurl).toBe("https://gotify.example.com/?%74oken%=***");
+    expect(r.stdout).not.toContain("enc-tok-4");
+  });
+
+  test("get masks userinfo in every url of a newline-separated relays list", async () => {
+    kuma.state.notifications.push({
+      id: 9,
+      name: "nostr",
+      active: true,
+      isDefault: false,
+      userId: 1,
+      config: JSON.stringify({
+        type: "nostr",
+        relays: "wss://public.example/\nwss://user:rlay-pw@private.example/\nnot a url",
+      }),
+    });
+    const r = await run(sb, ["notifications", "get", "9"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json().relays).toBe("wss://public.example/\nwss://***@private.example/\nnot a url");
+    expect(r.stdout).not.toContain("rlay-pw");
+  });
+
+  test("get reports the row's isDefault over a divergent copy in the config", async () => {
+    kuma.state.notifications.push({
+      id: 10,
+      name: "diverged",
+      active: true,
+      isDefault: false,
+      userId: 1,
+      // the bean column coerces falsy values the stored json keeps verbatim
+      config: JSON.stringify({ type: "ntfy", isDefault: null }),
+    });
+    const r = await run(sb, ["notifications", "get", "10"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json().isDefault).toBe(false);
+  });
+
+  test("get of an unknown id exits 1", async () => {
+    const r = await run(sb, ["notifications", "get", "99"], creds(kuma.url));
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("notification 99 not found");
+  });
+
+  test("get of a row with an unreadable config exits 2", async () => {
+    kuma.state.notifications.push({
+      id: 8,
+      name: "broken",
+      active: true,
+      isDefault: false,
+      userId: 1,
+      config: "not json",
+    });
+    const r = await run(sb, ["notifications", "get", "8"], creds(kuma.url));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("unreadable stored config");
+  });
+
   test("add builds the object from flags, --config-file and --set", async () => {
     const f = join(sb.dir, "cfg.json");
     writeFileSync(f, JSON.stringify({ ntfyPassword: "from-file", ntfypriority: 3 }));
@@ -220,6 +411,33 @@ describe("notifications", () => {
       type: "ntfy",
     });
     expect(r.stdout).not.toContain(SECRET);
+  });
+
+  test("edit ignores the redacted values a get -> --config-file round trip carries", async () => {
+    const f = join(sb.dir, "roundtrip.json");
+    writeFileSync(
+      f,
+      JSON.stringify({
+        id: 99,
+        active: false,
+        name: "ntfy home",
+        type: "ntfy",
+        ntfyPassword: "***",
+        ntfyserverurl: "https://***@ntfy.example.com",
+        ntfytopic: "home2",
+      }),
+    );
+    const r = await run(sb, ["notifications", "edit", "3", "--config-file", f], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "addNotification")!.args[0] as any;
+    expect(sent).toMatchObject({
+      ntfyPassword: SECRET,
+      ntfyserverurl: "https://ntfy.example.com",
+      ntfytopic: "home2",
+      applyExisting: false,
+    });
+    expect(sent).not.toHaveProperty("id");
+    expect(sent).not.toHaveProperty("active");
   });
 
   test("edit without --set or --config-file exits 2 before connecting", async () => {

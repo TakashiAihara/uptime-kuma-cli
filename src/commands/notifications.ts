@@ -1,7 +1,7 @@
 import type { Command } from "commander";
 
 import { connect, type NotificationRow } from "../kuma.ts";
-import { fail, parseSets, printJson, readJsonFile } from "../lib.ts";
+import { fail, parseSets, printJson, readJsonFile, redactUrl } from "../lib.ts";
 
 function storedConfig(row: NotificationRow): Record<string, unknown> {
   try {
@@ -28,6 +28,133 @@ function configType(row: NotificationRow): unknown {
   return null;
 }
 
+// The stored config is the whole object the provider reads; the bean adds
+// id, active and isDefault. A stray copy a --set stored loses to the row's
+// value — isDefault included, since the column coerces falsy config values
+// the stored JSON keeps verbatim — and a config that predates isDefault
+// still reports the column. applyExisting is an add-time flag, not
+// configuration: edit forces it false anyway, and printing it would break
+// the get -> edit --config-file round trip (edit refuses the key).
+function notificationObject(row: NotificationRow): Record<string, unknown> {
+  const config = storedConfig(row);
+  delete config.id;
+  delete config.active;
+  delete config.isDefault;
+  delete config.applyExisting;
+  return { id: row.id, active: row.active, isDefault: row.isDefault, ...config };
+}
+
+// Fields whose names end in a secret word print "***" when they hold a
+// value — the same convention as monitor secrets. Every provider's token /
+// password / api-key field on both supported Kuma versions is named that
+// way.
+const SECRET_FIELD_NAME = /(?:password|passwd|secret|token|pass|key|credentials?)$/i;
+
+// What the name pattern cannot see: the Nostr sender keypair, the JSON
+// header blocks, the webhook request body, the fields upstream renders as
+// HiddenInput although the name carries no secret word (the Aliyun access
+// key id and recipient phone number, the heii trigger id, the Webpush
+// subscription credential), and the URLs upstream renders as HiddenInput
+// because the credential sits inside the URL itself.
+const SECRET_FIELDS = new Set([
+  "accessKeyId",
+  "appriseURL",
+  "barkEndpoint",
+  "bitrix24WebhookURL",
+  "callMeBotEndpoint",
+  "discordWebhookUrl",
+  "fluxerWebhookUrl",
+  "googleSheetsWebhookUrl",
+  "halowebhookurl",
+  "heiiOnCallTriggerId",
+  "pagerdutyIntegrationUrl",
+  "pagertreeIntegrationUrl",
+  "phonenumber",
+  "pingletPublishUrl",
+  "sender",
+  "smtpAdditionalHeaders",
+  "splunkRestURL",
+  "subscription",
+  "webhookAdditionalHeaders",
+  "webhookCustomBody",
+  "wxpusherSPT",
+]);
+
+// URL-valued fields print through redactUrl like a monitor url — userinfo
+// is masked, the rest stays readable — except webhook urls: a webhook url
+// is a bearer credential by design (slackwebhookURL, discordWebhookUrl,
+// the generic webhookURL and friends all carry the token in the path), so
+// those print "***" like other secrets. The suffix covers the *URL / *Url
+// / *url, *Endpoint, *Addr and *Server spellings providers use; ntfyIcon
+// holds an icon URL without one of them.
+const URL_FIELD_NAME = /(?:url|uri|endpoint|addr|server)$/i;
+const URL_FIELDS = new Set(["ntfyIcon"]);
+
+function isWebhookUrlField(key: string): boolean {
+  return key.toLowerCase().includes("webhook") && URL_FIELD_NAME.test(key);
+}
+
+function isSecretKey(key: string): boolean {
+  return SECRET_FIELDS.has(key) || SECRET_FIELD_NAME.test(key) || isWebhookUrlField(key);
+}
+
+// Every field get masks or rewrites — a "***" secret, a userinfo- or
+// query-masked url, a relays line — must not ride a get -> edit
+// --config-file round trip back over the stored value.
+function isRedactableKey(key: string): boolean {
+  return isSecretKey(key) || key === "relays" || URL_FIELDS.has(key) || URL_FIELD_NAME.test(key);
+}
+
+// Query parameters named like secrets (?token=, ?key=) are masked too —
+// redactUrl only covers userinfo. Names are percent-decoded before the
+// test (a server decodes them the same way) while the original spelling
+// stays in the output, and the scan runs on the raw string so a value
+// new URL() would reject cannot smuggle ?token= past it either.
+const SECRET_QUERY_NAME = /pass|secret|token|key|auth|sig|credential/i;
+const QUERY_PARAM = /([?&])([^=&#]*)=([^&#]*)/g;
+
+function redactNotificationUrl(value: unknown): unknown {
+  const redacted = redactUrl(value);
+  if (typeof redacted !== "string") return redacted;
+  return redacted.replace(QUERY_PARAM, (match, sep: string, name: string) => {
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(name.replaceAll("+", " "));
+    } catch {
+      // an undecodable name cannot be cleared of secret words — mask it
+      return `${sep}${name}=***`;
+    }
+    return SECRET_QUERY_NAME.test(decoded) ? `${sep}${name}=***` : match;
+  });
+}
+
+// Nostr's relays is a newline-separated url list, not one url — redact each
+// line on its own (a whole-string parse would fold later urls into the
+// first one's path and leak their userinfo).
+function redactRelays(value: unknown): unknown {
+  if (typeof value !== "string") return redactNotificationUrl(value);
+  return value
+    .split("\n")
+    .map((line) => redactNotificationUrl(line))
+    .join("\n");
+}
+
+function redactNotificationConfig(config: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(config)) {
+    if (isSecretKey(key)) {
+      // presence, not type: --config-file may store any JSON value
+      out[key] = value === undefined || value === null || value === "" ? value : "***";
+    } else if (key === "relays") {
+      out[key] = redactRelays(value);
+    } else {
+      out[key] =
+        URL_FIELDS.has(key) || URL_FIELD_NAME.test(key) ? redactNotificationUrl(value) : value;
+    }
+  }
+  return out;
+}
+
 const collect = (value: string, previous: string[]): string[] => [...previous, value];
 
 export function registerNotifications(program: Command): void {
@@ -50,6 +177,17 @@ export function registerNotifications(program: Command): void {
     });
 
   notifications
+    .command("get <id|name>")
+    .description("Show one notification's stored config")
+    .action(async (rawId) => {
+      const s = await connect();
+      const id = s.resolveNotificationId(rawId);
+      const row = s.notificationById(id);
+      if (!row) fail(1, `notification ${id} not found`);
+      printJson(redactNotificationConfig(notificationObject(row)));
+    });
+
+  notifications
     .command("add")
     .description("Add a notification")
     .requiredOption("--name <name>", "notification name")
@@ -62,6 +200,11 @@ export function registerNotifications(program: Command): void {
       const sets = parseSets(opts.set as string[] | undefined);
       const fileConfig =
         opts.configFile === undefined ? {} : readJsonFile(opts.configFile, "--config-file");
+      // id / active are bean columns get prints, not config fields
+      delete fileConfig.id;
+      delete fileConfig.active;
+      delete sets.id;
+      delete sets.active;
       // Flags win only when given; otherwise the config file and --set may still turn
       // isDefault / applyExisting on, and both default to false
       const notification: Record<string, unknown> = {
@@ -97,6 +240,19 @@ export function registerNotifications(program: Command): void {
       if ("applyExisting" in fileConfig) {
         fail(2, "applyExisting cannot be set on edit; use notifications add --apply-existing");
       }
+      // id / active are bean columns get prints, not config — and a
+      // get -> --config-file round trip would otherwise write them, plus
+      // the "***" / masked urls get prints for secrets, into the stored
+      // config. Dropping those overrides keeps the stored values.
+      for (const source of [fileConfig, sets]) {
+        delete source.id;
+        delete source.active;
+        for (const [key, value] of Object.entries(source)) {
+          if (typeof value === "string" && value.includes("***") && isRedactableKey(key)) {
+            delete source[key];
+          }
+        }
+      }
       const s = await connect();
       const id = s.resolveNotificationId(rawId);
       const row = s.notificationById(id);
@@ -119,6 +275,10 @@ export function registerNotifications(program: Command): void {
   notifications
     .command("test <id|name>")
     .description("Send a test notification")
+    .addHelpText(
+      "after",
+      "\nThe test send carries no heartbeat, so it skips the payload a real alert builds — a pass does not prove a DOWN notification is delivered (on Kuma 1.x an ntfy view action on a monitor without a url fails while the test succeeds).",
+    )
     .action(async (rawId) => {
       const s = await connect();
       const id = s.resolveNotificationId(rawId);
