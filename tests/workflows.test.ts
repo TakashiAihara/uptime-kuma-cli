@@ -456,7 +456,7 @@ describe("ci.yml integration job", () => {
             if?: string;
             needs?: string | string[];
             permissions?: Record<string, string>;
-            strategy?: { "fail-fast"?: boolean; matrix?: { image?: string[] } };
+            strategy?: { "fail-fast"?: boolean; matrix?: { image?: string[]; shard?: number[] } };
             steps: {
               run?: string;
               env?: Record<string, string>;
@@ -478,23 +478,28 @@ describe("ci.yml integration job", () => {
     return matches[0]!;
   };
 
-  // README promises both legs and the main ruleset requires both
-  // `integration (<image>)` checks; a matrix change also renames them, so the
+  // README promises the integration legs and the main ruleset requires a
+  // check per image and shard; a matrix change also renames them, so the
   // failure would otherwise surface as stuck merges, not a red test. The
   // whole matrix is pinned — an `exclude`/`include` key could otherwise drop
   // or rename a leg while keeping the image list green
-  test("the matrix runs the suite against both Kuma 1.x and 2.x, and a failing leg cannot cancel the other", () => {
+  test("the matrix runs both Kuma images in three shards, and a failing leg cannot cancel the other", () => {
     expect(job().strategy?.matrix).toEqual({
       image: ["louislam/uptime-kuma:1.23.17", "louislam/uptime-kuma:2.5.11"],
+      shard: [1, 2, 3],
     });
     expect(job().strategy?.["fail-fast"]).toBe(false);
   });
 
-  test("the matrix image reaches the runner through UPTIME_KUMA_IT_IMAGE", () => {
+  test("the matrix image and shard reach the runner through UPTIME_KUMA_IT_*", () => {
     const step = testStep();
+    const shardCount = job().strategy?.matrix?.shard?.length;
 
     expect(step.run?.trim()).toBe("bun run test:integration");
     expect(step.env?.UPTIME_KUMA_IT_IMAGE).toBe("${{ matrix.image }}");
+    // the shard spec's denominator is a literal in the env expression; it
+    // must match the matrix width or legs would ask for impossible slices
+    expect(step.env?.UPTIME_KUMA_IT_SHARD).toBe(`\${{ matrix.shard }}/${shardCount}`);
   });
 
   // The step above pins the script name, not what it runs. If
@@ -507,19 +512,19 @@ describe("ci.yml integration job", () => {
 
   // timeout-minutes must cover the runner's own suite bound (TEST_LIMIT_MS
   // in scripts/integration-limit.ts) plus image pull, build, setup and
-  // teardown — the 25 the job sets is that documented budget, and a smaller
+  // teardown — the 18 the job sets is that documented budget, and a smaller
   // value could kill the suite mid-run and lose the runner's own timeout
   // message and the container logs it dumps; the step keeps no timeout of
   // its own for the same reason. The pin against TEST_LIMIT_MS requires at
   // least 5 minutes of slack over the bound — a bare `>` would still pass
-  // if the bound grew to 24 while setup alone pushes the total past 25.
+  // if the bound grew to 17 while setup alone pushes the total past 18.
   // permissions is pinned as the whole object: an added
   // pull-requests or id-token write would otherwise pass while widening
   // the token a job that pulls and runs external images gets
   test("the job is time-boxed over the suite's own budget and read-only", () => {
     const step = testStep();
 
-    expect(job()["timeout-minutes"]).toBe(25);
+    expect(job()["timeout-minutes"]).toBe(18);
     expect(job()["timeout-minutes"]! * 60_000).toBeGreaterThanOrEqual(TEST_LIMIT_MS + 5 * 60_000);
     expect(step["timeout-minutes"]).toBeUndefined();
     expect(job().permissions).toEqual({ contents: "read" });

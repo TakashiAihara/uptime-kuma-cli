@@ -470,6 +470,36 @@ describe("scripts/integration.ts signal handling", () => {
     expect(await runner.output()).toContain("UPTIME_KUMA_IT_DOWN_TIMEOUT_MS");
   }, 30_000);
 
+  test("UPTIME_KUMA_IT_SHARD forwards --shard and the timings flags to bun test", async () => {
+    runner = startRunner(sb, kuma.port, { UPTIME_KUMA_IT_SHARD: "2/3" });
+    await waitForLog(runner.log, "bun-test-child ran");
+    const bunTest = readFileSync(runner.log, "utf8")
+      .split("\n")
+      .find((l) => l.startsWith("bun test "));
+    expect(bunTest).toContain("tests/integration --shard=2/3 --timings=");
+    expect(bunTest).toContain("--update-timings");
+  }, 30_000);
+
+  // The timings flags are unconditional: an unsharded local run is what
+  // refreshes tests/integration/timings.json for the next CI split
+  test("without UPTIME_KUMA_IT_SHARD bun test still records timings", async () => {
+    runner = startRunner(sb, kuma.port, {});
+    await waitForLog(runner.log, "bun-test-child ran");
+    const bunTest = readFileSync(runner.log, "utf8")
+      .split("\n")
+      .find((l) => l.startsWith("bun test "));
+    expect(bunTest).not.toContain("--shard=");
+    expect(bunTest).toContain("--update-timings");
+  }, 30_000);
+
+  test("invalid UPTIME_KUMA_IT_SHARD values fail fast", async () => {
+    for (const shard of ["", "bogus", "3/2", "0/2"]) {
+      runner = startRunner(sb, kuma.port, { UPTIME_KUMA_IT_SHARD: shard });
+      expect(await runner.exited).toBe(1);
+      expect(await runner.output()).toContain("UPTIME_KUMA_IT_SHARD");
+    }
+  }, 30_000);
+
   test("a timed-out down -v is reaped before the next compose call", async () => {
     runner = startRunner(sb, kuma.port, {
       UPTIME_KUMA_IT_DOWN_TIMEOUT_MS: "200",

@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "files": {
+    "tests/integration/monitors.test.ts": 510506,
+    "tests/integration/status-pages.test.ts": 120939,
+    "tests/integration/maintenance.test.ts": 75466,
+    "tests/integration/settings.test.ts": 60901,
+    "tests/integration/housekeeping.test.ts": 60121,
+    "tests/integration/login.test.ts": 59502,
+    "tests/integration/api-keys.test.ts": 58062,
+    "tests/integration/docker-hosts.test.ts": 38991,
+    "tests/integration/proxies.test.ts": 38973,
+    "tests/integration/tags.test.ts": 21546,
+    "tests/integration/notifications.test.ts": 1853,
+    "tests/integration/beats.test.ts": 952
+  }
+}
