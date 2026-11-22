@@ -1,11 +1,16 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import { join, resolve } from "node:path";
 
 import { Server } from "socket.io";
 
+import {
+  SHARD_TEST_LIMIT_MS,
+  testLimitMs,
+  UNSHARDED_TEST_LIMIT_MS,
+} from "../scripts/integration-limit.ts";
 import { sandbox, type Sandbox } from "./helpers/run";
 
 const REPO = resolve(import.meta.dir, "..");
@@ -121,7 +126,7 @@ wait "$pid"
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function startSetupKuma(): Promise<{
+async function startSetupKuma(version = "1.23.17"): Promise<{
   port: number;
   connected: Promise<void>;
   close: () => Promise<void>;
@@ -145,7 +150,7 @@ async function startSetupKuma(): Promise<{
     socket.on("setup", (_u: unknown, _p: unknown, ack: (v: unknown) => void) => ack({ ok: true }));
     socket.on("login", (_c: unknown, ack: (v: unknown) => void) => {
       ack({ ok: true });
-      socket.emit("info", { version: "1.23.17" });
+      socket.emit("info", { version });
     });
   });
   await new Promise<void>((r) => http.listen(0, "127.0.0.1", r));
@@ -470,6 +475,91 @@ describe("scripts/integration.ts signal handling", () => {
     expect(await runner.output()).toContain("UPTIME_KUMA_IT_DOWN_TIMEOUT_MS");
   }, 30_000);
 
+  // A sharded run reads timings.json for balancing but must not rewrite
+  // it: --update-timings under --shard keeps only that shard's entries
+  // and would shrink the table the next run splits by — even on a 2.x
+  // image, the only version whose runs may refresh the table
+  test("UPTIME_KUMA_IT_SHARD forwards --shard and reads timings without rewriting them", async () => {
+    const kuma2 = await startSetupKuma("2.5.11");
+    try {
+      runner = startRunner(sb, kuma2.port, {
+        UPTIME_KUMA_IT_IMAGE: "louislam/uptime-kuma:2.5.11",
+        UPTIME_KUMA_IT_SHARD: "2/3",
+      });
+      await waitForLog(runner.log, "bun-test-child ran");
+      const bunTest = readFileSync(runner.log, "utf8")
+        .split("\n")
+        .find((l) => l.startsWith("bun test "));
+      expect(bunTest).toContain("tests/integration --shard=2/3 --timings=");
+      expect(bunTest).not.toContain("--update-timings");
+      expect(await runner.exited).toBe(0);
+      expect(await runner.output()).toContain("bun test bound: 20 minutes");
+    } finally {
+      await kuma2.close();
+    }
+  }, 30_000);
+
+  // "1/1" is a valid spec that bun runs as a single all-file slice;
+  // it forwards like any shard and the bound treats it as unsharded
+  test("UPTIME_KUMA_IT_SHARD=1/1 forwards --shard=1/1", async () => {
+    runner = startRunner(sb, kuma.port, { UPTIME_KUMA_IT_SHARD: "1/1" });
+    await waitForLog(runner.log, "bun-test-child ran");
+    const bunTest = readFileSync(runner.log, "utf8")
+      .split("\n")
+      .find((l) => l.startsWith("bun test "));
+    expect(bunTest).toContain("tests/integration --shard=1/1 --timings=");
+    expect(bunTest).not.toContain("--update-timings");
+    expect(await runner.exited).toBe(0);
+    expect(await runner.output()).toContain("bun test bound: 35 minutes");
+  }, 30_000);
+
+  // --update-timings rides only an unsharded run on a 2.x image: it is
+  // what refreshes tests/integration/timings.json for the next CI
+  // split, and the table holds 2.x-measured durations
+  test("an unsharded run on a 2.x image records and updates timings", async () => {
+    const kuma2 = await startSetupKuma("2.5.11");
+    try {
+      runner = startRunner(sb, kuma2.port, {
+        UPTIME_KUMA_IT_IMAGE: "louislam/uptime-kuma:2.5.11",
+      });
+      await waitForLog(runner.log, "bun-test-child ran");
+      const bunTest = readFileSync(runner.log, "utf8")
+        .split("\n")
+        .find((l) => l.startsWith("bun test "));
+      expect(bunTest).not.toContain("--shard=");
+      expect(bunTest).toContain("--update-timings");
+      expect(await runner.exited).toBe(0);
+      expect(await runner.output()).toContain("bun test bound: 35 minutes");
+    } finally {
+      await kuma2.close();
+    }
+  }, 30_000);
+
+  // The default image is 1.x: an unsharded run there must not rewrite
+  // the 2.x-measured timings.json and leave the tree dirty
+  test("an unsharded run on the default 1.x image skips the timings refresh", async () => {
+    runner = startRunner(sb, kuma.port, {});
+    await waitForLog(runner.log, "bun-test-child ran");
+    const bunTest = readFileSync(runner.log, "utf8")
+      .split("\n")
+      .find((l) => l.startsWith("bun test "));
+    expect(bunTest).not.toContain("--shard=");
+    expect(bunTest).not.toContain("--update-timings");
+    expect(bunTest).toContain("--timings=");
+    expect(await runner.exited).toBe(0);
+    const out = await runner.output();
+    expect(out).toContain("not refreshing timings.json");
+    expect(out).toContain("bun test bound: 35 minutes");
+  }, 30_000);
+
+  test("invalid UPTIME_KUMA_IT_SHARD values fail fast", async () => {
+    for (const shard of ["", "bogus", "3/2", "0/2"]) {
+      runner = startRunner(sb, kuma.port, { UPTIME_KUMA_IT_SHARD: shard });
+      expect(await runner.exited).toBe(1);
+      expect(await runner.output()).toContain("UPTIME_KUMA_IT_SHARD");
+    }
+  }, 30_000);
+
   test("a timed-out down -v is reaped before the next compose call", async () => {
     runner = startRunner(sb, kuma.port, {
       UPTIME_KUMA_IT_DOWN_TIMEOUT_MS: "200",
@@ -499,4 +589,83 @@ describe("scripts/integration.ts signal handling", () => {
     expect(log).toContain("bun-test-child ran");
     expect(await runner.output()).toContain("could not remove the compose project");
   }, 30_000);
+});
+
+// scripts/integration-limit.ts picks the suite bound from the shard
+// spec's slice count; the shard bound must also outlast the suite's
+// largest per-test timeout — login.test.ts's 2FA test budgets 780s
+// and can start ~2.6 minutes into its shard — and the whole-suite bound
+// must outlast the measured total minus login.test.ts's share plus
+// that file's whole timeout budget, the worst legitimate case the
+// timings.json refresh run lives under, or the runner kills a
+// slow-but-legitimate run before the test's own timeout and its
+// finally cleanup
+describe("scripts/integration-limit.ts", () => {
+  const IT_DIR = join(REPO, "tests", "integration");
+  const timeoutArgs = (path: string) =>
+    [...readFileSync(path, "utf8").matchAll(/\},\s*([\d_]+)\);/g)].map((m) =>
+      Number(m[1]!.replaceAll("_", "")),
+    );
+  const maxTestTimeout = () =>
+    Math.max(
+      ...readdirSync(IT_DIR)
+        .filter((f) => f.endsWith(".test.ts"))
+        .flatMap((f) => timeoutArgs(join(IT_DIR, f))),
+    );
+  const timings = () =>
+    (
+      JSON.parse(readFileSync(join(IT_DIR, "timings.json"), "utf8")) as {
+        files: Record<string, number>;
+      }
+    ).files;
+
+  test("a three-slice shard run gets the per-shard bound", () => {
+    expect(testLimitMs("2/3")).toBe(1_200_000);
+    expect(testLimitMs("3/4")).toBe(1_200_000);
+    expect(SHARD_TEST_LIMIT_MS).toBe(1_200_000);
+  });
+
+  // "1/1" passes shard validation and bun runs every file as one
+  // slice; n <= 2 leaves slices bigger than any the shard bound was
+  // sized against, so those specs — and an unset one — keep the
+  // whole-suite bound
+  test("whole-suite and coarse-slice runs keep the whole-suite bound", () => {
+    expect(testLimitMs(undefined)).toBe(2_100_000);
+    expect(testLimitMs("1/1")).toBe(2_100_000);
+    expect(testLimitMs("1/2")).toBe(2_100_000);
+    expect(testLimitMs("2/2")).toBe(2_100_000);
+    expect(UNSHARDED_TEST_LIMIT_MS).toBe(2_100_000);
+  });
+
+  // login.test.ts's 2FA test declares the suite's largest budget; a
+  // bound below it would kill the shard before the test's own timeout
+  // fires and its finally cleanup runs
+  test("the shard bound outlasts the largest per-test timeout in the suite", () => {
+    expect(maxTestTimeout()).toBe(780_000);
+    expect(SHARD_TEST_LIMIT_MS).toBeGreaterThan(maxTestTimeout());
+  });
+
+  // an unsharded run places every file end to end, so its worst
+  // legitimate case is the measured total minus login.test.ts's
+  // share plus that file's whole declared timeout budget — the 2FA
+  // test's 780s and the wrong-password test's 120s back to back —
+  // and the timings.json refresh run lives under this bound
+  test("the whole-suite bound outlasts the suite's worst legitimate case", () => {
+    const nonLogin = Object.entries(timings())
+      .filter(([f]) => f !== "tests/integration/login.test.ts")
+      .reduce((a, [, v]) => a + v, 0);
+    const loginBudget = timeoutArgs(join(IT_DIR, "login.test.ts")).reduce((a, b) => a + b, 0);
+    expect(UNSHARDED_TEST_LIMIT_MS).toBeGreaterThan(nonLogin + loginBudget);
+  });
+
+  // bun merges --update-timings into the existing table, so entries
+  // for deleted or renamed files would linger and inflate the total
+  // above — pin the table to exactly the files the suite has
+  test("timings.json covers exactly the integration test files", () => {
+    const expected = readdirSync(IT_DIR)
+      .filter((f) => f.endsWith(".test.ts"))
+      .map((f) => `tests/integration/${f}`)
+      .sort();
+    expect(Object.keys(timings()).sort()).toEqual(expected);
+  });
 });

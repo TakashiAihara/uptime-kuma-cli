@@ -11,6 +11,13 @@
  * scripts/build.ts, then runs `bun test tests/integration` with
  * UPTIME_KUMA_IT_* pointing at it and UPTIME_KUMA_IT_BIN at that binary, so
  * the suite exercises the compiled artifact rather than only runCli.
+ * UPTIME_KUMA_IT_SHARD="<i>/<n>" forwards the spec to `bun test --shard` so
+ * CI legs each run a slice of the file list; --timings reads the measured
+ * per-file durations in tests/integration/timings.json to balance the
+ * split by time rather than file count, and unsharded runs on a 2.x
+ * image add --update-timings to refresh that file (a sharded write
+ * would keep only the shard's own entries, and a 1.x run would
+ * overwrite the 2.x-measured table).
  * `down -v` (which also removes the
  * anonymous data volume) always runs before `up`, clearing a project left by
  * UPTIME_KUMA_IT_KEEP=1 or a killed run when the port matches — the project
@@ -23,10 +30,11 @@ import { join } from "node:path";
 
 import { io, type Socket } from "socket.io-client";
 
-import { TEST_LIMIT_MS } from "./integration-limit.ts";
+import { testLimitMs } from "./integration-limit.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..");
 const COMPOSE_FILE = join(REPO_ROOT, "tests", "integration", "compose.yaml");
+const TIMINGS_FILE = join(REPO_ROOT, "tests", "integration", "timings.json");
 const PORT = process.env.UPTIME_KUMA_IT_PORT || "3901";
 const PROJECT = `uptime-kuma-cli-it-${PORT}`;
 const BASE_URL = `http://127.0.0.1:${PORT}`;
@@ -69,6 +77,26 @@ if (process.env.UPTIME_KUMA_IT_IMAGE === "") {
 }
 // The major version an image tag names, or undefined for tags like `latest`.
 const IMAGE_MAJOR = /:(\d+)(?=[.\-@]|$)/.exec(process.env.UPTIME_KUMA_IT_IMAGE ?? "")?.[1];
+
+// UPTIME_KUMA_IT_SHARD is bun's --shard spec ("<i>/<n>"); unset runs every
+// file. An empty value is a mistyped CI matrix key, and a malformed or
+// out-of-range spec would only fail deep inside `bun test` — reject both
+// here like the empty image.
+const SHARD_ENV = process.env.UPTIME_KUMA_IT_SHARD;
+if (SHARD_ENV === "") {
+  console.error("UPTIME_KUMA_IT_SHARD is set but empty");
+  process.exit(1);
+}
+const SHARD = /^([0-9]+)\/([0-9]+)$/.exec(SHARD_ENV ?? "");
+if (
+  SHARD_ENV !== undefined &&
+  (SHARD === null || Number(SHARD[1]) < 1 || Number(SHARD[1]) > Number(SHARD[2]))
+) {
+  console.error(`UPTIME_KUMA_IT_SHARD must be "<i>/<n>" with 1 <= i <= n, got "${SHARD_ENV}"`);
+  process.exit(1);
+}
+const SHARD_SPEC = SHARD === null ? undefined : `${Number(SHARD[1])}/${Number(SHARD[2])}`;
+const TEST_LIMIT_MS = testLimitMs(SHARD_SPEC);
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -188,11 +216,25 @@ async function setupKuma(): Promise<string> {
 let testProc: Child | undefined;
 
 async function runTests(kumaVersion: string): Promise<number> {
-  console.log("running bun test tests/integration");
+  const args = ["test", "tests/integration"];
+  if (SHARD_SPEC !== undefined) args.push(`--shard=${SHARD_SPEC}`);
+  args.push(`--timings=${TIMINGS_FILE}`);
+  // --update-timings under --shard writes only that shard's files and
+  // drops the rest, so shard runs read the table for balancing without
+  // rewriting it. timings.json holds 2.x-measured durations, so only an
+  // unsharded run on a 2.x image refreshes it — a 1.x run would
+  // overwrite the table with faster numbers and leave the tree dirty
+  const refreshTimings =
+    SHARD_SPEC === undefined && IMAGE_MAJOR !== undefined && Number(IMAGE_MAJOR) >= 2;
+  if (refreshTimings) args.push("--update-timings");
+  else if (SHARD_SPEC === undefined)
+    console.log("not refreshing timings.json: UPTIME_KUMA_IT_IMAGE is not a 2.x tag");
+  console.log(`bun test bound: ${TEST_LIMIT_MS / 60_000} minutes`);
+  console.log(`running bun ${args.join(" ")}`);
   // detached gives the test run its own process group so a signal (or the
   // timeout below) reaches the compiled-binary grandchildren the suite
   // spawns, not just the bun test wrapper.
-  const proc = Bun.spawn(["bun", "test", "tests/integration"], {
+  const proc = Bun.spawn(["bun", ...args], {
     cwd: REPO_ROOT,
     detached: true,
     env: {

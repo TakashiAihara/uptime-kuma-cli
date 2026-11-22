@@ -133,13 +133,14 @@ jobs:
 
   integration:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 27
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
         image: [louislam/uptime-kuma:1.23.17, louislam/uptime-kuma:2.5.11]
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -149,3 +150,4 @@ jobs:
       - run: bun run test:integration
         env:
           UPTIME_KUMA_IT_IMAGE: ${{ matrix.image }}
+          UPTIME_KUMA_IT_SHARD: ${{ matrix.shard }}/3
