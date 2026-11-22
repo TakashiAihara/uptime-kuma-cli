@@ -207,16 +207,32 @@ describe("coderabbit-review.yml gate", () => {
     expect(gate().if).toContain(`'${CODERABBIT_CONTEXT}'`);
   });
 
-  // pull_request_target and the status events CodeRabbit triggers can evaluate the
-  // same head at once; without per-head serialization a stale run can overwrite a
-  // newer gate status and leave the required check pending forever
+  // status events can evaluate the same head at once — CodeRabbit posts several
+  // statuses per review — and a dispatch can re-evaluate any sha; without
+  // per-head serialization a stale run can overwrite a newer gate status and
+  // leave the required check pending forever
   test("serializes runs per head SHA and lets the newest evaluation win", () => {
     const concurrency = gate().concurrency;
 
     expect(concurrency?.["cancel-in-progress"]).toBe(true);
-    expect(concurrency?.group).toContain("pull_request.head.sha");
     expect(concurrency?.group).toContain("inputs.sha");
     expect(concurrency?.group).toContain("event.sha");
+    expect(concurrency?.group).not.toContain("pull_request");
+  });
+
+  // #124: a pull_request-scoped run attaches its `gate` check-run to the PR
+  // head while `status` runs attach theirs to the default branch; sharing the
+  // per-sha concurrency group let a status run cancel the PR run and leave a
+  // cancelled check on the head. The required `coderabbit-review` status is
+  // published through the API onto the event's own commit, so only
+  // repo-scoped triggers may exist — a PR-scoped one would put a check-run
+  // back on the head for a status run to cancel.
+  test("only repo-scoped triggers run, so no check-run lands on a PR head", () => {
+    const doc = Bun.YAML.parse(read("coderabbit-review.yml")) as {
+      on: Record<string, unknown>;
+    };
+
+    expect(Object.keys(doc.on).sort()).toEqual(["status", "workflow_dispatch"]);
   });
 
   // the job runs with statuses: write; if checkout ever resolves a PR ref the
