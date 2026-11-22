@@ -63,7 +63,8 @@ describe.skipIf(!process.env.UPTIME_KUMA_IT_URL)("notifications (real Kuma)", ()
       type: "webhook",
       isDefault: false,
       applyExisting: false,
-      webhookURL: "http://***@127.0.0.1:9/",
+      // webhook urls are bearer credentials — the whole value prints "***"
+      webhookURL: "***",
       webhookContentType: "json",
       webhookAdditionalHeaders: "***",
     });

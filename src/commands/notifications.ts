@@ -30,11 +30,14 @@ function configType(row: NotificationRow): unknown {
 
 // The stored config is the whole object the provider reads; the bean adds
 // id, active and isDefault. A stray copy a --set stored loses to the row's
-// value, and a config that predates isDefault still reports the column.
+// value — isDefault included, since the column coerces falsy config values
+// the stored JSON keeps verbatim — and a config that predates isDefault
+// still reports the column.
 function notificationObject(row: NotificationRow): Record<string, unknown> {
   const config = storedConfig(row);
   delete config.id;
   delete config.active;
+  delete config.isDefault;
   return { id: row.id, active: row.active, isDefault: row.isDefault, ...config };
 }
 
@@ -52,13 +55,19 @@ const SECRET_FIELD_NAME = /(?:password|passwd|secret|token|pass|key|credentials?
 // because the credential sits inside the URL itself.
 const SECRET_FIELDS = new Set([
   "accessKeyId",
+  "appriseURL",
+  "barkEndpoint",
   "bitrix24WebhookURL",
+  "callMeBotEndpoint",
   "discordWebhookUrl",
   "fluxerWebhookUrl",
   "googleSheetsWebhookUrl",
   "halowebhookurl",
   "heiiOnCallTriggerId",
+  "pagerdutyIntegrationUrl",
+  "pagertreeIntegrationUrl",
   "phonenumber",
+  "pingletPublishUrl",
   "sender",
   "smtpAdditionalHeaders",
   "splunkRestURL",
@@ -69,20 +78,68 @@ const SECRET_FIELDS = new Set([
 ]);
 
 // URL-valued fields print through redactUrl like a monitor url — userinfo
-// is masked, the rest stays readable. The suffix covers the *URL / *Url /
-// *url, *Endpoint, *Addr and *Server spellings providers use; ntfyIcon and
-// the Nostr relays list hold URLs without one of them.
+// is masked, the rest stays readable — except webhook urls: a webhook url
+// is a bearer credential by design (slackwebhookURL, discordWebhookUrl,
+// the generic webhookURL and friends all carry the token in the path), so
+// those print "***" like other secrets. The suffix covers the *URL / *Url
+// / *url, *Endpoint, *Addr and *Server spellings providers use; ntfyIcon
+// holds an icon URL without one of them.
 const URL_FIELD_NAME = /(?:url|uri|endpoint|addr|server)$/i;
-const URL_FIELDS = new Set(["ntfyIcon", "relays"]);
+const URL_FIELDS = new Set(["ntfyIcon"]);
+
+function isWebhookUrlField(key: string): boolean {
+  return key.toLowerCase().includes("webhook") && URL_FIELD_NAME.test(key);
+}
+
+// Query parameters named like secrets (?token=, ?key=) are masked too —
+// redactUrl only covers userinfo.
+const SECRET_QUERY_PARAM = /pass|secret|token|key|auth|sig|credential/i;
+
+function redactNotificationUrl(value: unknown): unknown {
+  const redacted = redactUrl(value);
+  if (typeof redacted !== "string") return redacted;
+  let parsed: URL;
+  try {
+    parsed = new URL(redacted);
+  } catch {
+    return redacted;
+  }
+  if (parsed.search === "") return redacted;
+  const params = new URLSearchParams(parsed.search);
+  let changed = false;
+  for (const key of params.keys()) {
+    if (SECRET_QUERY_PARAM.test(key)) {
+      params.set(key, "***");
+      changed = true;
+    }
+  }
+  if (!changed) return redacted;
+  parsed.search = params.toString();
+  return parsed.toString();
+}
+
+// Nostr's relays is a newline-separated url list, not one url — redact each
+// line on its own (a whole-string parse would fold later urls into the
+// first one's path and leak their userinfo).
+function redactRelays(value: unknown): unknown {
+  if (typeof value !== "string") return redactNotificationUrl(value);
+  return value
+    .split("\n")
+    .map((line) => redactNotificationUrl(line))
+    .join("\n");
+}
 
 function redactNotificationConfig(config: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(config)) {
-    if (SECRET_FIELDS.has(key) || SECRET_FIELD_NAME.test(key)) {
+    if (SECRET_FIELDS.has(key) || SECRET_FIELD_NAME.test(key) || isWebhookUrlField(key)) {
       // presence, not type: --config-file may store any JSON value
       out[key] = value === undefined || value === null || value === "" ? value : "***";
+    } else if (key === "relays") {
+      out[key] = redactRelays(value);
     } else {
-      out[key] = URL_FIELDS.has(key) || URL_FIELD_NAME.test(key) ? redactUrl(value) : value;
+      out[key] =
+        URL_FIELDS.has(key) || URL_FIELD_NAME.test(key) ? redactNotificationUrl(value) : value;
     }
   }
   return out;

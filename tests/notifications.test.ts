@@ -117,29 +117,71 @@ describe("notifications", () => {
         webhookAdditionalHeaders: '{"Authorization":"Bearer hdr-tok-123"}',
         webhookCustomBody: '{"a":1}',
         discordWebhookUrl: "https://discord.com/api/webhooks/1/dsc-tok-456",
+        slackwebhookURL: "https://hooks.slack.com/services/T/B/sl-tok-789",
+        gotifyserverurl: "https://gotify.example.com/hook?token=gt-tok-1&foo=bar",
         ntfyIcon: "https://example.com/icon.png",
         pushoverapptoken: "",
       }),
     });
     const r = await run(sb, ["notifications", "get", "7"], creds(kuma.url));
     expect(r.code).toBe(0);
-    // the row's id / active win over copies stored inside the config
+    // the row's id / active / isDefault win over copies stored inside the config
     expect(r.json()).toEqual({
       id: 7,
       active: true,
       isDefault: false,
       name: "hooks",
       type: "webhook",
-      webhookURL: "https://***@example.com/hook",
+      // a webhook url is a bearer credential — it prints "***", not just
+      // its userinfo; other urls keep the readable form with userinfo and
+      // secret-named query params masked
+      webhookURL: "***",
       webhookAdditionalHeaders: "***",
       webhookCustomBody: "***",
       discordWebhookUrl: "***",
+      slackwebhookURL: "***",
+      gotifyserverurl: "https://gotify.example.com/hook?token=***&foo=bar",
       ntfyIcon: "https://example.com/icon.png",
       pushoverapptoken: "",
     });
     expect(r.stdout).not.toContain("s3cr3t-pw");
     expect(r.stdout).not.toContain("hdr-tok-123");
     expect(r.stdout).not.toContain("dsc-tok-456");
+    expect(r.stdout).not.toContain("sl-tok-789");
+    expect(r.stdout).not.toContain("gt-tok-1");
+  });
+
+  test("get masks userinfo in every url of a newline-separated relays list", async () => {
+    kuma.state.notifications.push({
+      id: 9,
+      name: "nostr",
+      active: true,
+      isDefault: false,
+      userId: 1,
+      config: JSON.stringify({
+        type: "nostr",
+        relays: "wss://public.example/\nwss://user:rlay-pw@private.example/\nnot a url",
+      }),
+    });
+    const r = await run(sb, ["notifications", "get", "9"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json().relays).toBe("wss://public.example/\nwss://***@private.example/\nnot a url");
+    expect(r.stdout).not.toContain("rlay-pw");
+  });
+
+  test("get reports the row's isDefault over a divergent copy in the config", async () => {
+    kuma.state.notifications.push({
+      id: 10,
+      name: "diverged",
+      active: true,
+      isDefault: false,
+      userId: 1,
+      // the bean column coerces falsy values the stored json keeps verbatim
+      config: JSON.stringify({ type: "ntfy", isDefault: null }),
+    });
+    const r = await run(sb, ["notifications", "get", "10"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json().isDefault).toBe(false);
   });
 
   test("get of an unknown id exits 1", async () => {
