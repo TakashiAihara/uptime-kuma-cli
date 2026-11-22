@@ -6,11 +6,7 @@ import { join, resolve } from "node:path";
 
 import { Server } from "socket.io";
 
-import {
-  SHARD_TEST_LIMIT_MS,
-  testLimitMs,
-  UNSHARDED_TEST_LIMIT_MS,
-} from "../scripts/integration-limit.ts";
+import { TEST_LIMIT_MS } from "../scripts/integration-limit.ts";
 import { sandbox, type Sandbox } from "./helpers/run";
 
 const REPO = resolve(import.meta.dir, "..");
@@ -551,11 +547,11 @@ describe("scripts/integration.ts signal handling", () => {
   }, 30_000);
 });
 
-// scripts/integration-limit.ts picks the suite bound from the shard
-// spec's slice count; the bound must also outlast the largest
-// per-test timeout any integration file declares — login.test.ts's
-// 2FA test budgets 780s — or the runner kills a slow-but-legitimate
-// shard before that test's own timeout and its finally cleanup
+// scripts/integration-limit.ts holds the runner's hang backstop; it
+// must outlast the suite's largest per-test timeout — login.test.ts's
+// 2FA test budgets 780s and can start ~3 minutes into its shard — and
+// the measured suite total, or the runner kills a slow-but-legitimate
+// run before the test's own timeout and its finally cleanup
 describe("scripts/integration-limit.ts", () => {
   const IT_DIR = join(REPO, "tests", "integration");
   const maxTestTimeout = () =>
@@ -568,26 +564,26 @@ describe("scripts/integration-limit.ts", () => {
           ),
         ),
     );
+  const measuredSuiteMs = () => {
+    const timings = JSON.parse(readFileSync(join(IT_DIR, "timings.json"), "utf8")) as {
+      files: Record<string, number>;
+    };
+    return Object.values(timings.files).reduce((a, b) => a + b, 0);
+  };
 
-  test("a multi-slice shard run gets the per-shard bound", () => {
-    expect(testLimitMs("2/3")).toBe(900_000);
-    expect(SHARD_TEST_LIMIT_MS).toBe(900_000);
-  });
-
-  // "1/1" passes shard validation and bun runs every file as one
-  // slice, so it must keep the whole-suite bound like an unset spec
-  test("a run covering the whole suite keeps the whole-suite bound", () => {
-    expect(testLimitMs(undefined)).toBe(1_080_000);
-    expect(testLimitMs("1/1")).toBe(1_080_000);
-    expect(UNSHARDED_TEST_LIMIT_MS).toBe(1_080_000);
+  test("the bound is the documented 18 minutes", () => {
+    expect(TEST_LIMIT_MS).toBe(1_080_000);
   });
 
   // login.test.ts's 2FA test declares the suite's largest budget; a
   // bound below it would kill the shard before the test's own timeout
   // fires and its finally cleanup runs
-  test("both bounds outlast the largest per-test timeout in the suite", () => {
+  test("the bound outlasts the largest per-test timeout in the suite", () => {
     expect(maxTestTimeout()).toBe(780_000);
-    expect(SHARD_TEST_LIMIT_MS).toBeGreaterThan(maxTestTimeout());
-    expect(UNSHARDED_TEST_LIMIT_MS).toBeGreaterThan(maxTestTimeout());
+    expect(TEST_LIMIT_MS).toBeGreaterThan(maxTestTimeout());
+  });
+
+  test("the bound outlasts the measured suite total in timings.json", () => {
+    expect(TEST_LIMIT_MS).toBeGreaterThan(measuredSuiteMs());
   });
 });

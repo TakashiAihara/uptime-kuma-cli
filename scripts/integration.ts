@@ -29,7 +29,7 @@ import { join } from "node:path";
 
 import { io, type Socket } from "socket.io-client";
 
-import { testLimitMs } from "./integration-limit.ts";
+import { TEST_LIMIT_MS } from "./integration-limit.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..");
 const COMPOSE_FILE = join(REPO_ROOT, "tests", "integration", "compose.yaml");
@@ -95,7 +95,6 @@ if (
   process.exit(1);
 }
 const SHARD_SPEC = SHARD === null ? undefined : `${Number(SHARD[1])}/${Number(SHARD[2])}`;
-const TEST_LIMIT_MS = testLimitMs(SHARD_SPEC);
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
