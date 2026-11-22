@@ -32,12 +32,15 @@ function configType(row: NotificationRow): unknown {
 // id, active and isDefault. A stray copy a --set stored loses to the row's
 // value — isDefault included, since the column coerces falsy config values
 // the stored JSON keeps verbatim — and a config that predates isDefault
-// still reports the column.
+// still reports the column. applyExisting is an add-time flag, not
+// configuration: edit forces it false anyway, and printing it would break
+// the get -> edit --config-file round trip (edit refuses the key).
 function notificationObject(row: NotificationRow): Record<string, unknown> {
   const config = storedConfig(row);
   delete config.id;
   delete config.active;
   delete config.isDefault;
+  delete config.applyExisting;
   return { id: row.id, active: row.active, isDefault: row.isDefault, ...config };
 }
 
@@ -103,15 +106,25 @@ function isRedactableKey(key: string): boolean {
 }
 
 // Query parameters named like secrets (?token=, ?key=) are masked too —
-// redactUrl only covers userinfo. The mask runs on the raw string so a
-// value new URL() would reject (a bad port, say) cannot smuggle ?token=
-// past it either.
-const SECRET_QUERY_VALUE =
-  /([?&][^=&#]*?(?:pass|secret|token|key|auth|sig|credential)[^=&#]*)=[^&#]*/gi;
+// redactUrl only covers userinfo. Names are percent-decoded before the
+// test (a server decodes them the same way) while the original spelling
+// stays in the output, and the scan runs on the raw string so a value
+// new URL() would reject cannot smuggle ?token= past it either.
+const SECRET_QUERY_NAME = /pass|secret|token|key|auth|sig|credential/i;
+const QUERY_PARAM = /([?&])([^=&#]*)=([^&#]*)/g;
 
 function redactNotificationUrl(value: unknown): unknown {
   const redacted = redactUrl(value);
-  return typeof redacted === "string" ? redacted.replace(SECRET_QUERY_VALUE, "$1=***") : redacted;
+  if (typeof redacted !== "string") return redacted;
+  return redacted.replace(QUERY_PARAM, (match, sep: string, name: string) => {
+    let decoded = name;
+    try {
+      decoded = decodeURIComponent(name.replaceAll("+", " "));
+    } catch {
+      // a malformed escape stays raw — it cannot hide a secret word
+    }
+    return SECRET_QUERY_NAME.test(decoded) ? `${sep}${name}=***` : match;
+  });
 }
 
 // Nostr's relays is a newline-separated url list, not one url — redact each

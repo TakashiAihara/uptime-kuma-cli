@@ -121,6 +121,9 @@ describe("notifications", () => {
         gotifyserverurl: "https://gotify.example.com/hook?token=gt-tok-1&foo=bar",
         ntfyIcon: "https://example.com/icon.png",
         pushoverapptoken: "",
+        // an add-time flag stored in the config is not printed — edit
+        // refuses the key, so a get -> edit round trip must not carry it
+        applyExisting: true,
       }),
     });
     const r = await run(sb, ["notifications", "get", "7"], creds(kuma.url));
@@ -149,6 +152,7 @@ describe("notifications", () => {
     expect(r.stdout).not.toContain("dsc-tok-456");
     expect(r.stdout).not.toContain("sl-tok-789");
     expect(r.stdout).not.toContain("gt-tok-1");
+    expect(r.json()).not.toHaveProperty("applyExisting");
   });
 
   test("get masks secret query params even when the url does not parse", async () => {
@@ -167,6 +171,24 @@ describe("notifications", () => {
     expect(r.code).toBe(0);
     expect(r.json().gotifyserverurl).toBe("https://gotify.example.com:bad/?token=***&foo=bar");
     expect(r.stdout).not.toContain("gt-tok-2");
+  });
+
+  test("get masks a percent-encoded secret query param name", async () => {
+    kuma.state.notifications.push({
+      id: 12,
+      name: "encoded",
+      active: true,
+      isDefault: false,
+      userId: 1,
+      config: JSON.stringify({
+        type: "gotify",
+        gotifyserverurl: "https://gotify.example.com/?%74oken=enc-tok-3&safe=1",
+      }),
+    });
+    const r = await run(sb, ["notifications", "get", "12"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json().gotifyserverurl).toBe("https://gotify.example.com/?%74oken=***&safe=1");
+    expect(r.stdout).not.toContain("enc-tok-3");
   });
 
   test("get masks userinfo in every url of a newline-separated relays list", async () => {
