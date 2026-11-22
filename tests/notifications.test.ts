@@ -151,6 +151,24 @@ describe("notifications", () => {
     expect(r.stdout).not.toContain("gt-tok-1");
   });
 
+  test("get masks secret query params even when the url does not parse", async () => {
+    kuma.state.notifications.push({
+      id: 11,
+      name: "badport",
+      active: true,
+      isDefault: false,
+      userId: 1,
+      config: JSON.stringify({
+        type: "gotify",
+        gotifyserverurl: "https://gotify.example.com:bad/?token=gt-tok-2&foo=bar",
+      }),
+    });
+    const r = await run(sb, ["notifications", "get", "11"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json().gotifyserverurl).toBe("https://gotify.example.com:bad/?token=***&foo=bar");
+    expect(r.stdout).not.toContain("gt-tok-2");
+  });
+
   test("get masks userinfo in every url of a newline-separated relays list", async () => {
     kuma.state.notifications.push({
       id: 9,
@@ -353,6 +371,33 @@ describe("notifications", () => {
       type: "ntfy",
     });
     expect(r.stdout).not.toContain(SECRET);
+  });
+
+  test("edit ignores the redacted values a get -> --config-file round trip carries", async () => {
+    const f = join(sb.dir, "roundtrip.json");
+    writeFileSync(
+      f,
+      JSON.stringify({
+        id: 99,
+        active: false,
+        name: "ntfy home",
+        type: "ntfy",
+        ntfyPassword: "***",
+        ntfyserverurl: "https://***@ntfy.example.com",
+        ntfytopic: "home2",
+      }),
+    );
+    const r = await run(sb, ["notifications", "edit", "3", "--config-file", f], creds(kuma.url));
+    expect(r.code).toBe(0);
+    const sent = kuma.calls.find((c) => c.event === "addNotification")!.args[0] as any;
+    expect(sent).toMatchObject({
+      ntfyPassword: SECRET,
+      ntfyserverurl: "https://ntfy.example.com",
+      ntfytopic: "home2",
+      applyExisting: false,
+    });
+    expect(sent).not.toHaveProperty("id");
+    expect(sent).not.toHaveProperty("active");
   });
 
   test("edit without --set or --config-file exits 2 before connecting", async () => {

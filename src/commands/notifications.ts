@@ -91,31 +91,27 @@ function isWebhookUrlField(key: string): boolean {
   return key.toLowerCase().includes("webhook") && URL_FIELD_NAME.test(key);
 }
 
+function isSecretKey(key: string): boolean {
+  return SECRET_FIELDS.has(key) || SECRET_FIELD_NAME.test(key) || isWebhookUrlField(key);
+}
+
+// Every field get masks or rewrites — a "***" secret, a userinfo- or
+// query-masked url, a relays line — must not ride a get -> edit
+// --config-file round trip back over the stored value.
+function isRedactableKey(key: string): boolean {
+  return isSecretKey(key) || key === "relays" || URL_FIELDS.has(key) || URL_FIELD_NAME.test(key);
+}
+
 // Query parameters named like secrets (?token=, ?key=) are masked too —
-// redactUrl only covers userinfo.
-const SECRET_QUERY_PARAM = /pass|secret|token|key|auth|sig|credential/i;
+// redactUrl only covers userinfo. The mask runs on the raw string so a
+// value new URL() would reject (a bad port, say) cannot smuggle ?token=
+// past it either.
+const SECRET_QUERY_VALUE =
+  /([?&][^=&#]*?(?:pass|secret|token|key|auth|sig|credential)[^=&#]*)=[^&#]*/gi;
 
 function redactNotificationUrl(value: unknown): unknown {
   const redacted = redactUrl(value);
-  if (typeof redacted !== "string") return redacted;
-  let parsed: URL;
-  try {
-    parsed = new URL(redacted);
-  } catch {
-    return redacted;
-  }
-  if (parsed.search === "") return redacted;
-  const params = new URLSearchParams(parsed.search);
-  let changed = false;
-  for (const key of params.keys()) {
-    if (SECRET_QUERY_PARAM.test(key)) {
-      params.set(key, "***");
-      changed = true;
-    }
-  }
-  if (!changed) return redacted;
-  parsed.search = params.toString();
-  return parsed.toString();
+  return typeof redacted === "string" ? redacted.replace(SECRET_QUERY_VALUE, "$1=***") : redacted;
 }
 
 // Nostr's relays is a newline-separated url list, not one url — redact each
@@ -132,7 +128,7 @@ function redactRelays(value: unknown): unknown {
 function redactNotificationConfig(config: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(config)) {
-    if (SECRET_FIELDS.has(key) || SECRET_FIELD_NAME.test(key) || isWebhookUrlField(key)) {
+    if (isSecretKey(key)) {
       // presence, not type: --config-file may store any JSON value
       out[key] = value === undefined || value === null || value === "" ? value : "***";
     } else if (key === "relays") {
@@ -190,6 +186,11 @@ export function registerNotifications(program: Command): void {
       const sets = parseSets(opts.set as string[] | undefined);
       const fileConfig =
         opts.configFile === undefined ? {} : readJsonFile(opts.configFile, "--config-file");
+      // id / active are bean columns get prints, not config fields
+      delete fileConfig.id;
+      delete fileConfig.active;
+      delete sets.id;
+      delete sets.active;
       // Flags win only when given; otherwise the config file and --set may still turn
       // isDefault / applyExisting on, and both default to false
       const notification: Record<string, unknown> = {
@@ -224,6 +225,19 @@ export function registerNotifications(program: Command): void {
         opts.configFile === undefined ? {} : readJsonFile(opts.configFile, "--config-file");
       if ("applyExisting" in fileConfig) {
         fail(2, "applyExisting cannot be set on edit; use notifications add --apply-existing");
+      }
+      // id / active are bean columns get prints, not config — and a
+      // get -> --config-file round trip would otherwise write them, plus
+      // the "***" / masked urls get prints for secrets, into the stored
+      // config. Dropping those overrides keeps the stored values.
+      for (const source of [fileConfig, sets]) {
+        delete source.id;
+        delete source.active;
+        for (const [key, value] of Object.entries(source)) {
+          if (typeof value === "string" && value.includes("***") && isRedactableKey(key)) {
+            delete source[key];
+          }
+        }
       }
       const s = await connect();
       const id = s.resolveNotificationId(rawId);
