@@ -615,13 +615,13 @@ describe("ci.yml mutation job comment upsert", () => {
   });
 
   // A superseded run must not overwrite the newer run's comment. The runs
-  // list does not expose the PR number, so each newer run on the head branch
-  // is checked individually; only a run belonging to this PR that is still
-  // in progress can silence the fallback. For finished runs the comment
-  // itself is the signal: every upsert stamps the posting run's id into the
-  // body, and only a marker newer than this run's id counts as fresher
-  // news — a deferred or cancelled run leaves a successful step but no
-  // marker, and an older run posting late must not pass for the latest
+  // list exposes each run's pull_requests and status, so one query counts
+  // newer same-PR runs that are still in progress; only those can silence
+  // the fallback. For finished runs the comment itself is the signal:
+  // every upsert stamps the posting run's id into the body, and only a
+  // marker newer than this run's id counts as fresher news — a deferred or
+  // cancelled run leaves a successful step but no marker, and an older run
+  // posting late must not pass for the latest
   test("the fallback is skipped only when fresher news is in flight or posted", () => {
     const run = upsert().run ?? "";
 
@@ -630,7 +630,7 @@ describe("ci.yml mutation job comment upsert", () => {
     expect(run).toContain("pull_requests");
     expect(run).toContain("env.PR");
     expect(run).toContain("head_repository.full_name");
-    expect(run).toContain('"$status" != "completed"');
+    expect(run).toContain('(.status // "completed") != "completed"');
     expect(run).toContain("<!-- mutation-run: (?<rid>[0-9]+) -->");
     expect(run).toContain('"$commented" -gt "$GITHUB_RUN_ID"');
     expect(run).toContain('--arg rid "$GITHUB_RUN_ID"');
@@ -691,7 +691,6 @@ fi
 file=""
 case "$endpoint" in
   */actions/workflows/ci.yml/runs) file="$FAKE_DIR/runs.json" ;;
-  */actions/runs/*) id="\${endpoint#*/actions/runs/}"; file="$FAKE_DIR/run-$id.json" ;;
   */issues/*/comments*) file="$FAKE_DIR/comments.json" ;;
   *) printf '{}\\n'; exit 0 ;;
 esac
@@ -703,7 +702,7 @@ if [ -n "$jqexpr" ]; then jq "$jqexpr" "$file"; else cat "$file"; fi
   // comment: null = no marker comment, "unmarked" = a comment predating the
   // run-id marker, a number = the run id the comment was posted under
   type CommentSpec = number | "unmarked" | null;
-  type Options = { failRunsList?: boolean; failComments?: boolean };
+  type Options = { failRunsList?: boolean; failComments?: boolean; withReport?: boolean };
 
   const commentFixture = (spec: CommentSpec) => {
     if (spec === null) return [];
@@ -726,24 +725,23 @@ if [ -n "$jqexpr" ]; then jq "$jqexpr" "$file"; else cat "$file"; fi
     mkdirSync(caseDir);
     writeFileSync(join(binDir, "gh"), GH_STUB, { mode: 0o755 });
     writeFileSync(join(caseDir, "upsert.sh"), upsertRun());
+    if (options.withReport) {
+      writeFileSync(
+        join(caseDir, "mutation-report.md"),
+        "<!-- mutation-testing -->\nREAL MUTATION REPORT\n",
+      );
+    }
     writeFileSync(
       join(caseDir, "runs.json"),
       JSON.stringify({
         workflow_runs: newer.map((r) => ({
           id: r.id,
           head_repository: { full_name: REPO },
+          pull_requests: [{ number: r.pr }],
+          status: r.status,
         })),
       }),
     );
-    for (const r of newer) {
-      writeFileSync(
-        join(caseDir, `run-${r.id}.json`),
-        JSON.stringify({
-          pull_requests: [{ number: r.pr }],
-          status: r.status,
-        }),
-      );
-    }
     writeFileSync(join(caseDir, "comments.json"), JSON.stringify(commentFixture(comment)));
     if (options.failRunsList) writeFileSync(join(caseDir, "fail-runs"), "");
     if (options.failComments) writeFileSync(join(caseDir, "fail-comments"), "");
@@ -772,102 +770,115 @@ if [ -n "$jqexpr" ]; then jq "$jqexpr" "$file"; else cat "$file"; fi
     const calls = existsSync(callsLog) ? readFileSync(callsLog, "utf8") : "";
     return {
       exitCode: result.exitCode,
-      posted:
+      fallbackWritten:
         existsSync(reportPath) &&
         readFileSync(reportPath, "utf8").includes("The mutation run produced no report"),
       commented: /-X (POST|PATCH)/.test(calls),
       stamped: calls.includes(`mutation-run: ${OUR_RUN}`),
+      guardRan: calls.includes("actions/workflows"),
+      calls,
     };
   };
 
-  const cases: [string, NewerRun[], CommentSpec, Options, boolean][] = [
-    ["no newer run posts the fallback", [], null, {}, true],
-    [
-      "an in-progress run for this PR silences the fallback",
-      [{ id: 200, pr: 136, status: "in_progress" }],
-      null,
-      {},
-      false,
-    ],
-    [
-      "a newer run for another PR does not silence the fallback",
-      [{ id: 200, pr: 137, status: "in_progress" }],
-      null,
-      {},
-      true,
-    ],
-    [
-      "a comment stamped by a newer run silences the fallback",
-      [{ id: 200, pr: 136, status: "completed" }],
-      200,
-      {},
-      false,
-    ],
-    [
-      "a comment stamped by an older run does not silence the fallback",
-      [{ id: 200, pr: 136, status: "completed" }],
-      50,
-      {},
-      true,
-    ],
-    [
-      "a legacy comment without a run marker does not silence the fallback",
-      [{ id: 200, pr: 136, status: "completed" }],
-      "unmarked",
-      {},
-      true,
-    ],
-    [
-      "a newer run that finished without posting does not silence it",
-      [{ id: 200, pr: 136, status: "completed" }],
-      null,
-      {},
-      true,
-    ],
-    [
-      "a run deferred to one that never notified still posts",
-      [
+  type Case = {
+    name: string;
+    newer: NewerRun[];
+    comment: CommentSpec;
+    options?: Options;
+    expectPost: boolean;
+    expectFallback?: boolean;
+  };
+
+  const cases: Case[] = [
+    { name: "no newer run posts the fallback", newer: [], comment: null, expectPost: true },
+    {
+      name: "an in-progress run for this PR silences the fallback",
+      newer: [{ id: 200, pr: 136, status: "in_progress" }],
+      comment: null,
+      expectPost: false,
+    },
+    {
+      name: "a newer run for another PR does not silence the fallback",
+      newer: [{ id: 200, pr: 137, status: "in_progress" }],
+      comment: null,
+      expectPost: true,
+    },
+    {
+      name: "a comment stamped by a newer run silences the fallback",
+      newer: [{ id: 200, pr: 136, status: "completed" }],
+      comment: 200,
+      expectPost: false,
+    },
+    {
+      name: "a comment stamped by an older run does not silence the fallback",
+      newer: [{ id: 200, pr: 136, status: "completed" }],
+      comment: 50,
+      expectPost: true,
+    },
+    {
+      name: "a legacy comment without a run marker does not silence the fallback",
+      newer: [{ id: 200, pr: 136, status: "completed" }],
+      comment: "unmarked",
+      expectPost: true,
+    },
+    {
+      name: "a newer run that finished without posting does not silence it",
+      newer: [{ id: 200, pr: 136, status: "completed" }],
+      comment: null,
+      expectPost: true,
+    },
+    {
+      name: "a run deferred to one that never notified still posts",
+      newer: [
         { id: 200, pr: 136, status: "completed" },
         { id: 300, pr: 136, status: "completed" },
       ],
-      null,
-      {},
-      true,
-    ],
-    [
-      "an in-progress run for another PR does not hide a dead newer run",
-      [
+      comment: null,
+      expectPost: true,
+    },
+    {
+      name: "an in-progress run for another PR does not hide a dead newer run",
+      newer: [
         { id: 200, pr: 136, status: "completed" },
         { id: 300, pr: 137, status: "in_progress" },
       ],
-      null,
-      {},
-      true,
-    ],
-    [
-      "a failed runs lookup still posts the fallback",
-      [{ id: 200, pr: 136, status: "in_progress" }],
-      null,
-      { failRunsList: true },
-      true,
-    ],
-    [
-      "a failed comments lookup still posts the fallback",
-      [{ id: 200, pr: 136, status: "completed" }],
-      200,
-      { failComments: true },
-      true,
-    ],
+      comment: null,
+      expectPost: true,
+    },
+    {
+      name: "a failed runs lookup still posts the fallback",
+      newer: [{ id: 200, pr: 136, status: "in_progress" }],
+      comment: null,
+      options: { failRunsList: true },
+      expectPost: true,
+    },
+    {
+      name: "a failed comments lookup still posts the fallback",
+      newer: [{ id: 200, pr: 136, status: "completed" }],
+      comment: 200,
+      options: { failComments: true },
+      expectPost: true,
+    },
+    {
+      name: "a produced report posts without consulting the guard",
+      newer: [{ id: 200, pr: 136, status: "in_progress" }],
+      comment: 200,
+      options: { withReport: true },
+      expectPost: true,
+      expectFallback: false,
+    },
   ];
 
-  for (const [name, newer, comment, options, expectPost] of cases) {
-    test(name, () => {
-      const got = outcome(newer, comment, options);
+  for (const c of cases) {
+    test(c.name, () => {
+      const got = outcome(c.newer, c.comment, c.options);
 
       expect(got.exitCode).toBe(0);
-      expect(got.posted).toBe(expectPost);
-      expect(got.commented).toBe(expectPost);
-      expect(got.stamped).toBe(expectPost);
+      expect(got.commented).toBe(c.expectPost);
+      expect(got.stamped).toBe(c.expectPost);
+      expect(got.fallbackWritten).toBe(c.expectFallback ?? c.expectPost);
+      expect(got.guardRan).toBe(!c.options?.withReport);
+      if (c.options?.withReport) expect(got.calls).toContain("REAL MUTATION REPORT");
     });
   }
 });
