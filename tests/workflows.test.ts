@@ -568,6 +568,7 @@ describe("ci.yml mutation job comment upsert", () => {
             steps: {
               name?: string;
               if?: string;
+              shell?: string;
               env?: Record<string, string>;
               run?: string;
             }[];
@@ -591,6 +592,9 @@ describe("ci.yml mutation job comment upsert", () => {
     expect(step.if).toContain("always()");
     expect(step.if).toContain("head.repo.full_name");
     expect(step.if).not.toContain("cancelled()");
+    // the guard pipes gh api into jq; the default `bash -e` shell has no
+    // pipefail, so a failed lookup could still produce output
+    expect(step.shell).toBe("bash");
     expect(step.env?.HEAD_REF).toBe("${{ github.head_ref }}");
     expect(step.env?.PR).toBe("${{ github.event.pull_request.number }}");
   });
@@ -631,6 +635,11 @@ describe("ci.yml mutation job comment upsert", () => {
     expect(run).toContain('"$commented" -gt "$GITHUB_RUN_ID"');
     expect(run).toContain('--arg rid "$GITHUB_RUN_ID"');
     expect(run).toContain('mutation-run: " + $rid + " -->"');
+    // runs must be sampled before comments: a completed run has already
+    // finished its upsert, so its marker is guaranteed visible afterwards
+    expect(run.indexOf("actions/workflows/ci.yml/runs")).toBeLessThan(
+      run.indexOf("issues/$PR/comments"),
+    );
     expect(run.indexOf("actions/workflows/ci.yml/runs")).toBeLessThan(
       run.indexOf("The mutation run produced no report"),
     );
@@ -675,7 +684,7 @@ case "$endpoint" in
       exit 1
     fi ;;
 esac
-if [ -f "$FAKE_DIR/fail-runs" ] && [ "$endpoint" = "repos/\${REPO}/actions/workflows/ci.yml/runs" ]; then
+if [ -f "$FAKE_DIR/fail-runs" ] && [[ "$endpoint" == */actions/workflows/ci.yml/runs ]]; then
   printf '{"message":"Not Found","status":"404"}'
   exit 1
 fi
@@ -837,7 +846,7 @@ if [ -n "$jqexpr" ]; then jq "$jqexpr" "$file"; else cat "$file"; fi
     ],
     [
       "a failed runs lookup still posts the fallback",
-      [{ id: 200, pr: 136, status: "completed" }],
+      [{ id: 200, pr: 136, status: "in_progress" }],
       null,
       { failRunsList: true },
       true,

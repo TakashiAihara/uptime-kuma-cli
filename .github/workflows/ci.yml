@@ -114,6 +114,9 @@ jobs:
         # posing as current. The script stays silent only when fresher news
         # is on its way or already posted — see the guard in the run block.
         if: always() && github.event.pull_request.head.repo.full_name == github.repository
+        # bash gives -eo pipefail: without it a failed gh api can still let
+        # the jq side of the comment lookup succeed on gh's error JSON
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.pull_request.number }}
@@ -122,27 +125,23 @@ jobs:
           report=mutation-report.md
           if [ ! -f "$report" ]; then
             # Only a newer run for this same pull request can carry fresher
-            # news to the comment. The runs list does not expose the PR
-            # number, so each newer run on the head branch is checked
-            # individually; runs belonging to other PRs opened from the same
-            # branch do not count. A newer run silences the fallback while
-            # it is still in progress — it will reach its own upsert step —
-            # or once the comment carries a newer run's marker, meaning a
-            # newer run already posted. A run that finished without posting
-            # (cancelled before its upsert step ran, or deferred to a run
-            # that itself never notified) leaves no marker behind, and an
-            # older run posting late carries an older id, so neither can be
-            # mistaken for fresher news. Lookup failures still post: a
-            # possibly stale comment is corrected by the next run, a
-            # missing one never is.
-            if ! commented=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments?per_page=100" --paginate \
-              --jq '[.[] | select(.user.login == "github-actions[bot]" and (.body | contains("<!-- mutation-testing -->"))) | .body | capture("<!-- mutation-run: (?<rid>[0-9]+) -->")? | .rid | tonumber] | max // 0' \
-              | jq -s 'max // 0'); then
-              commented=0
-            fi
-            if [ "$commented" -gt "$GITHUB_RUN_ID" ]; then
-              exit 0
-            fi
+            # news to the comment. Runs are checked before comments on
+            # purpose: a run that already completed has finished its upsert
+            # step, so its marker is visible to the comment read that
+            # follows — reading them the other way around leaves a window
+            # where a just-finished run's post is overwritten by this
+            # fallback. The runs list does not expose the PR number, so each
+            # newer run on the head branch is checked individually; runs
+            # belonging to other PRs opened from the same branch do not
+            # count. A newer run silences the fallback while it is still in
+            # progress — it will reach its own upsert step — or once the
+            # comment carries a newer run's marker, meaning a newer run
+            # already posted. A run that finished without posting (cancelled
+            # before its upsert step ran, or deferred to a run that itself
+            # never notified) leaves no marker behind, and an older run
+            # posting late carries an older id, so neither can be mistaken
+            # for fresher news. Lookup failures still post: a possibly stale
+            # comment is corrected by the next run, a missing one never is.
             if ! candidates=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
               --method GET \
               -f branch="$HEAD_REF" \
@@ -165,6 +164,14 @@ jobs:
                 exit 0
               fi
             done
+            if ! commented=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments?per_page=100" --paginate \
+              --jq '[.[] | select(.user.login == "github-actions[bot]" and (.body | contains("<!-- mutation-testing -->"))) | .body | capture("<!-- mutation-run: (?<rid>[0-9]+) -->")? | .rid | tonumber] | max // 0' \
+              | jq -s '[.[] | numbers] | max // 0'); then
+              commented=0
+            fi
+            if [ "$commented" -gt "$GITHUB_RUN_ID" ]; then
+              exit 0
+            fi
             {
               echo '<!-- mutation-testing -->'
               echo ''
