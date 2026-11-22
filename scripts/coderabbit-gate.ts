@@ -11,8 +11,8 @@
  * completed" and "No files to review", `pending` while a review is queued or
  * running or has not reported yet, `failure` for every other terminal outcome,
  * with a pointer to `@coderabbitai review`. The workflow re-runs on every
- * CodeRabbit status change and on pull_request_target, so the gate follows the
- * review without polling.
+ * CodeRabbit status change (and on manual dispatch for any sha), so the gate
+ * follows the review without polling.
  */
 
 export const GATE_CONTEXT = "coderabbit-review";
