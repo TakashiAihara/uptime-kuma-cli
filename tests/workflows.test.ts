@@ -613,10 +613,11 @@ describe("ci.yml mutation job comment upsert", () => {
   // A superseded run must not overwrite the newer run's comment. The runs
   // list does not expose the PR number, so each newer run on the head branch
   // is checked individually; only a run belonging to this PR that is still
-  // in progress can silence the fallback, and a finished run counts only
-  // once the comment itself has moved past this run's start — a run
-  // cancelled or deferred before it posted leaves no trace in its step
-  // status, so the comment timestamp is the signal
+  // in progress can silence the fallback. For finished runs the comment
+  // itself is the signal: every upsert stamps the posting run's id into the
+  // body, and only a marker newer than this run's id counts as fresher
+  // news — a deferred or cancelled run leaves a successful step but no
+  // marker, and an older run posting late must not pass for the latest
   test("the fallback is skipped only when fresher news is in flight or posted", () => {
     const run = upsert().run ?? "";
 
@@ -626,8 +627,10 @@ describe("ci.yml mutation job comment upsert", () => {
     expect(run).toContain("env.PR");
     expect(run).toContain("head_repository.full_name");
     expect(run).toContain('"$status" != "completed"');
-    expect(run).toContain("run_started_at");
-    expect(run).toContain("updated_at");
+    expect(run).toContain("<!-- mutation-run: (?<rid>[0-9]+) -->");
+    expect(run).toContain('"$commented" -gt "$GITHUB_RUN_ID"');
+    expect(run).toContain('--arg rid "$GITHUB_RUN_ID"');
+    expect(run).toContain('mutation-run: " + $rid + " -->"');
     expect(run.indexOf("actions/workflows/ci.yml/runs")).toBeLessThan(
       run.indexOf("The mutation run produced no report"),
     );
@@ -640,9 +643,7 @@ describe("ci.yml mutation job comment upsert", () => {
 // Skipped where jq is missing; CI runners always have it.
 const jqPath = Bun.which("jq");
 (jqPath ? describe : describe.skip)("ci.yml mutation upsert guard behavior", () => {
-  const OUR_STARTED = "2026-01-10T00:00:00Z";
-  const FRESH = "2026-01-11T00:00:00Z";
-  const STALE = "2026-01-09T00:00:00Z";
+  const OUR_RUN = 100;
 
   const upsertRun = () => {
     const doc = Bun.YAML.parse(read("ci.yml")) as {
@@ -654,16 +655,27 @@ const jqPath = Bun.which("jq");
   };
 
   // Mirrors gh api: dispatches on the endpoint, applies --jq with real jq,
-  // prints gh's error body on stdout with a failing exit status
+  // prints gh's error body on stdout with a failing exit status, and appends
+  // any --input payload to the call log so tests can see the posted body
   const GH_STUB = `#!/usr/bin/env bash
 echo "$*" >> "$GH_LOG"
-endpoint=""; jqexpr=""; prev=""
+endpoint=""; jqexpr=""; input=""; prev=""
 for a in "$@"; do
   [ "$prev" = "--jq" ] && jqexpr="$a"
+  [ "$prev" = "--input" ] && input="$a"
   case "$a" in repos/*) endpoint="$a" ;; esac
   prev="$a"
 done
-if [ -f "$FAKE_DIR/fail-runs" ] && [ "$endpoint" = "repos/${REPO}/actions/workflows/ci.yml/runs" ]; then
+if [ -n "$input" ] && [ -f "$input" ]; then cat "$input" >> "$GH_LOG"; fi
+case "$endpoint" in
+  */issues/*/comments*)
+    if [ -f "$FAKE_DIR/fail-comments" ]; then
+      rm -f "$FAKE_DIR/fail-comments"
+      printf '{"message":"Not Found","status":"404"}'
+      exit 1
+    fi ;;
+esac
+if [ -f "$FAKE_DIR/fail-runs" ] && [ "$endpoint" = "repos/\${REPO}/actions/workflows/ci.yml/runs" ]; then
   printf '{"message":"Not Found","status":"404"}'
   exit 1
 fi
@@ -679,7 +691,24 @@ if [ -n "$jqexpr" ]; then jq "$jqexpr" "$file"; else cat "$file"; fi
 `;
 
   type NewerRun = { id: number; pr: number; status: string };
-  const outcome = (newer: NewerRun[], commentUpdatedAt: string | null, failRunsList = false) => {
+  // comment: null = no marker comment, "unmarked" = a comment predating the
+  // run-id marker, a number = the run id the comment was posted under
+  type CommentSpec = number | "unmarked" | null;
+  type Options = { failRunsList?: boolean; failComments?: boolean };
+
+  const commentFixture = (spec: CommentSpec) => {
+    if (spec === null) return [];
+    const rid = spec === "unmarked" ? "" : `\n\n<!-- mutation-run: ${spec} -->`;
+    return [
+      {
+        id: 7,
+        user: { login: "github-actions[bot]" },
+        body: `<!-- mutation-testing --> report${rid}`,
+      },
+    ];
+  };
+
+  const outcome = (newer: NewerRun[], comment: CommentSpec, options: Options = {}) => {
     const dir = mkdtempSync(join(tmpdir(), "mut-upsert-"));
     const binDir = join(dir, "bin");
     const caseDir = join(dir, "case");
@@ -688,14 +717,6 @@ if [ -n "$jqexpr" ]; then jq "$jqexpr" "$file"; else cat "$file"; fi
     mkdirSync(caseDir);
     writeFileSync(join(binDir, "gh"), GH_STUB, { mode: 0o755 });
     writeFileSync(join(caseDir, "upsert.sh"), upsertRun());
-    writeFileSync(
-      join(caseDir, "run-100.json"),
-      JSON.stringify({
-        run_started_at: OUR_STARTED,
-        created_at: OUR_STARTED,
-        status: "completed",
-      }),
-    );
     writeFileSync(
       join(caseDir, "runs.json"),
       JSON.stringify({
@@ -714,22 +735,9 @@ if [ -n "$jqexpr" ]; then jq "$jqexpr" "$file"; else cat "$file"; fi
         }),
       );
     }
-    writeFileSync(
-      join(caseDir, "comments.json"),
-      JSON.stringify(
-        commentUpdatedAt === null
-          ? []
-          : [
-              {
-                id: 7,
-                user: { login: "github-actions[bot]" },
-                body: "<!-- mutation-testing --> old",
-                updated_at: commentUpdatedAt,
-              },
-            ],
-      ),
-    );
-    if (failRunsList) writeFileSync(join(caseDir, "fail-runs"), "");
+    writeFileSync(join(caseDir, "comments.json"), JSON.stringify(commentFixture(comment)));
+    if (options.failRunsList) writeFileSync(join(caseDir, "fail-runs"), "");
+    if (options.failComments) writeFileSync(join(caseDir, "fail-comments"), "");
 
     const result = Bun.spawnSync(
       ["bash", "--noprofile", "--norc", "-eo", "pipefail", "upsert.sh"],
@@ -741,7 +749,7 @@ if [ -n "$jqexpr" ]; then jq "$jqexpr" "$file"; else cat "$file"; fi
           FAKE_DIR: caseDir,
           GH_LOG: callsLog,
           GITHUB_REPOSITORY: REPO,
-          GITHUB_RUN_ID: "100",
+          GITHUB_RUN_ID: String(OUR_RUN),
           GITHUB_SERVER_URL: "https://github.com",
           PR: "136",
           HEAD_REF: "fix/mutation-fallback-timeout",
@@ -759,37 +767,52 @@ if [ -n "$jqexpr" ]; then jq "$jqexpr" "$file"; else cat "$file"; fi
         existsSync(reportPath) &&
         readFileSync(reportPath, "utf8").includes("The mutation run produced no report"),
       commented: /-X (POST|PATCH)/.test(calls),
+      stamped: calls.includes(`mutation-run: ${OUR_RUN}`),
     };
   };
 
-  const cases: [string, NewerRun[], string | null, boolean, boolean][] = [
-    ["no newer run posts the fallback", [], null, false, true],
+  const cases: [string, NewerRun[], CommentSpec, Options, boolean][] = [
+    ["no newer run posts the fallback", [], null, {}, true],
     [
       "an in-progress run for this PR silences the fallback",
       [{ id: 200, pr: 136, status: "in_progress" }],
-      STALE,
-      false,
+      null,
+      {},
       false,
     ],
     [
       "a newer run for another PR does not silence the fallback",
       [{ id: 200, pr: 137, status: "in_progress" }],
-      STALE,
-      false,
+      null,
+      {},
       true,
     ],
     [
-      "a comment moved past this run's start silences the fallback",
+      "a comment stamped by a newer run silences the fallback",
       [{ id: 200, pr: 136, status: "completed" }],
-      FRESH,
+      200,
+      {},
       false,
-      false,
+    ],
+    [
+      "a comment stamped by an older run does not silence the fallback",
+      [{ id: 200, pr: 136, status: "completed" }],
+      50,
+      {},
+      true,
+    ],
+    [
+      "a legacy comment without a run marker does not silence the fallback",
+      [{ id: 200, pr: 136, status: "completed" }],
+      "unmarked",
+      {},
+      true,
     ],
     [
       "a newer run that finished without posting does not silence it",
       [{ id: 200, pr: 136, status: "completed" }],
-      STALE,
-      false,
+      null,
+      {},
       true,
     ],
     [
@@ -798,8 +821,8 @@ if [ -n "$jqexpr" ]; then jq "$jqexpr" "$file"; else cat "$file"; fi
         { id: 200, pr: 136, status: "completed" },
         { id: 300, pr: 136, status: "completed" },
       ],
-      STALE,
-      false,
+      null,
+      {},
       true,
     ],
     [
@@ -808,26 +831,34 @@ if [ -n "$jqexpr" ]; then jq "$jqexpr" "$file"; else cat "$file"; fi
         { id: 200, pr: 136, status: "completed" },
         { id: 300, pr: 137, status: "in_progress" },
       ],
-      STALE,
-      false,
+      null,
+      {},
       true,
     ],
     [
       "a failed runs lookup still posts the fallback",
       [{ id: 200, pr: 136, status: "completed" }],
-      STALE,
+      null,
+      { failRunsList: true },
       true,
+    ],
+    [
+      "a failed comments lookup still posts the fallback",
+      [{ id: 200, pr: 136, status: "completed" }],
+      200,
+      { failComments: true },
       true,
     ],
   ];
 
-  for (const [name, newer, comment, failRunsList, expectPost] of cases) {
+  for (const [name, newer, comment, options, expectPost] of cases) {
     test(name, () => {
-      const got = outcome(newer, comment, failRunsList);
+      const got = outcome(newer, comment, options);
 
       expect(got.exitCode).toBe(0);
       expect(got.posted).toBe(expectPost);
       expect(got.commented).toBe(expectPost);
+      expect(got.stamped).toBe(expectPost);
     });
   }
 });

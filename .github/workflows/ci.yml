@@ -127,20 +127,21 @@ jobs:
             # individually; runs belonging to other PRs opened from the same
             # branch do not count. A newer run silences the fallback while
             # it is still in progress — it will reach its own upsert step —
-            # or once the comment has moved past this run's start, meaning
-            # a run already posted. A run that finished without posting
+            # or once the comment carries a newer run's marker, meaning a
+            # newer run already posted. A run that finished without posting
             # (cancelled before its upsert step ran, or deferred to a run
-            # that itself never notified) cannot be told apart from one
-            # that reported by its step status alone, so the comment's own
-            # timestamp is the signal. Lookup failures still post: a
+            # that itself never notified) leaves no marker behind, and an
+            # older run posting late carries an older id, so neither can be
+            # mistaken for fresher news. Lookup failures still post: a
             # possibly stale comment is corrected by the next run, a
             # missing one never is.
-            if ! started=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq '.run_started_at // .created_at'); then
-              started=''
-            fi
             if ! commented=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments?per_page=100" --paginate \
-              --jq '[.[] | select(.user.login == "github-actions[bot]" and (.body | contains("<!-- mutation-testing -->"))) | .updated_at] | max // ""'); then
-              commented=''
+              --jq '[.[] | select(.user.login == "github-actions[bot]" and (.body | contains("<!-- mutation-testing -->"))) | .body | capture("<!-- mutation-run: (?<rid>[0-9]+) -->")? | .rid | tonumber] | max // 0' \
+              | jq -s 'max // 0'); then
+              commented=0
+            fi
+            if [ "$commented" -gt "$GITHUB_RUN_ID" ]; then
+              exit 0
             fi
             if ! candidates=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
               --method GET \
@@ -149,9 +150,6 @@ jobs:
               -f per_page=100 \
               --jq '[.workflow_runs[] | select(.id > (env.GITHUB_RUN_ID | tonumber) and .head_repository.full_name == env.GITHUB_REPOSITORY) | .id] | sort | reverse'); then
               candidates='[]'
-            fi
-            if [ -n "$started" ] && [ -n "$commented" ] && [[ "$commented" > "$started" ]]; then
-              exit 0
             fi
             for id in $(printf '%s' "$candidates" | jq -r '.[]'); do
               if ! run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id" \
@@ -175,7 +173,7 @@ jobs:
               echo "The mutation run produced no report — the job failed, timed out, or was cancelled. See $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             } > "$report"
           fi
-          jq -n --rawfile body "$report" '{body: $body}' > /tmp/mutation-comment.json
+          jq -n --rawfile body "$report" --arg rid "$GITHUB_RUN_ID" '{body: ($body + "\n\n<!-- mutation-run: " + $rid + " -->")}' > /tmp/mutation-comment.json
           ids=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments?per_page=100" --paginate --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | contains("<!-- mutation-testing -->"))) | .id')
           existing=${ids%%$'\n'*}
           if [ -n "$existing" ]; then
