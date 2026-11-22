@@ -42,7 +42,7 @@ function notificationObject(row: NotificationRow): Record<string, unknown> {
 // value — the same convention as monitor secrets. Every provider's token /
 // password / api-key field on both supported Kuma versions is named that
 // way.
-const SECRET_FIELD_NAME = /(?:password|passwd|secret|token|pass|key|credential)$/i;
+const SECRET_FIELD_NAME = /(?:password|passwd|secret|token|pass|key|credentials?)$/i;
 
 // What the name pattern cannot see: the Nostr sender keypair, the JSON
 // header blocks, the webhook request body, the fields upstream renders as
