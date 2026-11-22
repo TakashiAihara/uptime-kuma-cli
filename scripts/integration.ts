@@ -29,7 +29,7 @@ import { join } from "node:path";
 
 import { io, type Socket } from "socket.io-client";
 
-import { TEST_LIMIT_MS } from "./integration-limit.ts";
+import { testLimitMs } from "./integration-limit.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..");
 const COMPOSE_FILE = join(REPO_ROOT, "tests", "integration", "compose.yaml");
@@ -95,6 +95,7 @@ if (
   process.exit(1);
 }
 const SHARD_SPEC = SHARD === null ? undefined : `${Number(SHARD[1])}/${Number(SHARD[2])}`;
+const TEST_LIMIT_MS = testLimitMs(SHARD_SPEC);
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -219,8 +220,15 @@ async function runTests(kumaVersion: string): Promise<number> {
   args.push(`--timings=${TIMINGS_FILE}`);
   // --update-timings under --shard writes only that shard's files and
   // drops the rest, so shard runs read the table for balancing without
-  // rewriting it; unsharded runs are what refresh it
-  if (SHARD_SPEC === undefined) args.push("--update-timings");
+  // rewriting it. timings.json holds 2.x-measured durations, so only an
+  // unsharded run on a 2.x image refreshes it — a 1.x run would
+  // overwrite the table with faster numbers and leave the tree dirty
+  const refreshTimings =
+    SHARD_SPEC === undefined && IMAGE_MAJOR !== undefined && Number(IMAGE_MAJOR) >= 2;
+  if (refreshTimings) args.push("--update-timings");
+  else if (SHARD_SPEC === undefined)
+    console.log("not refreshing timings.json: UPTIME_KUMA_IT_IMAGE is not a 2.x tag");
+  console.log(`bun test bound: ${TEST_LIMIT_MS / 60_000} minutes`);
   console.log(`running bun ${args.join(" ")}`);
   // detached gives the test run its own process group so a signal (or the
   // timeout below) reaches the compiled-binary grandchildren the suite

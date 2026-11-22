@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 
 import pkg from "../package.json" with { type: "json" };
 import { CODERABBIT_CONTEXT } from "../scripts/coderabbit-gate.ts";
-import { TEST_LIMIT_MS } from "../scripts/integration-limit.ts";
+import { SHARD_TEST_LIMIT_MS } from "../scripts/integration-limit.ts";
 import { TAG_SHAPE } from "../scripts/next-tag.ts";
 
 const WORKFLOWS = ["ci.yml", "coderabbit-review.yml", "release.yml"];
@@ -511,22 +511,25 @@ describe("ci.yml integration job", () => {
   });
 
   // timeout-minutes must cover the runner's own suite bound
-  // (TEST_LIMIT_MS in scripts/integration-limit.ts — every CI leg is
-  // sharded) plus image pull, build, setup and teardown — the 24 the job
-  // sets is that documented budget, and a smaller value could kill the
-  // suite mid-run and lose the runner's own timeout message and the
-  // container logs it dumps; the step keeps no timeout of its own for
-  // the same reason. The pin against TEST_LIMIT_MS requires at least 5
-  // minutes of slack over the bound — a bare `>` would still pass if the
-  // bound grew while setup alone pushes the total past 24.
+  // (SHARD_TEST_LIMIT_MS in scripts/integration-limit.ts — every CI leg
+  // is a three-slice shard) plus image pull, build, setup and teardown —
+  // the 27 the job sets is that documented budget, and a smaller value
+  // could kill the suite mid-run and lose the runner's own timeout
+  // message and the container logs it dumps; the step keeps no timeout
+  // of its own for the same reason. The pin against
+  // SHARD_TEST_LIMIT_MS requires at least 5 minutes of slack over the
+  // bound — a bare `>` would still pass if the bound grew while setup
+  // alone pushes the total past 27.
   // permissions is pinned as the whole object: an added
   // pull-requests or id-token write would otherwise pass while widening
   // the token a job that pulls and runs external images gets
   test("the job is time-boxed over the suite's own budget and read-only", () => {
     const step = testStep();
 
-    expect(job()["timeout-minutes"]).toBe(24);
-    expect(job()["timeout-minutes"]! * 60_000).toBeGreaterThanOrEqual(TEST_LIMIT_MS + 5 * 60_000);
+    expect(job()["timeout-minutes"]).toBe(27);
+    expect(job()["timeout-minutes"]! * 60_000).toBeGreaterThanOrEqual(
+      SHARD_TEST_LIMIT_MS + 5 * 60_000,
+    );
     expect(step["timeout-minutes"]).toBeUndefined();
     expect(job().permissions).toEqual({ contents: "read" });
   });

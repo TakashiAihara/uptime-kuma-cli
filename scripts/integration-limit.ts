@@ -1,12 +1,25 @@
-// Backstop for a hung `bun test` in scripts/integration.ts, shared with
-// tests/workflows.test.ts which pins the CI job's timeout-minutes above
-// it. One bound covers every run mode: the slowest measured shard —
-// monitors.test.ts alone — runs about 8.5-10 min, and the worst
-// legitimate shard is the one holding login.test.ts's 2FA test, whose
-// 13-minute budget can start ~3 minutes into the shard and resolve near
-// 17 minutes; a per-shard bound below that could kill the test before
-// its own timeout and finally cleanup. An unsharded local run measures
-// ~17.5 min on 2.5.11 against the same bound. The CI job allows 24:
-// setup (~2 min) + this bound + the sweep, server log and down -v
-// after it fit inside.
-export const TEST_LIMIT_MS = 18 * 60_000;
+// Shared with tests/workflows.test.ts, which pins the CI job's
+// timeout-minutes above the sharded bound. cliRun paces invocations
+// to 15 logins/min, so the suite's floor grows with its call count;
+// CI runs the suite in three shards per image and the slowest shard —
+// monitors.test.ts alone — measures about 8.5-10 min on 2.5.11. The
+// worst legitimate shard is the one holding login.test.ts's 2FA test,
+// whose 13-minute budget can start ~3 minutes into the shard and
+// resolve near 17-18 minutes, so the shard bound sits at 20.
+export const SHARD_TEST_LIMIT_MS = 20 * 60_000;
+
+// A run covering half the suite or more — unset, a degenerate "1/1",
+// or any "<i>/<n>" with n <= 2 — keeps the whole-suite bound: the
+// unsharded timings.json refresh run measures ~17.5 min on 2.5.11 and
+// needs real headroom to keep working as the suite grows.
+export const UNSHARDED_TEST_LIMIT_MS = 25 * 60_000;
+
+// UPTIME_KUMA_IT_SHARD's "<i>/<n>" picks the bound by n: n > 2 slices
+// the suite fine enough for the per-shard bound; n <= 2 or unset
+// covers half the suite or more and keeps the whole-suite bound. The
+// CI job allows 27: setup (~2 min) + the shard bound + the sweep,
+// server log and down -v after it fit inside.
+export const testLimitMs = (spec: string | undefined) =>
+  spec !== undefined && Number(spec.split("/")[1]) > 2
+    ? SHARD_TEST_LIMIT_MS
+    : UNSHARDED_TEST_LIMIT_MS;
