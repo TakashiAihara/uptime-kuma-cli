@@ -127,6 +127,10 @@ const GITHUB_COMMENT_LIMIT = 65536;
 // Room kept for the "… N more" note and for join newlines the per-line cost
 // estimate does not count exactly.
 const NOTE_RESERVE = 160;
+// The upsert step appends `<!-- mutation-run: <id> -->` (~40 chars) to the
+// posted body after this file is written; the budget must leave room for it
+// or a maximal report would push the comment over GitHub's limit.
+const STAMP_RESERVE = 48;
 
 function survivorItem(s: Survivor): string {
   return `- line ${s.line} — \`${s.slug}\` #${s.id}: \`${clip(s.oldText)}\` → \`${clip(s.newText)}\``;
@@ -137,7 +141,7 @@ function survivorItem(s: Survivor): string {
 function fitSurvivors(files: FileReport[], budget: number): { lines: string[]; omitted: number } {
   const lines: string[] = [];
   let omitted = 0;
-  let used = NOTE_RESERVE;
+  let used = NOTE_RESERVE + STAMP_RESERVE;
   for (const f of files) {
     const header = `**${f.file}**`;
     const items = f.survivors.map(survivorItem);

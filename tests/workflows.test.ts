@@ -720,6 +720,7 @@ if [ -n "$jqexpr" ]; then jq "$jqexpr" "$file"; else cat "$file"; fi
     failComments?: boolean;
     withReport?: boolean;
     runsPages?: NewerRun[][];
+    commentPages?: CommentSpec[][];
   };
 
   const commentFixture = (specs: CommentSpec[]) =>
@@ -774,7 +775,12 @@ if [ -n "$jqexpr" ]; then jq "$jqexpr" "$file"; else cat "$file"; fi
       join(caseDir, "runs.json"),
       options.runsPages ? options.runsPages.map(runsPage).join("\n") : runsPage(newer),
     );
-    writeFileSync(join(caseDir, "comments.json"), JSON.stringify(commentFixture(comment)));
+    writeFileSync(
+      join(caseDir, "comments.json"),
+      options.commentPages
+        ? options.commentPages.map((p) => JSON.stringify(commentFixture(p))).join("\n")
+        : JSON.stringify(commentFixture(comment)),
+    );
     if (options.failRunsList) writeFileSync(join(caseDir, "fail-runs"), "");
     if (options.failComments) writeFileSync(join(caseDir, "fail-comments"), "");
 
@@ -820,6 +826,7 @@ if [ -n "$jqexpr" ]; then jq "$jqexpr" "$file"; else cat "$file"; fi
     options?: Options;
     expectPost: boolean;
     expectFallback?: boolean;
+    expectPatchId?: number;
   };
 
   const cases: Case[] = [
@@ -957,6 +964,28 @@ if [ -n "$jqexpr" ]; then jq "$jqexpr" "$file"; else cat "$file"; fi
       expectPost: false,
     },
     {
+      name: "a newer stamp on a later comments page still silences the fallback",
+      newer: [{ id: 200, pr: 136, status: "completed" }],
+      comment: [],
+      options: { commentPages: [[50], [200]] },
+      expectPost: false,
+    },
+    {
+      name: "the upsert re-check takes the newest stamp across comments",
+      newer: [{ id: 200, pr: 136, status: "completed" }],
+      comment: [50, 200],
+      options: { failComments: true },
+      expectPost: false,
+      expectFallback: true,
+    },
+    {
+      name: "posting with several comments patches the first one",
+      newer: [{ id: 200, pr: 136, status: "completed" }],
+      comment: [50, 60],
+      expectPost: true,
+      expectPatchId: 7,
+    },
+    {
       name: "a produced report posts when the newest stamp is older",
       newer: [{ id: 200, pr: 136, status: "completed" }],
       comment: [50],
@@ -998,6 +1027,9 @@ if [ -n "$jqexpr" ]; then jq "$jqexpr" "$file"; else cat "$file"; fi
       }
       if (c.options?.withReport && c.expectPost) {
         expect(got.calls).toContain("REAL MUTATION REPORT");
+      }
+      if (c.expectPatchId !== undefined) {
+        expect(got.calls).toContain(`issues/comments/${c.expectPatchId}`);
       }
     });
   }
