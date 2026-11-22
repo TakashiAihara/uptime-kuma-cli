@@ -117,11 +117,12 @@ function redactNotificationUrl(value: unknown): unknown {
   const redacted = redactUrl(value);
   if (typeof redacted !== "string") return redacted;
   return redacted.replace(QUERY_PARAM, (match, sep: string, name: string) => {
-    let decoded = name;
+    let decoded: string;
     try {
       decoded = decodeURIComponent(name.replaceAll("+", " "));
     } catch {
-      // a malformed escape stays raw — it cannot hide a secret word
+      // an undecodable name cannot be cleared of secret words — mask it
+      return `${sep}${name}=***`;
     }
     return SECRET_QUERY_NAME.test(decoded) ? `${sep}${name}=***` : match;
   });

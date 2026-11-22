@@ -191,6 +191,24 @@ describe("notifications", () => {
     expect(r.stdout).not.toContain("enc-tok-3");
   });
 
+  test("get masks a query param whose name cannot be decoded", async () => {
+    kuma.state.notifications.push({
+      id: 13,
+      name: "badescape",
+      active: true,
+      isDefault: false,
+      userId: 1,
+      config: JSON.stringify({
+        type: "gotify",
+        gotifyserverurl: "https://gotify.example.com/?%74oken%=enc-tok-4",
+      }),
+    });
+    const r = await run(sb, ["notifications", "get", "13"], creds(kuma.url));
+    expect(r.code).toBe(0);
+    expect(r.json().gotifyserverurl).toBe("https://gotify.example.com/?%74oken%=***");
+    expect(r.stdout).not.toContain("enc-tok-4");
+  });
+
   test("get masks userinfo in every url of a newline-separated relays list", async () => {
     kuma.state.notifications.push({
       id: 9,
