@@ -38,7 +38,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: jdx/mise-action@08ae2a091c038e1e05ec6f5115dc5c69d5a2a6b8 # v5.1.2
+      - uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10
       - run: bun install --frozen-lockfile
       - run: bun run check
       # Fails on known vulnerabilities in the locked dependency tree. bun audit
@@ -61,7 +61,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - uses: jdx/mise-action@08ae2a091c038e1e05ec6f5115dc5c69d5a2a6b8 # v5.1.2
+      - uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10
       - run: bun install --frozen-lockfile
       - name: unit tests with lcov coverage
         run: bun test --coverage --coverage-reporter=lcov --coverage-dir=coverage
@@ -98,7 +98,7 @@ jobs:
           # numbers then match the author's files, and the head SHA in the
           # report is a real commit on the PR
           ref: ${{ github.event.pull_request.head.sha }}
-      - uses: jdx/mise-action@08ae2a091c038e1e05ec6f5115dc5c69d5a2a6b8 # v5.1.2
+      - uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10
       # mewt publishes no builds for linux-arm64 or macOS-x64, so it stays out
       # of .mise.toml where `mise install` would fail on those platforms; -g
       # registers it for this job's shims without touching the repo config.
@@ -215,7 +215,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: jdx/mise-action@08ae2a091c038e1e05ec6f5115dc5c69d5a2a6b8 # v5.1.2
+      - uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10
       - run: bun install --frozen-lockfile
       - run: bun run test:integration
         env:
